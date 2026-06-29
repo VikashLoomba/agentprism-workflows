@@ -111,8 +111,7 @@ budgets, the limiter, the run manager + persistence, and the worktree helper. It
 **injected `AgentRunner`** — *not* on `acp-agents` — so it runs against a real ACP runner, a mock,
 or any other backend (exactly how the Pi tests drive it today via `options.agent`). The seam:
 `runWorkflow` accepts `options.agent?: AgentRunner` and only ever calls
-`agentRunner.run(prompt, opts)` (today `Pick<WorkflowAgent,"run">`, [`src/workflow.ts:59`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L59), used at
-`:283`).
+`agentRunner.run(prompt, opts)` (today `Pick<WorkflowAgent,"run">`, [`src/workflow.ts:59`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L59), bound at [`:283`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L283), called at [`:465`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L465)).
 
 ### `mcp-server` — the shell / composition root
 
@@ -199,6 +198,10 @@ The `workflow` tool keeps essentially the same input contract as today
 - `maxAgents` (optional, default 1000), `concurrency` (optional, clamped to 16),
   `agentRetries` (optional, ≤3), `agentTimeoutMs` (optional, default none),
   `tokenBudget` (optional, default none).
+- **Bounds clamp, don't reject:** accept `concurrency`/`agentRetries` as plain numbers in the tool
+  schema — *not* Zod `.max()`, which rejects out-of-range input with `InvalidParams`. The engine
+  already clamps them (`normalizeConcurrency` → `MAX_CONCURRENCY` 16, `normalizeAgentRetries` →
+  `MAX_AGENT_RETRIES` 3), so defer to it and keep the "clamped" semantics above (matches Pi).
 
 **One semantic changes vs. Pi.** MCP tool calls are request/response within the caller's turn;
 there is no "return immediately, deliver the result into a *later* turn" mechanism (that was a
@@ -212,7 +215,7 @@ host calls `workflow` again to continue from the persisted journal (the engine a
 this via `resumeJournal` in `runWorkflow`).
 
 Human-in-the-loop: `checkpoint()` relied on Pi's `ui.confirm`. Over MCP it falls back to the
-headless default (already handled at [`src/workflow.ts:819`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L819)), unless the MCP client supports
+headless default (already handled at [`src/workflow.ts:828`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L828)), unless the MCP client supports
 **elicitation**, which you can wire `checkpoint()` to.
 
 ---
