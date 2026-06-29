@@ -245,9 +245,9 @@ A single agent-server **process hosts many concurrent sessions** (each keyed by 
 Both servers implement a real `sessionId → session` map:
 
 - `claude-agent-acp`: `sessions` map; prompts on **different** sessions run concurrently;
-  prompts **within** one session are queued (`promptQueueing`). (`src/acp-agent.ts`)
+  prompts **within** one session are queued (`promptQueueing`). ([`src/acp-agent.ts`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts))
 - `codex-acp`: `private readonly sessions: Map<string, SessionState>` with per-session prompt
-  state + generation fencing. (`src/CodexAcpServer.ts`)
+  state + generation fencing. ([`src/CodexAcpServer.ts`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/CodexAcpServer.ts))
 
 **Efficient fan-out:** run one (or a few) long-lived server processes and open **N sessions**;
 the engine's `createLimiter` caps real concurrency. You're bound by API rate limits and
@@ -321,7 +321,7 @@ The client passes MCP server configs (stdio mandatory; http/sse optional per cap
 `session/new`; the agent connects to them. This is the **only** client-side tool-injection path
 in ACP (the client does not hand the agent a tool object directly).
 - `claude-agent-acp`: ACP `mcpServers` → SDK `McpServerConfig`, merged with user options
-  (`src/acp-agent.ts:3127-3149`, `:3242`).
+  ([`src/acp-agent.ts:3127-3149`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3127-L3149), [`:3242`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3242)).
 - `codex-acp`: supports stdio + http (rejects `acp`/`sse`).
 Ref: https://agentclientprotocol.com/protocol/v1/session-setup#mcp-servers
 
@@ -381,6 +381,8 @@ const options: Options = {
 };
 ```
 
+> Source (claude-agent-acp): [`acp-agent.ts:3180`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3180), [`:3216`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3216), [`:3220`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3220), [`:3242`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3242).
+
 Client `session/new` payload:
 
 ```jsonc
@@ -406,7 +408,7 @@ and retries; on exhaustion it ends with a terminal subtype:
   | 'error_max_structured_output_retries'
 ```
 
-The adapter already handles that subtype (`src/acp-agent.ts:1763`, mapped to an internal
+The adapter already handles that subtype ([`src/acp-agent.ts:1763`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L1763), mapped to an internal
 error / `max_turn_requests` stop reason).
 
 **(c) Read the result — OUT (the one rough edge).** The parsed object lands in:
@@ -429,11 +431,13 @@ if (session.emitRawSDKMessages && shouldEmitRawMessage(session.emitRawSDKMessage
 }
 ```
 
+> Source (claude-agent-acp): [`acp-agent.ts:357`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L357) (flag), [`:3488`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3488) (wired), [`:1337`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L1337) (forwarded).
+
 So: set `_meta.claudeCode.emitRawSDKMessages = true`, then read `structured_output` off the
 `_claude/sdkMessage` notification carrying the `type:"result", subtype:"success"` message.
 
 **Scope:** **session-scoped** — `outputFormat` is read at `session/new`; `prompt()`
-(`src/acp-agent.ts:1034`) reads no per-turn schema. With the engine's one-session-per-`agent()`
+([`src/acp-agent.ts:1034`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L1034)) reads no per-turn schema. With the engine's one-session-per-`agent()`
 model this is a non-issue (one schema per agent call = one session).
 
 ### 6.3 Codex — `@agentclientprotocol/codex-acp` (Codex App Server)
@@ -449,6 +453,8 @@ outputSchema?: JsonValue | null;
 // src/app-server/SendUserTurnParams.ts:13-16  (v1) — same semantics: outputSchema: JsonValue | null
 ```
 
+> Source (codex-acp): [`TurnStartParams.ts:43-46`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/v2/TurnStartParams.ts#L43-L46), [`SendUserTurnParams.ts:13-16`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/SendUserTurnParams.ts#L13-L16).
+
 **(b) Tool-level — tool defs declare an output schema; results carry structured data:**
 
 ```ts
@@ -458,6 +464,8 @@ outputSchema?: JsonValue | null;
 // src/app-server/v2/McpToolCallResult.ts:6    structuredContent: JsonValue | null
 // src/app-server/v2/McpServerToolCallResponse.ts:6  structuredContent?: JsonValue
 ```
+
+> Source (codex-acp): [`Tool.ts:9`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/Tool.ts#L9), [`ToolOutputSchema.ts:6-10`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/ToolOutputSchema.ts#L6-L10), [`CallToolResult.ts:9`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/CallToolResult.ts#L9), [`McpToolCallResult.ts:6`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/v2/McpToolCallResult.ts#L6), [`McpServerToolCallResponse.ts:6`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/v2/McpServerToolCallResponse.ts#L6).
 
 ### 6.4 Why tool-level structured output is the wrong lever for a *client*
 
