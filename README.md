@@ -131,7 +131,7 @@ MCP involved.
 |---|---|---|
 | Script execution | [`src/workflow.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts) — `runWorkflow`, `vm.createContext`/`vm.Script` (`:835`,`:866`) | Node `vm` realm; globals `agent`/`parallel`/`pipeline`/`phase`/`log`/`budget` injected |
 | Determinism | [`src/workflow.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts) `DETERMINISM_PRELUDE` (`:227`), parse blocklist (`:212`,`:890`) | neuters `Date.now`/`Math.random`/`new Date()` for resume reproducibility |
-| Fan-out | `parallel` (`:555`, barrier), `pipeline` (`:579`, no barrier), `createLimiter` (`:1013`) | concurrency gate |
+| Fan-out | `parallel` (`:555`, barrier), `pipeline` (`:579`, no *inter-stage* barrier — but still `Promise.all`-joins all items at `:588`, so don't drop that on a port), `createLimiter` (`:1013`) | concurrency gate |
 | Journal / resume | [`src/run-persistence.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/run-persistence.ts), journal in [`workflow.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts) (`hashAgentCall` `:1045`, `firstMiss` longest-unchanged-prefix `:407`) | crash recovery + resume |
 | Budget | `budget` object (`:315`), per-phase sub-budgets (`:303`) | soft token gate |
 | Worktree isolation | [`src/worktree.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/worktree.ts) — `git worktree add` per agent | engine creates it (deterministic name) and passes `cwd` to `agent.run({cwd})` |
