@@ -277,7 +277,8 @@ advertises:
   initial precedence `ANTHROPIC_MODEL` env → `settings.model` → SDK default; per-call override
   `_meta.claudeCode.options.model`.
 - `codex-acp`: model encoded as `"model[effort]"` (e.g. `gpt-5.2[high]`) + separate
-  `reasoning_effort` select; switch via `session/setConfigOption`.
+  `reasoning_effort` select; switch via `session/set_config_option` (the wire method;
+  `setConfigOption` is just the ACP SDK's JS accessor for it).
 
 > The **catalog** belongs to the server (Claude models on `claude-agent-acp`, Codex models on
 > `codex-acp`), so cross-**provider** routing = choosing which server; within a provider,
@@ -539,8 +540,13 @@ the unchanged engine.
   intra-session prompts serialize.
 - **Per-turn token-usage breakdown** on `PromptResponse` is still a Draft ACP RFD (servers emit
   it ahead of stabilization). `codex-acp` reports tokens/quota but **no dollar cost**.
-- **`codex-acp` config options** were temporarily disabled for one client build (JetBrains
-  2026.1) — verify config-option availability against the host you target.
+- **`codex-acp` config options are our codex model/tier/effort routing channel** (the model,
+  `reasoning_effort`, and Fast-mode `SessionConfigOption`s, switched via `session/set_config_option`).
+  codex-acp disables them **only** when the connecting client is IntelliJ/JetBrains **and** its
+  `version` starts with `2026.1` (`isJetBrains2026_1Client` → `isSessionConfigEnabled` in
+  `CodexAcpServer.ts`). Since `acp-agents` controls the `clientInfo` it sends at `initialize`, just
+  don't identify as JetBrains/IntelliJ `2026.1` and config options stay enabled — so the gate never
+  affects us. It's independent of structured output, which rides the turn, not config options.
 
 ---
 
