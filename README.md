@@ -443,20 +443,55 @@ model this is a non-issue (one schema per agent call = one session).
 
 ### 6.3 Codex — `@agentclientprotocol/codex-acp` (Codex App Server)
 
-**Supported two ways, and the turn-level path is cleaner (per-turn, at the params level).**
+**The Codex App Server natively constrains the final message AND the shipped binary honors it —
+but the stock codex-acp adapter never forwards a client schema, so Codex structured output needs a
+~1-line adapter patch.** (Verified end-to-end below.)
 
-**(a) Turn-level — constrain the final assistant message:**
+**Protocol declares it (turn-level `outputSchema`):**
 
 ```ts
-// codex-acp  src/app-server/v2/TurnStartParams.ts:43-46
+// codex-acp  src/app-server/v2/TurnStartParams.ts:43-46  — the LIVE path is v2 `turn/start`
 /** Optional JSON Schema used to constrain the final assistant message for this turn. */
 outputSchema?: JsonValue | null;
-// src/app-server/SendUserTurnParams.ts:13-16  (v1) — same semantics: outputSchema: JsonValue | null
+// src/app-server/SendUserTurnParams.ts (v1) is DEAD CODE — the server speaks v2 turn/start only
 ```
 
-> Source (codex-acp): [`TurnStartParams.ts:43-46`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/v2/TurnStartParams.ts#L43-L46), [`SendUserTurnParams.ts:13-16`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/SendUserTurnParams.ts#L13-L16).
+> Source (codex-acp): [`TurnStartParams.ts:43-46`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/v2/TurnStartParams.ts#L43-L46). These TS types are **generated from the codex binary** (`codex app-server generate-ts`).
 
-**(b) Tool-level — tool defs declare an output schema; results carry structured data:**
+**The shipped binary honors it.** codex-acp@1.0.2 ships `@openai/codex@^0.142.4`; verified at tag
+`rust-v0.142.4` (SHA `d0fd966`), the App Server threads `turn/start.outputSchema` all the way into
+the OpenAI Responses API as a **strict** structured-output constraint:
+
+```
+turn/start.output_schema            app-server-protocol/.../v2/turn.rs:143
+  → final_output_json_schema        app-server/.../turn_processor.rs:523   (the handler wires it in)
+  → turn_context.final_output_json_schema   core/.../session/turn_context.rs:780
+  → prompt.output_schema            core/.../session/turn.rs:1109
+  → Responses API (strict)          core/.../client.rs:818-819  (&prompt.output_schema, _strict)
+```
+
+> Source (openai/codex @ `rust-v0.142.4`): [`turn.rs:143`](https://github.com/openai/codex/blob/d0fd96663e19a6cd5d6f315e3420c4d154562013/codex-rs/app-server-protocol/src/protocol/v2/turn.rs#L143), [`turn_processor.rs:523`](https://github.com/openai/codex/blob/d0fd96663e19a6cd5d6f315e3420c4d154562013/codex-rs/app-server/src/request_processors/turn_processor.rs#L523), [`turn_context.rs:780`](https://github.com/openai/codex/blob/d0fd96663e19a6cd5d6f315e3420c4d154562013/codex-rs/core/src/session/turn_context.rs#L780), [`turn.rs:1109`](https://github.com/openai/codex/blob/d0fd96663e19a6cd5d6f315e3420c4d154562013/codex-rs/core/src/session/turn.rs#L1109), [`client.rs:818-819`](https://github.com/openai/codex/blob/d0fd96663e19a6cd5d6f315e3420c4d154562013/codex-rs/core/src/client.rs#L818-L819).
+
+**The gap + the patch.** The stock adapter's `sendPrompt()` builds the `runTurn({…})` call but
+never sets `outputSchema`. Forward it from the prompt's `_meta` (the adapter already reads
+`request._meta` nearby) — a ~1-line patch in [`src/CodexAcpClient.ts`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/CodexAcpClient.ts):
+
+    // inside sendPrompt() → the runTurn({ ... }) call
+    outputSchema: (request._meta as any)?.["agentprism/outputSchema"] ?? null,
+
+`runTurn → turnStart → sendRequest({ method: "turn/start", params })` passes it through verbatim;
+`TurnStartParams.outputSchema` already exists, so it's type-clean.
+
+**Output needs no patch.** `outputSchema` constrains the FINAL assistant message, which already
+flows back over the normal `session/update` agent-message stream — `CodexBackend` reads the final
+text and `JSON.parse`s it. (Cleaner than Claude, which needs `emitRawSDKMessages`.)
+
+**Strict-mode caveat.** `output_schema_strict` is `true` for normal turns, so the schema is sent in
+strict mode — `CodexBackend` must normalize the engine's JSON Schema to OpenAI strict rules (every
+property `required`, `additionalProperties:false`, supported types/keywords only) before sending.
+Keep the validate→re-prompt guard regardless.
+
+**Tool-level structured output also exists, but it's the wrong lever for a client (see §6.4):**
 
 ```ts
 // src/app-server/Tool.ts:9            outputSchema?: JsonValue   (on the tool definition)
@@ -480,14 +515,16 @@ tool.
 ### 6.5 What this means for us
 
 - **Drop the injected `structured_output` tool as the primary path.** The backend constrains
-  natively (stronger than hoping the model calls a tool).
+  natively — **Claude out-of-the-box via `_meta`; Codex after the ~1-line adapter patch (§6.3)** —
+  stronger than hoping the model calls a tool.
 - **Keep `resolveStructuredOutput`'s validate-then-re-prompt ([`src/agent.ts:113`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/agent.ts#L113)) as a guard**,
   because `structured_output` is typed `unknown` and the constraint can still fail
   (`error_max_structured_output_retries`). Ladder: native constraint → client-side validate →
   re-prompt on failure.
 - **Abstract behind a per-backend adapter** — the two paths genuinely differ (Claude:
-  session-scoped vendor `_meta.claudeCode` + `emitRawSDKMessages`; Codex: per-turn
-  `outputSchema` at the params level). Same `run(prompt, { schema })` interface above them.
+  session-scoped vendor `_meta.claudeCode` + `emitRawSDKMessages`, read off the raw message stream;
+  Codex: per-turn `outputSchema` forwarded by a **patched** adapter, read off the normal message
+  stream, with strict-schema normalization). Same `run(prompt, { schema })` interface above them.
 
 ---
 
@@ -532,6 +569,10 @@ the unchanged engine.
   the raw stream to just the `type:"result"` message.
 - **Schema scope (Claude) is per-session** → spin up a fresh ACP session per `agent()` call (or
   per distinct schema). The engine already does one session per call.
+- **Codex structured output needs a codex-acp patch:** the shipped binary (`@openai/codex@0.142.4`,
+  verified at `rust-v0.142.4`) honors `turn/start.outputSchema`, but the stock adapter never forwards
+  it — add the ~1-line `_meta` → `runTurn` forward (§6.3) and normalize schemas to OpenAI **strict**
+  rules. Output rides the normal message stream (no `emitRawSDKMessages` needed).
 - **MCP turn semantics:** no "deliver result into a later turn" — run the `workflow` tool
   synchronously with progress notifications; expose `resumeFromRunId` for continuation.
 - **Cross-provider routing = choose the server.** Per-call model tiering works *within* a
