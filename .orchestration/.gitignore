@@ -1,0 +1,12 @@
+# staged third-party source (re-creatable via stage-sources.sh) — don't commit
+sources/
+sdks/
+node_modules/
+*.tgz
+# per-run worktrees, if any land here
+worktrees/
+# per-run phase handoffs (regenerated each run; kept out of the build commits). ground-truth.json IS tracked.
+phase1-contract.json
+phase2-modules.json
+phase3-integration.json
+phase4-verify.json
