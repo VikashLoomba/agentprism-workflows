@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Build & test (Node 22, ubuntu x64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so Changesets / git-aware tooling has the base ref.
+          fetch-depth: 0
+
+      # pnpm must be installed before setup-node so the `cache: pnpm` step
+      # below can locate the pnpm store.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # --frozen-lockfile re-applies the @agentclientprotocol/codex-acp pnpm
+      # patch via the lockfile patch_hash AND fetches the linux-x64 codex/claude
+      # native binaries. Keep this on an ubuntu (glibc) x64 runner and do NOT
+      # pass --no-optional, or those platform binaries would be skipped.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (project references)
+        run: pnpm -r exec tsc -b
+
+      - name: Typecheck (no emit)
+        run: pnpm -r exec tsc --noEmit
+
+      # AGENTPRISM_LIVE_E2E is intentionally left UNSET here so the gated live
+      # end-to-end test is skipped — this keeps CI deterministic and
+      # credential-free.
+      - name: Test
+        run: pnpm -r test
