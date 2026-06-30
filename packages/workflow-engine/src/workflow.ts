@@ -495,6 +495,9 @@ export async function runWorkflow<T = unknown>(
                 cwd: runCwd,
                 // Additive run input: wires tools, NOT part of the resume identity (hashAgentCall).
                 mcpServers: agentOptions.mcpServers,
+                // Engine run id as an end-to-end correlation stamp on the ACP session/new _meta.
+                // Additive telemetry, NOT part of the resume identity (hashAgentCall).
+                runId,
                 onModelResolved: (id: string) => {
                   displayModel = id;
                 },

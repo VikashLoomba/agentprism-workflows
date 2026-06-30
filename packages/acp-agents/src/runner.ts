@@ -59,6 +59,8 @@ export class AcpAgentRunner implements AgentRunner {
       policy,
       signal: opts.signal,
       mcpServers: opts.mcpServers,
+      // Engine correlation id -> session/new _meta (META_KEYS.runId). Additive; never hashed.
+      runId: opts.runId,
     });
     try {
       opts.signal?.throwIfAborted();
@@ -178,9 +180,13 @@ async function applyModelSelection(session: SessionHandle, opts: AnyRunOptions):
   // `model` wins; `tier` is consulted only when `model` is unset (frozen contract).
   const spec = opts.model ?? opts.tier;
   if (!spec) return;
-  const { matched, resolved } = await session.selectModel(spec);
+  const { matched, resolved, modifierFallbacks } = await session.selectModel(spec);
   if (matched) opts.onModelResolved?.(resolved ?? spec);
   else opts.onModelFallback?.(spec);
+  // Symmetric to model fallback: a requested reasoning_effort / Fast-mode value the catalog
+  // does not advertise is a silent no-op in the session. Surface it on the SAME channel so
+  // incorrect tiering is observable (best-effort — reported, never thrown).
+  for (const fallback of modifierFallbacks ?? []) opts.onModelFallback?.(fallback);
 }
 
 function buildPrompt(prompt: string, opts: AnyRunOptions, structured: boolean): string {

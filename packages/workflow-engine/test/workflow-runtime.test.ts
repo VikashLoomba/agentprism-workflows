@@ -337,6 +337,28 @@ test("runWorkflow plumbs opts.tier through to the agent with correct precedence"
   assert.deepEqual(seen[1], { model: "explicit-model", tier: "small" });
 });
 
+test("runWorkflow threads the engine runId into the agent run options (correlation id)", async () => {
+  // The engine stamps its runId onto every subagent run so the runner can ride it onto the ACP
+  // session/new _meta as an end-to-end correlation id. It is additive telemetry — never part of
+  // the resume identity hash — so the same script run twice does not change its journal hash.
+  const seen: Array<string | undefined> = [];
+  const capturingAgent = {
+    async run(_prompt: string, options: { runId?: string }) {
+      seen.push(options.runId);
+      return "ok";
+    },
+  };
+  const script = `export const meta = { name: 'corr', description: 'correlation' }
+  await agent('one', { label: 'a' })
+  await agent('two', { label: 'b' })
+  return {}`;
+
+  await runWorkflow(script, { agent: capturingAgent, persistLogs: false, runId: "run-CORR-1" });
+
+  // Every subagent in the run sees the same engine runId.
+  assert.deepEqual(seen, ["run-CORR-1", "run-CORR-1"]);
+});
+
 const resumeScript = `export const meta = { name: 'resume_demo', description: 'resume' }
 const a = await agent('first', { label: 'a' })
 const b = await agent('second', { label: 'b' })

@@ -36,12 +36,13 @@ export interface AgentUsage {
  *
  * FIELD NAMES ARE FROZEN: the engine binds these by name through an `as any` cast
  * (workflow.ts:488), so a renamed field would NOT raise a compile error — it would
- * mis-bind at runtime. Engine-passed fields (13): label, schema, signal, instructions,
+ * mis-bind at runtime. Engine-passed core fields (13): label, schema, signal, instructions,
  * model, tier, toolNames, disallowedToolNames, cwd, onModelResolved, onModelFallback,
- * onUsage, onHistory. `maxSchemaRetries` is runner-internal (the engine never passes
- * it). Pi's `tools?: ToolDefinition[]` is DROPPED — a pi-coding-agent type with no ACP
- * analog (ACP injects tools via session/new mcpServers, not this field) and never
- * passed by the engine.
+ * onUsage, onHistory. Plus two ADDITIVE run inputs that wire infrastructure, NOT the logical
+ * call, so neither enters the resume identity hash (hashAgentCall): `mcpServers` and `runId`.
+ * `maxSchemaRetries` is runner-internal (the engine never passes it). Pi's
+ * `tools?: ToolDefinition[]` is DROPPED — a pi-coding-agent type with no ACP analog (ACP
+ * injects tools via session/new mcpServers, not this field) and never passed by the engine.
  */
 export interface RunOptions<S extends TSchema | undefined = undefined> {
   /** Human label for logs/telemetry. NOT part of the resume identity hash. */
@@ -85,6 +86,11 @@ export interface RunOptions<S extends TSchema | undefined = undefined> {
    *  ADDITIVE and NOT part of the resume identity hash (hashAgentCall) — it wires tools,
    *  not the logical call. Omitted/empty => the runner sends `mcpServers: []` (the default). */
   mcpServers?: McpServerConfig[];
+  /** Engine run id, stamped onto the outgoing ACP `session/new` `_meta` under
+   *  META_KEYS.runId as an end-to-end correlation id for tracing/telemetry. ADDITIVE and NOT
+   *  part of the resume identity hash (hashAgentCall) — it correlates, it does not identify the
+   *  logical call. Omitted => no runId `_meta` is stamped. */
+  runId?: string;
 }
 
 /** The result side of the seam: schema => the validated object, no schema => text.
