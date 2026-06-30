@@ -14,11 +14,13 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:codex-vendor": "cd vendor/codex-acp && npm install && npm run build"
   },
   "dependencies": {
     "@agentprism/shared-types": "workspace:*",
     "@agentclientprotocol/sdk": "1.0.0",
+    "@agentclientprotocol/claude-agent-acp": "0.53.0",
     "typebox": "1.3.2"
   }
 }
