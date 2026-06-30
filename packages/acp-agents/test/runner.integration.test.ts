@@ -26,11 +26,14 @@ const TEST_ENV_VARS = [
   "AGENTPRISM_CODEX_ACP_ARGS",
   "AGENTPRISM_FAKE_LOG",
   "AGENTPRISM_FAKE_SCENARIO",
+  "AGENTPRISM_FAKE_CRASH_SENTINEL",
   "AGENTPRISM_DEFAULT_BACKEND",
 ];
 
 interface LogEntry {
   method: string;
+  pid?: number;
+  reason?: string;
   params?: {
     clientInfo?: unknown;
     _meta?: Record<string, unknown> | null;
@@ -39,6 +42,16 @@ interface LogEntry {
     mcpServers?: unknown;
   };
   outcome?: { outcome: string; optionId?: string };
+}
+
+// The runner now POOLS long-lived ACP processes, so each run() leaves a live process behind until
+// the runner is disposed. Track every runner a test builds and dispose them all in afterEach so
+// no pooled process leaks (and the test runner can exit). Assertions are otherwise unchanged.
+const runners: AcpAgentRunner[] = [];
+function makeRunner(): AcpAgentRunner {
+  const runner = new AcpAgentRunner();
+  runners.push(runner);
+  return runner;
 }
 
 /** Point BOTH backends' spawn override at the fake agent and script its behavior. Backend
@@ -52,6 +65,7 @@ function configure(scenario: unknown): { cwd: string; readLog: () => LogEntry[] 
   process.env.AGENTPRISM_CODEX_ACP_ARGS = FIXTURE;
   process.env.AGENTPRISM_FAKE_LOG = log;
   process.env.AGENTPRISM_FAKE_SCENARIO = JSON.stringify(scenario);
+  process.env.AGENTPRISM_FAKE_CRASH_SENTINEL = path.join(dir, "crash.sentinel");
   return {
     cwd: dir,
     readLog: () =>
@@ -65,7 +79,9 @@ function configure(scenario: unknown): { cwd: string; readLog: () => LogEntry[] 
   };
 }
 
-afterEach(() => {
+afterEach(async () => {
+  // Dispose every runner this test built (closes its pooled processes) before clearing env.
+  await Promise.all(runners.splice(0).map((runner) => runner.dispose()));
   for (const key of TEST_ENV_VARS) delete process.env[key];
 });
 
@@ -73,7 +89,7 @@ afterEach(() => {
 
 test("(7) sends benign clientInfo at initialize — NOT JetBrains/IntelliJ 2026.1", async () => {
   const { cwd, readLog } = configure({ turns: [{ text: "ok" }] });
-  await new AcpAgentRunner().run("hi", { model: "anthropic/claude-opus-4-1", cwd });
+  await makeRunner().run("hi", { model: "anthropic/claude-opus-4-1", cwd });
 
   const init = readLog().find((e) => e.method === "initialize");
   assert.ok(init, "initialize was observed by the agent");
@@ -94,7 +110,7 @@ test("(7) sends benign clientInfo at initialize — NOT JetBrains/IntelliJ 2026.
 test("(4) no-schema completion returns the final assistant text; onHistory fires", async () => {
   const { cwd } = configure({ turns: [{ text: ["Hello, ", "world!"] }] });
   const history: unknown[][] = [];
-  const out = await new AcpAgentRunner().run("hi", {
+  const out = await makeRunner().run("hi", {
     model: "claude",
     cwd,
     onHistory: (h) => history.push(h),
@@ -107,7 +123,7 @@ test("(4) no-schema completion returns the final assistant text; onHistory fires
 test("(4) empty no-schema output => AGENT_EMPTY_OUTPUT (recoverable)", async () => {
   const { cwd } = configure({ turns: [{ text: "   " }] }); // whitespace only -> trims to empty
   await assert.rejects(
-    () => new AcpAgentRunner().run("hi", { model: "claude", cwd, label: "empty-agent" }),
+    () => makeRunner().run("hi", { model: "claude", cwd, label: "empty-agent" }),
     (err: unknown) => {
       assert.ok(isWorkflowError(err));
       assert.equal(err.code, WorkflowErrorCode.AGENT_EMPTY_OUTPUT);
@@ -121,7 +137,7 @@ test("(4) empty no-schema output => AGENT_EMPTY_OUTPUT (recoverable)", async () 
 test("(4) provider wall (thrown) => PROVIDER_USAGE_LIMIT (non-recoverable, resetHint)", async () => {
   const { cwd } = configure({ turns: [{ throw: "Subscription usage limit reached. Resets in 2 hours." }] });
   await assert.rejects(
-    () => new AcpAgentRunner().run("hi", { model: "claude", cwd, label: "wall-agent" }),
+    () => makeRunner().run("hi", { model: "claude", cwd, label: "wall-agent" }),
     (err: unknown) => {
       assert.ok(isWorkflowError(err));
       assert.equal(err.code, WorkflowErrorCode.PROVIDER_USAGE_LIMIT);
@@ -136,7 +152,7 @@ test("(4) provider wall (thrown) => PROVIDER_USAGE_LIMIT (non-recoverable, reset
 test("(4) a generic backend fault => recoverable AGENT_EXECUTION_ERROR", async () => {
   const { cwd } = configure({ turns: [{ throw: "ECONNRESET: the agent process died" }] });
   await assert.rejects(
-    () => new AcpAgentRunner().run("hi", { model: "claude", cwd }),
+    () => makeRunner().run("hi", { model: "claude", cwd }),
     (err: unknown) => {
       assert.ok(isWorkflowError(err));
       assert.equal(err.code, WorkflowErrorCode.AGENT_EXECUTION_ERROR);
@@ -150,7 +166,7 @@ test("(4) schema never satisfied after the ladder => SCHEMA_NONCOMPLIANCE (non-r
   const { cwd, readLog } = configure({ turns: [{ text: "I am unable to produce JSON." }] });
   await assert.rejects(
     () =>
-      new AcpAgentRunner().run("give me json", {
+      makeRunner().run("give me json", {
         model: "openai/gpt-5-codex",
         schema: SCHEMA,
         cwd,
@@ -175,7 +191,7 @@ test("(2b) Codex forwards the strict schema via _meta[agentprism/outputSchema] i
   const { cwd, readLog } = configure({
     turns: [{ text: JSON.stringify({ city: "NYC", hot: true }) }],
   });
-  const out = await new AcpAgentRunner().run("weather?", {
+  const out = await makeRunner().run("weather?", {
     model: "openai/gpt-5-codex",
     schema: SCHEMA,
     cwd,
@@ -203,7 +219,7 @@ test("(3b) Claude sets outputFormat+emitRawSDKMessages at session/new and reads 
     turns: [{ text: "Here is the result.", structuredOutput: { city: "LA", hot: false } }],
   });
   const resolved: string[] = [];
-  const out = await new AcpAgentRunner().run("weather?", {
+  const out = await makeRunner().run("weather?", {
     model: "anthropic/claude-opus-4-1",
     schema: SCHEMA,
     cwd,
@@ -231,7 +247,7 @@ test("(5) deny-list denies the tool at request_permission; the run still complet
   const { cwd, readLog } = configure({
     turns: [{ toolCall: { title: "Run Bash", kind: "execute" }, text: "done anyway" }],
   });
-  const out = await new AcpAgentRunner().run("do it", {
+  const out = await makeRunner().run("do it", {
     model: "claude",
     cwd,
     disallowedToolNames: ["bash"],
@@ -246,7 +262,7 @@ test("(5) default policy allows the tool at request_permission", async () => {
   const { cwd, readLog } = configure({
     turns: [{ toolCall: { title: "Read file", kind: "read" }, text: "read it" }],
   });
-  const out = await new AcpAgentRunner().run("do it", { model: "claude", cwd });
+  const out = await makeRunner().run("do it", { model: "claude", cwd });
   assert.equal(out, "read it");
   const outcome = readLog().find((e) => e.method === "permissionOutcome")?.outcome;
   assert.equal(outcome?.optionId, "allow-1");
@@ -271,7 +287,7 @@ test("(6) onUsage fires on SUCCESS with PromptResponse tokens + usage_update cos
     ],
   });
   const seen: AgentUsage[] = [];
-  await new AcpAgentRunner().run("hi", { model: "claude", cwd, onUsage: (u) => seen.push(u) });
+  await makeRunner().run("hi", { model: "claude", cwd, onUsage: (u) => seen.push(u) });
   assert.equal(seen.length, 1);
   assert.deepEqual(seen[0], {
     input: 30,
@@ -293,7 +309,7 @@ test("(6) onUsage fires on the ERROR path too, carrying the usage_update cost se
     ],
   });
   const seen: AgentUsage[] = [];
-  await assert.rejects(() => new AcpAgentRunner().run("hi", { model: "claude", cwd, onUsage: (u) => seen.push(u) }));
+  await assert.rejects(() => makeRunner().run("hi", { model: "claude", cwd, onUsage: (u) => seen.push(u) }));
   assert.equal(seen.length, 1);
   // The prompt rejected (no PromptResponse.usage breakdown), but the usage_update streamed
   // before the wall carried BOTH a cost (0.03) and a token count (used:10) — total reflects
@@ -304,7 +320,7 @@ test("(6) onUsage fires on the ERROR path too, carrying the usage_update cost se
 test("(6) onUsage tolerates usage === undefined: all-zero sentinel when nothing was reported", async () => {
   const { cwd } = configure({ turns: [{ throw: "ECONNRESET" }] }); // no usage_update, no PromptResponse
   const seen: AgentUsage[] = [];
-  await assert.rejects(() => new AcpAgentRunner().run("hi", { model: "claude", cwd, onUsage: (u) => seen.push(u) }));
+  await assert.rejects(() => makeRunner().run("hi", { model: "claude", cwd, onUsage: (u) => seen.push(u) }));
   assert.equal(seen.length, 1);
   assert.deepEqual(seen[0], { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 });
 });
@@ -314,7 +330,7 @@ test("(6) onUsage tolerates usage === undefined: all-zero sentinel when nothing 
 test("(#2) stopReason 'refusal' => non-recoverable AGENT_EXECUTION_ERROR (NOT AGENT_EMPTY_OUTPUT)", async () => {
   const { cwd, readLog } = configure({ turns: [{ stopReason: "refusal" }] }); // no text => would be "empty"
   await assert.rejects(
-    () => new AcpAgentRunner().run("hi", { model: "claude", cwd, label: "refuser" }),
+    () => makeRunner().run("hi", { model: "claude", cwd, label: "refuser" }),
     (err: unknown) => {
       assert.ok(isWorkflowError(err));
       // A refusal is a hard, deterministic failure — recoverable AGENT_EMPTY_OUTPUT would
@@ -335,7 +351,7 @@ test("(#2) refusal on a SCHEMA run is NOT burned through the repair ladder into 
   const { cwd, readLog } = configure({ turns: [{ stopReason: "refusal", text: "I will not." }] });
   await assert.rejects(
     () =>
-      new AcpAgentRunner().run("give me json", {
+      makeRunner().run("give me json", {
         model: "openai/gpt-5-codex",
         schema: SCHEMA,
         cwd,
@@ -360,7 +376,7 @@ test("(#2) stopReason 'max_tokens' => distinct 'output truncated' failure, even 
   });
   await assert.rejects(
     () =>
-      new AcpAgentRunner().run("weather?", {
+      makeRunner().run("weather?", {
         model: "openai/gpt-5-codex",
         schema: SCHEMA,
         cwd,
@@ -382,7 +398,7 @@ test("(#2) stopReason 'max_tokens' => distinct 'output truncated' failure, even 
 test("(#2) stopReason 'max_turn_requests' => 'output truncated' on a no-schema run", async () => {
   const { cwd } = configure({ turns: [{ stopReason: "max_turn_requests", text: "partial answer" }] });
   await assert.rejects(
-    () => new AcpAgentRunner().run("hi", { model: "claude", cwd }),
+    () => makeRunner().run("hi", { model: "claude", cwd }),
     (err: unknown) => {
       assert.ok(isWorkflowError(err));
       assert.equal(err.code, WorkflowErrorCode.AGENT_EXECUTION_ERROR);
@@ -396,7 +412,7 @@ test("(#2) stopReason 'max_turn_requests' => 'output truncated' on a no-schema r
 test("(#2) stopReason 'cancelled' => WORKFLOW_ABORTED", async () => {
   const { cwd } = configure({ turns: [{ stopReason: "cancelled", text: "partial" }] });
   await assert.rejects(
-    () => new AcpAgentRunner().run("hi", { model: "claude", cwd, label: "cancelled-agent" }),
+    () => makeRunner().run("hi", { model: "claude", cwd, label: "cancelled-agent" }),
     (err: unknown) => {
       assert.ok(isWorkflowError(err));
       assert.equal(err.code, WorkflowErrorCode.WORKFLOW_ABORTED);
@@ -407,7 +423,7 @@ test("(#2) stopReason 'cancelled' => WORKFLOW_ABORTED", async () => {
 
 test("(#2) normal stopReason 'end_turn' still returns the assistant text", async () => {
   const { cwd } = configure({ turns: [{ stopReason: "end_turn", text: "all good" }] });
-  const out = await new AcpAgentRunner().run("hi", { model: "claude", cwd });
+  const out = await makeRunner().run("hi", { model: "claude", cwd });
   assert.equal(out, "all good");
 });
 
@@ -441,7 +457,7 @@ test("(#3) a model[effort] spec drives the reasoning_effort config option via se
     turns: [{ text: "ok" }],
   });
   const resolved: string[] = [];
-  const out = await new AcpAgentRunner().run("hi", {
+  const out = await makeRunner().run("hi", {
     model: "openai/gpt-5.1-codex[high]",
     cwd,
     onModelResolved: (m) => resolved.push(m),
@@ -483,7 +499,7 @@ test("(#3) a `fast` bracket token turns the advertised Fast-mode option on", asy
     ],
     turns: [{ text: "ok" }],
   });
-  await new AcpAgentRunner().run("hi", { model: "openai/gpt-5.1-codex[high fast]", cwd });
+  await makeRunner().run("hi", { model: "openai/gpt-5.1-codex[high fast]", cwd });
   const fastSet = readLog().find(
     (e) => e.method === "setSessionConfigOption" && e.params?.configId === "fast-mode",
   );
@@ -516,7 +532,7 @@ test("(#3) a plain effort spec does NOT touch a Fast-mode option that is adverti
     ],
     turns: [{ text: "ok" }],
   });
-  await new AcpAgentRunner().run("hi", { model: "openai/gpt-5.1-codex[high]", cwd });
+  await makeRunner().run("hi", { model: "openai/gpt-5.1-codex[high]", cwd });
   const fastSet = readLog().find(
     (e) => e.method === "setSessionConfigOption" && e.params?.configId === "fast-mode",
   );
@@ -536,7 +552,7 @@ test("(#5) RunOptions.mcpServers reach session/new mcpServers (stdio + http)", a
       headers: [{ name: "Authorization", value: "Bearer xyz" }],
     },
   ];
-  await new AcpAgentRunner().run("hi", { model: "claude", cwd, mcpServers });
+  await makeRunner().run("hi", { model: "claude", cwd, mcpServers });
 
   const newSession = readLog().find((e) => e.method === "newSession");
   assert.ok(newSession, "newSession was observed");
@@ -545,7 +561,7 @@ test("(#5) RunOptions.mcpServers reach session/new mcpServers (stdio + http)", a
 
 test("(#5) mcpServers defaults to [] at session/new when none is provided", async () => {
   const { cwd, readLog } = configure({ turns: [{ text: "ok" }] });
-  await new AcpAgentRunner().run("hi", { model: "claude", cwd });
+  await makeRunner().run("hi", { model: "claude", cwd });
   const newSession = readLog().find((e) => e.method === "newSession");
   assert.deepEqual(newSession?.params?.mcpServers, []);
 });
