@@ -86,3 +86,48 @@ test("both channels combine: tokens from PromptResponse, cost from usage_update"
     cost: 1.25,
   });
 });
+
+test("usage_update token counts populate total when no PromptResponse.usage arrived", () => {
+  // The ONLY token channel that fired is usage_update (used=tokens-in-context). The engine
+  // must see a non-zero total instead of the all-zero "estimate me" sentinel.
+  const acc = new UsageAccumulator();
+  acc.recordContextTokens(1234, 200000);
+  assert.deepEqual(acc.toAgentUsage(), {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 1234,
+    cost: 0,
+  });
+});
+
+test("usage_update tokens + cost combine when PromptResponse.usage is absent", () => {
+  const acc = new UsageAccumulator();
+  acc.recordContextTokens(50, 200000);
+  acc.recordCost({ amount: 0.02, currency: "USD" } as Cost);
+  const u = acc.toAgentUsage();
+  assert.equal(u.total, 50);
+  assert.equal(u.cost, 0.02);
+});
+
+test("authoritative PromptResponse.usage WINS over usage_update context tokens", () => {
+  // When BOTH fired, the per-turn breakdown is authoritative for total (and carries the
+  // input/output/cache split that usage_update cannot provide).
+  const acc = new UsageAccumulator();
+  acc.recordContextTokens(999, 200000); // context tokens (would be the fallback)
+  acc.recordPromptUsage({ totalTokens: 42, inputTokens: 30, outputTokens: 12 });
+  const u = acc.toAgentUsage();
+  assert.equal(u.total, 42); // not 999
+  assert.equal(u.input, 30);
+  assert.equal(u.output, 12);
+});
+
+test("recordContextTokens ignores negative/non-finite used (stays the zero sentinel)", () => {
+  const acc = new UsageAccumulator();
+  acc.recordContextTokens(-5);
+  acc.recordContextTokens(Number.NaN);
+  acc.recordContextTokens(null);
+  acc.recordContextTokens(undefined);
+  assert.equal(acc.toAgentUsage().total, 0);
+});

@@ -13,7 +13,7 @@ import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Type } from "typebox";
-import { isWorkflowError, WorkflowErrorCode, type AgentUsage } from "@agentprism/shared-types";
+import { isWorkflowError, WorkflowErrorCode, type AgentUsage, type McpServerConfig } from "@agentprism/shared-types";
 import { AcpAgentRunner } from "../src/index.js";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
@@ -31,7 +31,13 @@ const TEST_ENV_VARS = [
 
 interface LogEntry {
   method: string;
-  params?: { clientInfo?: unknown; _meta?: Record<string, unknown> | null };
+  params?: {
+    clientInfo?: unknown;
+    _meta?: Record<string, unknown> | null;
+    configId?: string;
+    value?: string;
+    mcpServers?: unknown;
+  };
   outcome?: { outcome: string; optionId?: string };
 }
 
@@ -289,9 +295,10 @@ test("(6) onUsage fires on the ERROR path too, carrying the usage_update cost se
   const seen: AgentUsage[] = [];
   await assert.rejects(() => new AcpAgentRunner().run("hi", { model: "claude", cwd, onUsage: (u) => seen.push(u) }));
   assert.equal(seen.length, 1);
-  // The prompt rejected (no PromptResponse.usage), so tokens are the zero sentinel, but the
-  // cost streamed before the wall is preserved.
-  assert.deepEqual(seen[0], { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0.03 });
+  // The prompt rejected (no PromptResponse.usage breakdown), but the usage_update streamed
+  // before the wall carried BOTH a cost (0.03) and a token count (used:10) — total reflects
+  // the reported tokens (no input/output split is available from usage_update alone).
+  assert.deepEqual(seen[0], { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 10, cost: 0.03 });
 });
 
 test("(6) onUsage tolerates usage === undefined: all-zero sentinel when nothing was reported", async () => {
@@ -300,4 +307,245 @@ test("(6) onUsage tolerates usage === undefined: all-zero sentinel when nothing 
   await assert.rejects(() => new AcpAgentRunner().run("hi", { model: "claude", cwd, onUsage: (u) => seen.push(u) }));
   assert.equal(seen.length, 1);
   assert.deepEqual(seen[0], { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 });
+});
+
+// ---- (#2) stop-reason -> distinct, non-recoverable failures --------------------------
+
+test("(#2) stopReason 'refusal' => non-recoverable AGENT_EXECUTION_ERROR (NOT AGENT_EMPTY_OUTPUT)", async () => {
+  const { cwd, readLog } = configure({ turns: [{ stopReason: "refusal" }] }); // no text => would be "empty"
+  await assert.rejects(
+    () => new AcpAgentRunner().run("hi", { model: "claude", cwd, label: "refuser" }),
+    (err: unknown) => {
+      assert.ok(isWorkflowError(err));
+      // A refusal is a hard, deterministic failure — recoverable AGENT_EMPTY_OUTPUT would
+      // re-run the refused prompt and burn the engine retry budget.
+      assert.equal(err.code, WorkflowErrorCode.AGENT_EXECUTION_ERROR);
+      assert.notEqual(err.code, WorkflowErrorCode.AGENT_EMPTY_OUTPUT);
+      assert.equal(err.recoverable, false);
+      assert.match(err.message, /refus/i);
+      assert.equal(err.agentLabel, "refuser");
+      return true;
+    },
+  );
+  // Surfaced from the first turn; not retried.
+  assert.equal(readLog().filter((e) => e.method === "prompt").length, 1);
+});
+
+test("(#2) refusal on a SCHEMA run is NOT burned through the repair ladder into SCHEMA_NONCOMPLIANCE", async () => {
+  const { cwd, readLog } = configure({ turns: [{ stopReason: "refusal", text: "I will not." }] });
+  await assert.rejects(
+    () =>
+      new AcpAgentRunner().run("give me json", {
+        model: "openai/gpt-5-codex",
+        schema: SCHEMA,
+        cwd,
+        maxSchemaRetries: 3, // 3 repair turns WOULD fire if we entered the ladder
+        label: "schema-refuser",
+      }),
+    (err: unknown) => {
+      assert.ok(isWorkflowError(err));
+      assert.equal(err.code, WorkflowErrorCode.AGENT_EXECUTION_ERROR); // not SCHEMA_NONCOMPLIANCE
+      assert.equal(err.recoverable, false);
+      return true;
+    },
+  );
+  assert.equal(readLog().filter((e) => e.method === "prompt").length, 1); // ladder never ran
+});
+
+test("(#2) stopReason 'max_tokens' => distinct 'output truncated' failure, even when the JSON parses", async () => {
+  // The turn emits perfectly valid schema JSON, but it was TRUNCATED — we must surface that
+  // distinctly, not silently accept a possibly-incomplete object.
+  const { cwd, readLog } = configure({
+    turns: [{ stopReason: "max_tokens", text: JSON.stringify({ city: "NYC", hot: true }) }],
+  });
+  await assert.rejects(
+    () =>
+      new AcpAgentRunner().run("weather?", {
+        model: "openai/gpt-5-codex",
+        schema: SCHEMA,
+        cwd,
+        maxSchemaRetries: 3,
+        label: "trunc",
+      }),
+    (err: unknown) => {
+      assert.ok(isWorkflowError(err));
+      assert.equal(err.code, WorkflowErrorCode.AGENT_EXECUTION_ERROR);
+      assert.equal(err.recoverable, false);
+      assert.match(err.message, /truncat/i);
+      assert.equal(err.agentLabel, "trunc");
+      return true;
+    },
+  );
+  assert.equal(readLog().filter((e) => e.method === "prompt").length, 1); // surfaced immediately
+});
+
+test("(#2) stopReason 'max_turn_requests' => 'output truncated' on a no-schema run", async () => {
+  const { cwd } = configure({ turns: [{ stopReason: "max_turn_requests", text: "partial answer" }] });
+  await assert.rejects(
+    () => new AcpAgentRunner().run("hi", { model: "claude", cwd }),
+    (err: unknown) => {
+      assert.ok(isWorkflowError(err));
+      assert.equal(err.code, WorkflowErrorCode.AGENT_EXECUTION_ERROR);
+      assert.equal(err.recoverable, false);
+      assert.match(err.message, /truncat/i);
+      return true;
+    },
+  );
+});
+
+test("(#2) stopReason 'cancelled' => WORKFLOW_ABORTED", async () => {
+  const { cwd } = configure({ turns: [{ stopReason: "cancelled", text: "partial" }] });
+  await assert.rejects(
+    () => new AcpAgentRunner().run("hi", { model: "claude", cwd, label: "cancelled-agent" }),
+    (err: unknown) => {
+      assert.ok(isWorkflowError(err));
+      assert.equal(err.code, WorkflowErrorCode.WORKFLOW_ABORTED);
+      return true;
+    },
+  );
+});
+
+test("(#2) normal stopReason 'end_turn' still returns the assistant text", async () => {
+  const { cwd } = configure({ turns: [{ stopReason: "end_turn", text: "all good" }] });
+  const out = await new AcpAgentRunner().run("hi", { model: "claude", cwd });
+  assert.equal(out, "all good");
+});
+
+// ---- (#3) reasoning_effort + Fast-mode driven from the model[effort] spec ------------
+
+test("(#3) a model[effort] spec drives the reasoning_effort config option via set_config_option", async () => {
+  const { cwd, readLog } = configure({
+    configOptions: [
+      // Real codex-acp shape: model values are BARE base ids, effort is a SEPARATE select.
+      {
+        id: "model",
+        type: "select",
+        name: "Model",
+        category: "model",
+        currentValue: "gpt-5.1-codex",
+        options: [{ value: "gpt-5.1-codex", name: "GPT-5.1 Codex" }],
+      },
+      {
+        id: "reasoning_effort",
+        type: "select",
+        name: "Reasoning effort",
+        category: "thought_level",
+        currentValue: "medium",
+        options: [
+          { value: "low", name: "low" },
+          { value: "medium", name: "medium" },
+          { value: "high", name: "high" },
+        ],
+      },
+    ],
+    turns: [{ text: "ok" }],
+  });
+  const resolved: string[] = [];
+  const out = await new AcpAgentRunner().run("hi", {
+    model: "openai/gpt-5.1-codex[high]",
+    cwd,
+    onModelResolved: (m) => resolved.push(m),
+  });
+  assert.equal(out, "ok");
+  // The bracket strips off for the model select (matches the bare base id); the effort rides
+  // the separate reasoning_effort option.
+  assert.deepEqual(resolved, ["gpt-5.1-codex"]);
+
+  const effortSet = readLog().find(
+    (e) => e.method === "setSessionConfigOption" && e.params?.configId === "reasoning_effort",
+  );
+  assert.ok(effortSet, "reasoning_effort was set via session/set_config_option");
+  assert.equal(effortSet.params?.value, "high");
+});
+
+test("(#3) a `fast` bracket token turns the advertised Fast-mode option on", async () => {
+  const { cwd, readLog } = configure({
+    configOptions: [
+      {
+        id: "model",
+        type: "select",
+        name: "Model",
+        category: "model",
+        currentValue: "gpt-5.1-codex",
+        options: [{ value: "gpt-5.1-codex", name: "GPT-5.1 Codex" }],
+      },
+      {
+        id: "fast-mode",
+        type: "select",
+        name: "Fast mode",
+        category: "fast-mode",
+        currentValue: "off",
+        options: [
+          { value: "off", name: "Off" },
+          { value: "on", name: "On" },
+        ],
+      },
+    ],
+    turns: [{ text: "ok" }],
+  });
+  await new AcpAgentRunner().run("hi", { model: "openai/gpt-5.1-codex[high fast]", cwd });
+  const fastSet = readLog().find(
+    (e) => e.method === "setSessionConfigOption" && e.params?.configId === "fast-mode",
+  );
+  assert.ok(fastSet, "fast-mode was set via session/set_config_option");
+  assert.equal(fastSet.params?.value, "on");
+});
+
+test("(#3) a plain effort spec does NOT touch a Fast-mode option that is advertised", async () => {
+  const { cwd, readLog } = configure({
+    configOptions: [
+      {
+        id: "model",
+        type: "select",
+        name: "Model",
+        category: "model",
+        currentValue: "gpt-5.1-codex",
+        options: [{ value: "gpt-5.1-codex", name: "GPT-5.1 Codex" }],
+      },
+      {
+        id: "fast-mode",
+        type: "select",
+        name: "Fast mode",
+        category: "fast-mode",
+        currentValue: "off",
+        options: [
+          { value: "off", name: "Off" },
+          { value: "on", name: "On" },
+        ],
+      },
+    ],
+    turns: [{ text: "ok" }],
+  });
+  await new AcpAgentRunner().run("hi", { model: "openai/gpt-5.1-codex[high]", cwd });
+  const fastSet = readLog().find(
+    (e) => e.method === "setSessionConfigOption" && e.params?.configId === "fast-mode",
+  );
+  assert.equal(fastSet, undefined, "no `fast` token => Fast-mode is left untouched");
+});
+
+// ---- (#5) client-provided mcpServers reach session/new -------------------------------
+
+test("(#5) RunOptions.mcpServers reach session/new mcpServers (stdio + http)", async () => {
+  const { cwd, readLog } = configure({ turns: [{ text: "ok" }] });
+  const mcpServers: McpServerConfig[] = [
+    { name: "fs", command: "mcp-fs", args: ["--root", "/tmp"], env: [{ name: "TOKEN", value: "abc" }] },
+    {
+      type: "http",
+      name: "remote",
+      url: "https://example.com/mcp",
+      headers: [{ name: "Authorization", value: "Bearer xyz" }],
+    },
+  ];
+  await new AcpAgentRunner().run("hi", { model: "claude", cwd, mcpServers });
+
+  const newSession = readLog().find((e) => e.method === "newSession");
+  assert.ok(newSession, "newSession was observed");
+  assert.deepEqual(newSession.params?.mcpServers, mcpServers);
+});
+
+test("(#5) mcpServers defaults to [] at session/new when none is provided", async () => {
+  const { cwd, readLog } = configure({ turns: [{ text: "ok" }] });
+  await new AcpAgentRunner().run("hi", { model: "claude", cwd });
+  const newSession = readLog().find((e) => e.method === "newSession");
+  assert.deepEqual(newSession?.params?.mcpServers, []);
 });

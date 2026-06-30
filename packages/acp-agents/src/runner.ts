@@ -19,6 +19,7 @@ import {
   type AgentRunner,
   type RunOptions,
 } from "@agentprism/shared-types";
+import type { StopReason } from "@agentclientprotocol/sdk";
 import type { TSchema } from "typebox";
 import { AcpAgentSession } from "./acp-client.js";
 import type { Backend } from "./backend.js";
@@ -41,20 +42,33 @@ export class AcpAgentRunner implements AgentRunner {
     const policy: ToolPolicy = { allow: opts.toolNames, deny: opts.disallowedToolNames };
     const cwd = opts.cwd ?? process.cwd();
 
-    const session = await AcpAgentSession.start(backend, { cwd, schema, policy, signal: opts.signal });
+    const session = await AcpAgentSession.start(backend, {
+      cwd,
+      schema,
+      policy,
+      signal: opts.signal,
+      mcpServers: opts.mcpServers,
+    });
     try {
       opts.signal?.throwIfAborted();
       await applyModelSelection(session, opts);
 
       const text = buildPrompt(prompt, opts, Boolean(schema));
       const promptMeta = backend.promptMeta(schema);
-      await session.prompt(text, promptMeta);
+      const response = await session.prompt(text, promptMeta);
       opts.signal?.throwIfAborted();
+      // Inspect the turn's stop reason BEFORE the text/schema path: a refusal or truncation
+      // must surface distinctly here, never be misread as empty output or burned through the
+      // schema-repair ladder into SCHEMA_NONCOMPLIANCE.
+      assertNormalStopReason(response.stopReason, opts.label);
 
       if (schema) {
         const structuredSession: StructuredSession = {
           prompt: async (repromptText: string) => {
-            await session.prompt(repromptText, promptMeta);
+            const repromptResponse = await session.prompt(repromptText, promptMeta);
+            // A repair turn that refuses / truncates / cancels must also surface distinctly
+            // instead of silently continuing the ladder.
+            assertNormalStopReason(repromptResponse.stopReason, opts.label);
           },
           lastText: () => session.currentTurnText(),
           tryNative: () => backend.nativeStructured(session),
@@ -99,6 +113,41 @@ export class AcpAgentRunner implements AgentRunner {
 /** Factory the mcp-server composition root calls to inject the runner into the engine. */
 export function createAcpRunner(): AgentRunner {
   return new AcpAgentRunner();
+}
+
+/**
+ * Map a PromptResponse.stopReason onto the seam's error contract. `end_turn` (and any
+ * unknown future reason) is a normal completion — fall through to the text/schema path.
+ * The abnormal reasons each get a DISTINCT, non-recoverable failure so the engine never
+ * retries a refused/truncated prompt (burning the retry budget) and never mistakes it for
+ * recoverable empty output:
+ *   - refusal             -> AGENT_EXECUTION_ERROR "model refused to respond"
+ *   - max_tokens / max_turn_requests -> AGENT_EXECUTION_ERROR "output truncated"
+ *   - cancelled           -> WORKFLOW_ABORTED
+ */
+function assertNormalStopReason(stopReason: StopReason, label?: string): void {
+  switch (stopReason) {
+    case "refusal":
+      throw new WorkflowError("model refused to respond", WorkflowErrorCode.AGENT_EXECUTION_ERROR, {
+        recoverable: false,
+        agentLabel: label,
+      });
+    case "max_tokens":
+    case "max_turn_requests":
+      throw new WorkflowError(
+        `output truncated (stop reason: ${stopReason})`,
+        WorkflowErrorCode.AGENT_EXECUTION_ERROR,
+        { recoverable: false, agentLabel: label },
+      );
+    case "cancelled":
+      throw new WorkflowError("workflow aborted", WorkflowErrorCode.WORKFLOW_ABORTED, {
+        recoverable: false,
+        agentLabel: label,
+      });
+    default:
+      // "end_turn" and any unrecognized future reason: normal completion.
+      return;
+  }
 }
 
 async function applyModelSelection(session: AcpAgentSession, opts: AnyRunOptions): Promise<void> {

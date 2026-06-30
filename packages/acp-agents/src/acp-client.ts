@@ -30,7 +30,7 @@ import {
   type SessionNotification,
 } from "@agentclientprotocol/sdk";
 import type { TSchema } from "typebox";
-import type { AgentHistoryEntry } from "@agentprism/shared-types";
+import type { AgentHistoryEntry, McpServerConfig } from "@agentprism/shared-types";
 import type { Backend, StructuredSource } from "./backend.js";
 import { decidePermission, type ToolPolicy } from "./permissions.js";
 import { UsageAccumulator } from "./usage.js";
@@ -105,6 +105,9 @@ class WorkflowClient implements Client {
       }
       case "usage_update": {
         this.usage.recordCost(update.cost);
+        // Also feed the context token counts so AgentUsage.total is non-zero for backends
+        // that report tokens via usage_update but never via PromptResponse.usage.
+        this.usage.recordContextTokens(update.used, update.size);
         break;
       }
       default:
@@ -139,6 +142,8 @@ export interface AcpSessionOptions {
   schema: TSchema | undefined;
   policy: ToolPolicy;
   signal?: AbortSignal;
+  /** Client-provided MCP servers to attach at session/new. Omitted => `[]` (the default). */
+  mcpServers?: McpServerConfig[];
 }
 
 type ModelSelectOption = Extract<SessionConfigOption, { type: "select" }>;
@@ -235,7 +240,8 @@ export class AcpAgentSession implements StructuredSource {
     const meta = this.backend.sessionMeta(this.opts.schema);
     const request: NewSessionRequest = {
       cwd: this.opts.cwd,
-      mcpServers: [],
+      // Client-provided MCP servers (additive run input), else the default empty list.
+      mcpServers: this.opts.mcpServers ?? [],
       ...(meta ? { _meta: meta } : {}),
     };
     const response = await this.connection.newSession(request);
@@ -247,6 +253,15 @@ export class AcpAgentSession implements StructuredSource {
    * Select the model for this session from the agent-advertised config options (§5.4).
    * Returns `matched:false` (the caller fires onModelFallback) when the catalog has no value
    * matching the spec, leaving the session default in place.
+   *
+   * Beyond the `model` select, this also drives the sibling config options the catalog may
+   * advertise (codex-acp), decoded from the `model[effort]` spec encoding:
+   *   - `reasoning_effort` (id "reasoning_effort" / category "thought_level"): set to the
+   *     bracketed effort token, e.g. `gpt-5.1-codex[high]` -> "high".
+   *   - Fast mode (id "fast-mode" / category "fast-mode"): turned on when the bracket carries
+   *     a `fast` token.
+   * Each is best-effort and advertise-gated: when the catalog does not expose the option, or
+   * the requested value is not among its choices, it is silently skipped.
    */
   async selectModel(spec: string): Promise<{ matched: boolean; resolved?: string }> {
     const option = this.configOptions.find(isModelSelectOption);
@@ -257,14 +272,46 @@ export class AcpAgentSession implements StructuredSource {
     if (!target) return { matched: false };
 
     if (option.currentValue !== target.value) {
-      const response = await this.connection.setSessionConfigOption({
-        sessionId: this.sessionId,
-        configId: option.id,
-        value: target.value,
-      });
-      this.configOptions = response.configOptions;
+      await this.applyConfigOption(option.id, target.value);
     }
+
+    await this.applyModelModifiers(spec);
     return { matched: true, resolved: target.value };
+  }
+
+  /** Drive reasoning_effort + Fast-mode from the `model[effort]` spec bracket, when advertised. */
+  private async applyModelModifiers(spec: string): Promise<void> {
+    const tokens = bracketTokens(spec);
+    if (tokens.length === 0) return;
+
+    // reasoning_effort: set to the bracket token that matches one of its advertised values.
+    const effortOption = this.configOptions.find(isReasoningEffortOption);
+    if (effortOption) {
+      const effortValues = flattenSelectOptions(effortOption.options);
+      const match = matchToken(effortValues, tokens);
+      if (match && effortOption.currentValue !== match.value) {
+        await this.applyConfigOption(effortOption.id, match.value);
+      }
+    }
+
+    // Fast mode: a `fast` token turns the advertised toggle on.
+    const fastOption = this.configOptions.find(isFastModeOption);
+    if (fastOption && tokens.some((t) => t.toLowerCase() === "fast")) {
+      const onValue = fastModeOnValue(flattenSelectOptions(fastOption.options));
+      if (onValue && fastOption.currentValue !== onValue) {
+        await this.applyConfigOption(fastOption.id, onValue);
+      }
+    }
+  }
+
+  /** Set one session config option via the wire method and adopt the echoed catalog. */
+  private async applyConfigOption(configId: string, value: string): Promise<void> {
+    const response = await this.connection.setSessionConfigOption({
+      sessionId: this.sessionId,
+      configId,
+      value,
+    });
+    this.configOptions = response.configOptions;
   }
 
   /** Send a prompt turn and drain it; returns the final PromptResponse. */
@@ -328,6 +375,42 @@ function isModelSelectOption(option: SessionConfigOption): option is ModelSelect
   return option.type === "select" && (option.category === "model" || option.id === "model");
 }
 
+function isReasoningEffortOption(option: SessionConfigOption): option is ModelSelectOption {
+  return option.type === "select" && (option.id === "reasoning_effort" || option.category === "thought_level");
+}
+
+function isFastModeOption(option: SessionConfigOption): option is ModelSelectOption {
+  return option.type === "select" && (option.id === "fast-mode" || option.category === "fast-mode");
+}
+
+/** Split the trailing `[...]` of a `model[effort]` spec into its comma/space/plus-separated
+ *  tokens (e.g. `gpt-5.1-codex[high]` -> ["high"], `gpt-5-codex[high fast]` -> ["high","fast"]). */
+function bracketTokens(spec: string): string[] {
+  const match = spec.match(/\[([^\]]+)\]\s*$/);
+  if (!match) return [];
+  return match[1]
+    .split(/[\s,+]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+/** First advertised value whose id matches any of the given tokens (case-insensitive). */
+function matchToken(
+  values: SessionConfigSelectOption[],
+  tokens: string[],
+): SessionConfigSelectOption | undefined {
+  const wanted = new Set(tokens.map((token) => token.toLowerCase()));
+  return values.find((value) => wanted.has(value.value.toLowerCase()));
+}
+
+/** The "on" value of a Fast-mode select (codex-acp advertises value "on"; tolerate name too). */
+function fastModeOnValue(values: SessionConfigSelectOption[]): string | undefined {
+  const on = values.find(
+    (value) => value.value.toLowerCase() === "on" || value.name.toLowerCase() === "on",
+  );
+  return on?.value;
+}
+
 function flattenSelectOptions(options: SessionConfigSelectOptions): SessionConfigSelectOption[] {
   const out: SessionConfigSelectOption[] = [];
   for (const entry of options) {
@@ -340,26 +423,38 @@ function flattenSelectOptions(options: SessionConfigSelectOptions): SessionConfi
 /**
  * Best-effort match of a model spec (`provider/modelId`, a bare `modelId`, or a tier word)
  * against the agent's catalog. Tries, in priority order: exact spec, exact id-after-slash,
- * the Codex `model[effort]` encoding, exact option name, then substring fallbacks.
+ * the bare base id (with the `[effort]` bracket stripped, so `gpt-5.1-codex[high]` matches a
+ * bare `gpt-5.1-codex` model value while the bracket separately drives reasoning_effort), the
+ * Codex `base[effort]` encoding, exact option name, then substring fallbacks. The effort
+ * bracket itself is applied via applyModelModifiers, not folded into the model select.
  */
 function matchModelValue(
   values: SessionConfigSelectOption[],
   spec: string,
 ): SessionConfigSelectOption | undefined {
-  const desired = spec.includes("/") ? spec.slice(spec.indexOf("/") + 1) : spec;
+  const afterSlash = spec.includes("/") ? spec.slice(spec.indexOf("/") + 1) : spec;
   const fullLower = spec.toLowerCase();
-  const idLower = desired.toLowerCase();
+  const idLower = afterSlash.toLowerCase();
+  const baseLower = stripEffortBracket(afterSlash).toLowerCase();
   const tests: Array<(value: SessionConfigSelectOption) => boolean> = [
     (value) => value.value.toLowerCase() === fullLower,
     (value) => value.value.toLowerCase() === idLower,
-    (value) => value.value.toLowerCase().startsWith(`${idLower}[`),
+    (value) => value.value.toLowerCase() === baseLower,
+    (value) => value.value.toLowerCase().startsWith(`${baseLower}[`),
     (value) => value.name.toLowerCase() === idLower,
-    (value) => value.value.toLowerCase().includes(idLower),
-    (value) => value.name.toLowerCase().includes(idLower),
+    (value) => value.name.toLowerCase() === baseLower,
+    (value) => value.value.toLowerCase().includes(baseLower),
+    (value) => value.name.toLowerCase().includes(baseLower),
   ];
   for (const test of tests) {
     const found = values.find(test);
     if (found) return found;
   }
   return undefined;
+}
+
+/** Drop a trailing `[effort]` bracket from a model id, leaving the base model id. */
+function stripEffortBracket(spec: string): string {
+  const open = spec.indexOf("[");
+  return open >= 0 ? spec.slice(0, open) : spec;
 }
