@@ -1,23 +1,19 @@
-# =============================================================================
-# PREREQUISITE-GATED RELEASE TEMPLATE — DORMANT BY DESIGN.
+# Token-less release via npm OIDC trusted publishing + Changesets.
 #
-# DO NOT rely on this workflow to publish until BOTH prerequisites are met:
-#   1. npm auth / OIDC trusted publishing is configured for the @automatalabs
-#      org (a trusted publisher is registered on npmjs.com for each of the 5
-#      @automatalabs packages), AND
-#   2. the @automatalabs/codex-acp fork is published to npm — otherwise
-#      consumers' Codex structured output silently degrades.
-#
-# Until then this template is kept DORMANT: it triggers ONLY on
-# workflow_dispatch (manual run). It is deliberately NOT wired to
-# `push: branches: [main]`, so merging to main never auto-publishes.
-# When the two prerequisites above are satisfied, add a `push` trigger
-# (keep workflow_dispatch) to enable the standard Changesets release-PR flow.
-# =============================================================================
+# On push to main, changesets/action either opens/updates a "Version Packages"
+# PR (while changesets are pending) or — once that PR is merged — publishes the
+# bumped packages. Publishing uses OIDC (id-token + NPM_CONFIG_PROVENANCE, no
+# npm token), which requires a trusted publisher configured on npmjs.com for
+# each @automatalabs package pointing at this repo + this workflow file
+# (.github/workflows/release.yml). With no pending changesets and all versions
+# already on the registry, the run is a safe no-op. workflow_dispatch is kept
+# for manual runs.
 
 name: Release
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch: {}
 
 # Required for the Changesets release PR (contents + pull-requests) and for
