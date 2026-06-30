@@ -21,7 +21,10 @@ import type { WorkflowRunResult } from "@agentprism/shared-types";
 export const workflowToolOutputShape = {
   runId: z.string(),
   status: z.enum(["pending", "running", "paused", "completed", "failed", "aborted"]),
-  result: z.unknown(),
+  // Optional: present only on a completed run (the script's resolved value). Paused/failed/
+  // aborted runs have NO result, so it must not be required — a strict MCP client that caches
+  // this output schema via listTools would otherwise reject EVERY non-completed run with -32602.
+  result: z.unknown().optional(),
   tokenUsage: z
     .object({
       input: z.number(),
@@ -39,7 +42,7 @@ export const workflowToolOutputShape = {
 export interface WorkflowToolResult<T = unknown> {
   runId: string;
   status: WorkflowRunResult["status"];
-  result: T;
+  result?: T;
   tokenUsage?: WorkflowRunResult["tokenUsage"];
   logs?: string[];
 }

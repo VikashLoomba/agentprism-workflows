@@ -102,9 +102,9 @@ test("tool boundary: over-max concurrency/agentRetries are CLAMPED, not rejected
 test("paused run -> shell does NOT throw: isError:false, status 'paused', resetHint + resume hint pass through", async () => {
   // A provider usage-limit is non-recoverable -> the engine checkpoints the run as PAUSED
   // (resumable) and resolves a terminal result; the shell projects it without throwing.
-  // listTools is intentionally OMITTED here — see gapsLeft: the advertised outputSchema
-  // marks `result` required, but a paused run omits it, so a client that caches the
-  // output validator would reject this structuredContent. We assert the shell's routing.
+  // Regression (output-schema fix): listTools:true caches the client-side output-schema
+  // validator, so a paused run with NO `result` (now `.optional()`) must still validate —
+  // before the fix this threw McpError -32602 "must have required property 'result'".
   const runner = throwingRunner(
     () =>
       new WorkflowError("usage limit reached. Resets in ~3h", WorkflowErrorCode.PROVIDER_USAGE_LIMIT, {
@@ -112,7 +112,7 @@ test("paused run -> shell does NOT throw: isError:false, status 'paused', resetH
         resetHint: "Resets in ~3h",
       }),
   );
-  const { client, dispose } = await connect(runner);
+  const { client, dispose } = await connect(runner, { listTools: true });
   try {
     const res = await client.callTool({ name: "workflow", arguments: { script: ONE_AGENT_SCRIPT } });
 
@@ -134,12 +134,13 @@ test("paused run -> shell does NOT throw: isError:false, status 'paused', resetH
 test("failed run -> shell does NOT throw: returns isError:true with status 'failed' (engine-stamped)", async () => {
   // A non-recoverable, non-usage-limit failure -> the engine stamps status 'failed' and
   // runSync RESOLVES (does not reject); the handler maps failed -> isError:true. The shell
-  // never throws on fail. (The textual `reason` is unreliable here — see gapsLeft #2 — so
-  // we assert only the structured status/isError, which are correct.)
+  // never throws on fail. Regression: listTools:true (output-schema fix — a failed run omits
+  // `result`) AND the reason is the REAL error, not "Unhandled error" (the engine now persists/
+  // releases the lease and guards the unheard 'error' emit, so the real WorkflowError propagates).
   const runner = throwingRunner(
     () => new WorkflowError("schema never satisfied", WorkflowErrorCode.SCHEMA_NONCOMPLIANCE, { recoverable: false }),
   );
-  const { client, dispose } = await connect(runner);
+  const { client, dispose } = await connect(runner, { listTools: true });
   try {
     const res = await client.callTool({ name: "workflow", arguments: { script: ONE_AGENT_SCRIPT } });
 
@@ -148,6 +149,10 @@ test("failed run -> shell does NOT throw: returns isError:true with status 'fail
     assert.ok(sc, "a failed run still returns a structured terminal result (not a thrown error)");
     assert.equal(sc.status, "failed", "the engine stamped a failed status");
     assert.match(String(sc.runId), RUN_ID);
+
+    const text = textOf(res);
+    assert.match(text, /schema never satisfied/, "the failed run's reason is the REAL WorkflowError message");
+    assert.ok(!/unhandled error/i.test(text), "the real error is not masked by ERR_UNHANDLED_ERROR");
   } finally {
     await dispose();
   }

@@ -525,6 +525,13 @@ export class WorkflowManager extends EventEmitter {
         managed.status = "failed";
       }
       managed.error = workflowError;
+
+      // Persist final state + release the lease BEFORE emitting, so a consumer that did not
+      // subscribe to 'error' (EventEmitter throws ERR_UNHANDLED_ERROR on an unheard 'error')
+      // can never skip cleanup and leak the run lease / lose the persisted "failed" state.
+      this.persistRun(managed);
+      this.releaseRunLease(managed);
+
       if (usageLimitPaused) {
         this.emit("paused", {
           runId: managed.runId,
@@ -532,13 +539,12 @@ export class WorkflowManager extends EventEmitter {
           error: workflowError,
           resetHint: workflowError.resetHint,
         });
-      } else {
+      } else if (this.listenerCount("error") > 0) {
+        // Only emit 'error' when someone is listening: an unheard 'error' would throw
+        // ERR_UNHANDLED_ERROR here, masking the real workflowError thrown below (which
+        // pollutes the failed run's reason) — guard so the real error always propagates.
         this.emit("error", { runId: managed.runId, error: workflowError });
       }
-
-      // Persist final state
-      this.persistRun(managed);
-      this.releaseRunLease(managed);
 
       throw workflowError;
     }

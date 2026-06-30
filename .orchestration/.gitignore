@@ -9,4 +9,5 @@ worktrees/
 phase1-contract.json
 phase2-modules.json
 phase3-integration.json
+phase3b-tests.json
 phase4-verify.json
