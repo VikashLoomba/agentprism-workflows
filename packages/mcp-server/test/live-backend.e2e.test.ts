@@ -13,10 +13,10 @@
 // authenticate makes the assertions FAIL loudly (the diagnostic dump includes the server's
 // stderr tail) — it never silently passes.
 //
-// It is also the acceptance test that the de-vendored, npm-installed + pnpm-patched
-// codex-acp (NOT the old vendor path) drives structured output end to end: the pooling
-// marker is the package's resolved node_modules entry, asserted to live under
-// @agentclientprotocol/ and not under any /vendor/ directory.
+// It is also the acceptance test that the npm-installed @automatalabs/codex-acp fork (NOT the
+// old vendor path, and no longer a pnpm patch) drives structured output end to end: the pooling
+// marker is the package's resolved node_modules entry, asserted to live under each backend's
+// published scope and not under any /vendor/ directory.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
@@ -45,16 +45,26 @@ const SERVER_ENTRY = fileURLToPath(new URL("../dist/index.js", import.meta.url))
 const requireAcp = createRequire(new URL("../../acp-agents/package.json", import.meta.url));
 const BACKEND_BIN: Record<Backend, string> = {
   claude: requireAcp.resolve("@agentclientprotocol/claude-agent-acp/dist/index.js"),
-  codex: requireAcp.resolve("@agentclientprotocol/codex-acp"),
+  codex: requireAcp.resolve("@automatalabs/codex-acp"),
+};
+
+// Each backend's ACP server is a published npm package under its own scope: Claude stays on the
+// upstream @agentclientprotocol adapter; Codex is our patched @automatalabs fork.
+const BACKEND_SCOPE: Record<Backend, string> = {
+  claude: "@agentclientprotocol/",
+  codex: "@automatalabs/",
 };
 
 // The stable, prefix-independent argv marker: the package-scoped tail of the resolved bin
-// (e.g. "@agentclientprotocol/codex-acp/dist/index.js"). Derived from the real resolved
-// path — not a hand-written guess — and present ONLY on the npm path (a vendored copy would
-// be ".../vendor/codex-acp/..." with no @agentclientprotocol scope).
+// (e.g. "@automatalabs/codex-acp/dist/index.js"). Derived from the real resolved path — not a
+// hand-written guess — and present ONLY on the npm path (a vendored copy would be
+// ".../vendor/codex-acp/..." with no npm scope).
 function pkgTail(full: string): string {
-  const i = full.indexOf("@agentclientprotocol/");
-  return i >= 0 ? full.slice(i) : full;
+  for (const scope of ["@automatalabs/", "@agentclientprotocol/"]) {
+    const i = full.indexOf(scope);
+    if (i >= 0) return full.slice(i);
+  }
+  return full;
 }
 
 // The schema'd agents must each return THIS object (validated by both the backend's native
@@ -289,10 +299,11 @@ function assertBackend(backend: Backend, out: LiveOutcome): void {
   const d = () => diag(backend, out);
   const bin = BACKEND_BIN[backend];
 
-  // De-vendor proof: the spawn target is an npm install under node_modules with the
-  // @agentclientprotocol scope, never a vendored copy.
+  // De-vendor proof: the spawn target is an npm install under node_modules with the backend's
+  // published scope (Claude @agentclientprotocol, Codex @automatalabs), never a vendored copy.
+  const scope = BACKEND_SCOPE[backend];
   assert.ok(bin.includes("/node_modules/"), `${backend} bin must resolve under node_modules: ${bin}`);
-  assert.ok(bin.includes("@agentclientprotocol/"), `${backend} bin must be the @agentclientprotocol npm package: ${bin}`);
+  assert.ok(bin.includes(scope), `${backend} bin must be the ${scope} npm package: ${bin}`);
   assert.ok(!bin.includes("/vendor/"), `${backend} must NOT use a vendored copy: ${bin}`);
 
   // The run must reach the handler with no harness/timeout error and no tool-level error.

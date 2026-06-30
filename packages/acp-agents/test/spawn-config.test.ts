@@ -1,7 +1,7 @@
 // CodexBackend.spawnConfig() — proves Codex ships on a clean `git clone && pnpm install` from the
-// installed npm dep @agentclientprotocol/codex-acp (patched via pnpm patchedDependencies), NOT a
-// gitignored vendored build. The default path resolves the package's main from node_modules and
-// runs it under the current node; the env overrides still win.
+// installed npm dep @automatalabs/codex-acp (a published fork that bakes in the outputSchema
+// patch), NOT a gitignored vendored build. The default path resolves the package's main from
+// node_modules and runs it under the current node; the env overrides still win.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -34,18 +34,18 @@ test("CodexBackend.spawnConfig: default resolves the installed npm dep dist unde
     assert.equal(cfg.args.length, 1);
     const bin = cfg.args[0];
     // resolved from node_modules (the installed package), not a vendored tree
-    assert.match(bin, /node_modules[/\\].*@agentclientprotocol[/\\]codex-acp[/\\]dist[/\\]index\.js$/);
+    assert.match(bin, /node_modules[/\\].*@automatalabs[/\\]codex-acp[/\\]dist[/\\]index\.js$/);
     assert.equal(bin.includes("vendor"), false);
     assert.equal(cfg.env, process.env);
   });
 });
 
-test("CodexBackend.spawnConfig: the resolved bin carries the pnpm patch (ships from npm, not vendored)", () => {
+test("CodexBackend.spawnConfig: the resolved bin carries the outputSchema patch (baked into the published fork)", () => {
   withEnv({}, () => {
     const bin = new CodexBackend().spawnConfig().args[0];
-    // The patch (patches/@agentclientprotocol__codex-acp@1.0.2.patch) forwards the schema via
+    // The @automatalabs/codex-acp fork bakes in the forward of
     // request._meta["agentprism/outputSchema"] -> turn/start.outputSchema. Its presence in the
-    // installed file is the end-to-end proof that pnpm patchedDependencies applied at install.
+    // installed file is the end-to-end proof that the published fork ships the patch.
     const contents = readFileSync(bin, "utf8");
     assert.ok(
       contents.includes("agentprism/outputSchema"),

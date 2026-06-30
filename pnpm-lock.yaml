@@ -4,11 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-patchedDependencies:
-  '@agentclientprotocol/codex-acp@1.0.2':
-    hash: 39a3f5c3b917e7519c5812e853122872847d4315c00a0d9851c7e9dc377a0976
-    path: patches/@agentclientprotocol__codex-acp@1.0.2.patch
-
 importers:
 
   .:
@@ -31,12 +26,12 @@ importers:
       '@agentclientprotocol/claude-agent-acp':
         specifier: 0.53.0
         version: 0.53.0(@anthropic-ai/sdk@0.107.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))
-      '@agentclientprotocol/codex-acp':
-        specifier: 1.0.2
-        version: 1.0.2(patch_hash=39a3f5c3b917e7519c5812e853122872847d4315c00a0d9851c7e9dc377a0976)
       '@agentclientprotocol/sdk':
         specifier: 1.0.0
         version: 1.0.0(zod@4.4.3)
+      '@automatalabs/codex-acp':
+        specifier: 1.0.2
+        version: 1.0.2
       '@automatalabs/shared-types':
         specifier: workspace:*
         version: link:../shared-types
@@ -99,10 +94,6 @@ packages:
     engines: {node: '>=22'}
     hasBin: true
 
-  '@agentclientprotocol/codex-acp@1.0.2':
-    resolution: {integrity: sha512-4CxkkqyeX62TBzv4RW5N3TI/4oy7QaWWzOBnwH5VGWa2UdhIg7qwvudyKFv0aOdJfWHcRSNZ3y8c0idaUquZfQ==}
-    hasBin: true
-
   '@agentclientprotocol/sdk@1.0.0':
     resolution: {integrity: sha512-5FHgLbLZhSAq9F+9SU7AOCXTDzaw/IYx/AvMjrZDs/YFZ9ZPxkdn9ti3fSkny0huHfj2hrqF6pqdns9gN5/Fig==}
     peerDependencies:
@@ -122,21 +113,25 @@ packages:
     resolution: {integrity: sha512-ZmyBA/AFzhgutcxb7dbhCm6GTjJytwNYXTxJoKE2B3A409WCYccjMqeji6vCMNxyyfylglGo5D8dVMIxW9aoug==}
     cpu: [arm64]
     os: [linux]
+    libc: [musl]
 
   '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.195':
     resolution: {integrity: sha512-JuIq5Fnz/F1snl0aqi1gcuRZqPWoPNrL9dJ0DuievCxKkO8hnEz/Mmn5Zos7x1X8HE//ZnEvmQXoEQEZXonJew==}
     cpu: [arm64]
     os: [linux]
+    libc: [glibc]
 
   '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.195':
     resolution: {integrity: sha512-nf8Q/LauB+ZOC6QDjxNhbsvwUtYjKYnaWJLTYFwhkmsLujePnety1AtT/1ubaUoq5AM1j297DhMlYTasa79OUA==}
     cpu: [x64]
     os: [linux]
+    libc: [musl]
 
   '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.195':
     resolution: {integrity: sha512-s1lNi1cL93luoqsItH+fNO4KpIhdkvnVhWGGQUQ/8ftwa2gfmcIQnOg1hG8Ks+KzeD3UUQ8L9YEVHVADnFI/9A==}
     cpu: [x64]
     os: [linux]
+    libc: [glibc]
 
   '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.195':
     resolution: {integrity: sha512-hbkDE+xPIZzRWm+D+BKrH9uJH6USIZdDIlsyrIlGi3JFHoieYoA1vdUNyldSS9+F3ZqQtfPjr2Qy08IVB6akYA==}
@@ -164,6 +159,10 @@ packages:
     peerDependenciesMeta:
       zod:
         optional: true
+
+  '@automatalabs/codex-acp@1.0.2':
+    resolution: {integrity: sha512-pRv3vwrgyIQ3L/xOtJMp/5Eexkm6Fu55utwnGzQQ21y078T2rEA1onW6Cohh7onPqoyrJRXG5/c5CUe08Sj57A==}
+    hasBin: true
 
   '@babel/runtime@7.29.7':
     resolution: {integrity: sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==}
@@ -1191,15 +1190,6 @@ snapshots:
       - '@anthropic-ai/sdk'
       - '@modelcontextprotocol/sdk'
 
-  '@agentclientprotocol/codex-acp@1.0.2(patch_hash=39a3f5c3b917e7519c5812e853122872847d4315c00a0d9851c7e9dc377a0976)':
-    dependencies:
-      '@agentclientprotocol/sdk': 1.0.0(zod@4.4.3)
-      '@openai/codex': 0.142.4
-      diff: 8.0.4
-      open: 11.0.0
-      vscode-jsonrpc: 8.2.1
-      zod: 4.4.3
-
   '@agentclientprotocol/sdk@1.0.0(zod@4.4.3)':
     dependencies:
       zod: 4.4.3
@@ -1248,6 +1238,15 @@ snapshots:
       json-schema-to-ts: 3.1.1
       standardwebhooks: 1.0.0
     optionalDependencies:
+      zod: 4.4.3
+
+  '@automatalabs/codex-acp@1.0.2':
+    dependencies:
+      '@agentclientprotocol/sdk': 1.0.0(zod@4.4.3)
+      '@openai/codex': 0.142.4
+      diff: 8.0.4
+      open: 11.0.0
+      vscode-jsonrpc: 8.2.1
       zod: 4.4.3
 
   '@babel/runtime@7.29.7': {}

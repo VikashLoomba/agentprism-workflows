@@ -1,5 +1,5 @@
-// CodexBackend — drives the installed npm dep @agentclientprotocol/codex-acp, patched via pnpm
-// patchedDependencies (patches/@agentclientprotocol__codex-acp@1.0.2.patch). The patch forwards
+// CodexBackend — drives the installed npm dep @automatalabs/codex-acp, a published fork of
+// @agentclientprotocol/codex-acp that bakes in the outputSchema patch. The patch forwards
 // request._meta["agentprism/outputSchema"] into the Codex App Server's turn/start.outputSchema,
 // which the shipped @openai/codex binary honors end-to-end as an OpenAI Responses-API STRICT
 // constraint on the final assistant message. So the schema rides per-PROMPT `_meta` (not
@@ -25,12 +25,12 @@ export class CodexBackend implements Backend {
     if (override) {
       return { command: override, args: splitArgs(env.AGENTPRISM_CODEX_ACP_ARGS), env };
     }
-    // Run the installed (patched) codex-acp under the current node. AGENTPRISM_CODEX_ACP_BIN
-    // overrides the resolved path; otherwise resolve the package's main (dist/index.js) from
-    // node_modules so it ships on a clean `git clone && pnpm install` (the pnpm patch is applied
-    // at install time). Works from both src/ and the compiled dist/.
+    // Run the installed codex-acp under the current node. AGENTPRISM_CODEX_ACP_BIN overrides the
+    // resolved path; otherwise resolve the package's main (dist/index.js) from node_modules so it
+    // ships on a clean `git clone && pnpm install` (the @automatalabs/codex-acp fork already bakes
+    // in the outputSchema patch). Works from both src/ and the compiled dist/.
     const bin =
-      env.AGENTPRISM_CODEX_ACP_BIN ?? require.resolve("@agentclientprotocol/codex-acp");
+      env.AGENTPRISM_CODEX_ACP_BIN ?? require.resolve("@automatalabs/codex-acp");
     return { command: process.execPath, args: [bin], env };
   }
 
