@@ -5,6 +5,6 @@ import assert from "node:assert/strict";
 // (it only starts the stdio server when run as the process entry point).
 import { createWorkflowServer } from "../src/index.js";
 
-test("@agentprism/mcp-server public entry is reachable via ../src", () => {
+test("@automatalabs/mcp-server public entry is reachable via ../src", () => {
   assert.equal(typeof createWorkflowServer, "function");
 });

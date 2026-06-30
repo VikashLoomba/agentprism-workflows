@@ -39,7 +39,7 @@ import {
   type SessionNotification,
 } from "@agentclientprotocol/sdk";
 import type { TSchema } from "typebox";
-import { META_KEYS, type AgentHistoryEntry, type McpServerConfig } from "@agentprism/shared-types";
+import { META_KEYS, type AgentHistoryEntry, type McpServerConfig } from "@automatalabs/shared-types";
 import type { Backend, BackendId, StructuredSource } from "./backend.js";
 import { decidePermission, type ToolPolicy } from "./permissions.js";
 import { UsageAccumulator } from "./usage.js";

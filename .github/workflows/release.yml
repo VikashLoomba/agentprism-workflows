@@ -1,0 +1,84 @@
+# =============================================================================
+# PREREQUISITE-GATED RELEASE TEMPLATE — DORMANT BY DESIGN.
+#
+# DO NOT rely on this workflow to publish until BOTH prerequisites are met:
+#   1. npm auth / OIDC trusted publishing is configured for the @automatalabs
+#      org (a trusted publisher is registered on npmjs.com for each of the 5
+#      @automatalabs packages), AND
+#   2. the @automatalabs/codex-acp fork is published to npm — otherwise
+#      consumers' Codex structured output silently degrades.
+#
+# Until then this template is kept DORMANT: it triggers ONLY on
+# workflow_dispatch (manual run). It is deliberately NOT wired to
+# `push: branches: [main]`, so merging to main never auto-publishes.
+# When the two prerequisites above are satisfied, add a `push` trigger
+# (keep workflow_dispatch) to enable the standard Changesets release-PR flow.
+# =============================================================================
+
+name: Release
+
+on:
+  workflow_dispatch: {}
+
+# Required for the Changesets release PR (contents + pull-requests) and for
+# npm provenance via OIDC trusted publishing (id-token).
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Version / publish (@automatalabs)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          # registry-url writes the .npmrc the publish step reads; required for
+          # provenance / OIDC trusted publishing to target the public registry.
+          registry-url: https://registry.npmjs.org
+
+      # Same frozen install as CI: re-applies the codex-acp pnpm patch and
+      # fetches the linux-x64 native binaries (ubuntu glibc x64, no --no-optional).
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (project references)
+        run: pnpm -r exec tsc -b
+
+      # changesets/action opens/updates a "Version Packages" PR (running the
+      # root `version` script = `changeset version`); when that PR is merged it
+      # runs `publish` = the root `release` script (`pnpm build && changeset
+      # publish`). With pnpm, `changeset publish` invokes `pnpm publish` per
+      # changed package with `--no-git-checks` and `--access public` (from
+      # .changeset/config.json access:public + each package's publishConfig);
+      # NPM_CONFIG_PROVENANCE=true + the id-token permission emit npm provenance
+      # via OIDC trusted publishing.
+      - name: Create release PR / publish
+        uses: changesets/action@v1
+        with:
+          version: pnpm run version
+          publish: pnpm release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+          # OIDC trusted publishing needs no NPM token. If you instead publish
+          # with a classic automation token, expose it here as:
+          #   NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

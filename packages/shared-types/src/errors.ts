@@ -1,4 +1,4 @@
-// @agentprism/shared-types — the ONLY module BOTH workflow-engine and acp-agents
+// @automatalabs/shared-types — the ONLY module BOTH workflow-engine and acp-agents
 // import (they never import each other; mcp-server is the sole composition root).
 // Zero Pi / ACP / MCP deps; depends only on `typebox` (type-level for TSchema/Static)
 // + carries the WorkflowError RUNTIME class so `instanceof` holds across packages.

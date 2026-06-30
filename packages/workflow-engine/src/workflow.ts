@@ -12,7 +12,7 @@ import type {
   WorkflowMeta,
   WorkflowMetaPhase,
   WorkflowRunResult,
-} from "@agentprism/shared-types";
+} from "@automatalabs/shared-types";
 import {
   type AgentDefinition,
   type AgentRegistry,
@@ -27,10 +27,10 @@ import { parseModelRoutingFromMeta, resolveModelForPhase } from "./model-routing
 import { createWorktree, removeWorktree, type Worktree } from "./worktree.js";
 
 // WorkflowMeta / WorkflowMetaPhase / JournalEntry / WorkflowRunResult are the shared,
-// host-facing types (defined once in @agentprism/shared-types). The bare engine
+// host-facing types (defined once in @automatalabs/shared-types). The bare engine
 // returns the result MINUS the run-manager's terminal status trio; the manager stamps
 // status/reason/resetHint on top (the engine seam is never widened).
-export type { WorkflowMeta, WorkflowMetaPhase, JournalEntry } from "@agentprism/shared-types";
+export type { WorkflowMeta, WorkflowMetaPhase, JournalEntry } from "@automatalabs/shared-types";
 
 /** Bare engine return: the host-facing WorkflowRunResult MINUS the manager's terminal
  *  status trio (status/reason/resetHint). The WorkflowManager composes those on top. */
@@ -481,7 +481,7 @@ export async function runWorkflow<T = unknown>(
 
             // Run agent with timeout. THE SEAM: the only call to the injected
             // AgentRunner. The opts bag is cast `as any` (the field names are the
-            // real, frozen contract — see @agentprism/shared-types RunOptions).
+            // real, frozen contract — see @automatalabs/shared-types RunOptions).
             const result = await withTimeout(
               agentRunner.run(prompt, {
                 label,

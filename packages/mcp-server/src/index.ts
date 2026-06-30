@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// @agentprism/mcp-server — the shell / composition root: the ONE place where
-// @agentprism/acp-agents and @agentprism/workflow-engine meet. The ACP-backed AgentRunner is
+// @automatalabs/mcp-server — the shell / composition root: the ONE place where
+// @automatalabs/acp-agents and @automatalabs/workflow-engine meet. The ACP-backed AgentRunner is
 // injected into the engine (createWorkflowServer(createAcpRunner())) and the resulting MCP
 // server is connected over stdio. stdout is RESERVED for JSON-RPC framing — every diagnostic
 // goes to stderr.
 import { pathToFileURL } from "node:url";
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createAcpRunner } from "@agentprism/acp-agents";
+import { createAcpRunner } from "@automatalabs/acp-agents";
 
 import { createWorkflowServer } from "./server.js";
 

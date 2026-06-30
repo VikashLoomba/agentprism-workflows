@@ -3,12 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { AgentUsage } from "@agentprism/shared-types";
+import type { AgentUsage } from "@automatalabs/shared-types";
 import { WorkflowError, WorkflowErrorCode } from "../src/errors.js";
 import { WorkflowManager } from "../src/workflow-manager.js";
 import { withFakeHomeAsync } from "./helpers/fake-home.js";
 
-// AgentUsage now lives in @agentprism/shared-types (the frozen seam), not Pi's
+// AgentUsage now lives in @automatalabs/shared-types (the frozen seam), not Pi's
 // `../src/agent.js`. runSync is the consolidated path the MCP shell drives: it resolves
 // to a TERMINAL WorkflowRunResult (status completed|paused|failed|aborted) even on
 // abort/pause/fail, rather than throwing — so these abort tests assert run.status, not a

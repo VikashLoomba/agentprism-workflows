@@ -1,12 +1,9 @@
 {
-  "name": "@automatalabs/mcp-server",
+  "name": "@automatalabs/workflows",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./src/index.ts",
-  "bin": {
-    "agentprism-workflow": "./dist/index.js"
-  },
   "exports": {
     ".": {
       "types": "./src/index.ts",
@@ -19,9 +16,6 @@
     "access": "public",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
-    "bin": {
-      "agentprism-workflow": "./dist/index.js"
-    },
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",
@@ -38,9 +32,7 @@
   },
   "dependencies": {
     "@automatalabs/shared-types": "workspace:*",
-    "@automatalabs/acp-agents": "workspace:*",
     "@automatalabs/workflow-engine": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.29",
-    "zod": "^4.0.0"
+    "@automatalabs/acp-agents": "workspace:*"
   }
 }

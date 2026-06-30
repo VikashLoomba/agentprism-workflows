@@ -6,7 +6,7 @@
  * the pure, theme-optional text renderers are kept so the WorkflowManager can build
  * and project live run state without any Pi/UI dependency.
  */
-import type { AgentHistoryEntry, WorkflowMeta } from "@agentprism/shared-types";
+import type { AgentHistoryEntry, WorkflowMeta } from "@automatalabs/shared-types";
 import type { WorkflowErrorCode } from "./errors.js";
 
 export type WorkflowAgentStatus = "queued" | "running" | "done" | "error" | "skipped";

@@ -8,7 +8,7 @@
 // reads the final text and JSON.parses it.
 import { createRequire } from "node:module";
 import type { TSchema } from "typebox";
-import { META_KEYS } from "@agentprism/shared-types";
+import { META_KEYS } from "@automatalabs/shared-types";
 import type { Backend, SpawnConfig, StructuredSource } from "../backend.js";
 import { splitArgs } from "../backend.js";
 import { toStrictJsonSchema } from "../schema-strict.js";

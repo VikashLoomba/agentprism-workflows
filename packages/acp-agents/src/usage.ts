@@ -15,7 +15,7 @@
 // `used` = tokens currently in context, and `size` = context window), we feed `used` into
 // `total` so the engine sees a non-zero token count instead of falling back to its
 // chars/4 estimate. The authoritative breakdown still wins whenever it is present.
-import type { AgentUsage } from "@agentprism/shared-types";
+import type { AgentUsage } from "@automatalabs/shared-types";
 import type { Cost, Usage } from "@agentclientprotocol/sdk";
 
 export class UsageAccumulator {

@@ -13,7 +13,7 @@ import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Type } from "typebox";
-import { isWorkflowError, WorkflowErrorCode, type AgentUsage, type McpServerConfig } from "@agentprism/shared-types";
+import { isWorkflowError, WorkflowErrorCode, type AgentUsage, type McpServerConfig } from "@automatalabs/shared-types";
 import { AcpAgentRunner } from "../src/index.js";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));

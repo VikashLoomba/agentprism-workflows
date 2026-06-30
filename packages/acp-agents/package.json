@@ -1,7 +1,6 @@
 {
-  "name": "@agentprism/acp-agents",
-  "version": "0.0.0",
-  "private": true,
+  "name": "@automatalabs/acp-agents",
+  "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./src/index.ts",
@@ -12,13 +11,27 @@
       "default": "./dist/index.js"
     }
   },
+  "files": ["dist"],
+  "publishConfig": {
+    "access": "public",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js",
+        "default": "./dist/index.js"
+      }
+    }
+  },
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test \"test/**/*.test.ts\""
+    "test": "tsx --test \"test/**/*.test.ts\"",
+    "prepublishOnly": "tsc -b"
   },
   "dependencies": {
-    "@agentprism/shared-types": "workspace:*",
+    "@automatalabs/shared-types": "workspace:*",
     "@agentclientprotocol/sdk": "1.0.0",
     "@agentclientprotocol/claude-agent-acp": "0.53.0",
     "@agentclientprotocol/codex-acp": "1.0.2",

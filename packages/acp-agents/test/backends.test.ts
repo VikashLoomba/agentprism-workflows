@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Type } from "typebox";
-import { META_KEYS } from "@agentprism/shared-types";
+import { META_KEYS } from "@automatalabs/shared-types";
 import { ClaudeBackend, CodexBackend, selectBackend, toStrictJsonSchema } from "../src/index.js";
 import type { Backend, StructuredSource } from "../src/index.js";
 

@@ -2,7 +2,7 @@
 //
 // The MCP `workflow` tool OUTPUT. The host-facing WorkflowRunResult<T> (runId, status,
 // result, meta, phases, agentCount, durationMs, tokenUsage?, logs, reason?, resetHint?)
-// lives in @agentprism/shared-types — it is the engine's runWorkflow return PLUS the
+// lives in @automatalabs/shared-types — it is the engine's runWorkflow return PLUS the
 // run-manager's terminal status trio (the engine seam at :465 stays unchanged; the
 // manager composes status). THIS file declares the MINIMAL outputSchema the MCP SDK
 // validates structuredContent against, and projects the full result onto it.
@@ -12,7 +12,7 @@
 // machine-readable core — {runId, status, result, tokenUsage?, logs?} — and ALSO emit a
 // human-readable text content block alongside it.
 import { z } from "zod";
-import type { WorkflowRunResult } from "@agentprism/shared-types";
+import type { WorkflowRunResult } from "@automatalabs/shared-types";
 
 /** MINIMAL MCP outputSchema (registerTool `outputSchema`). Pins WorkflowRunResult's
  *  machine-readable core. status lets a host tell completed from paused (provider

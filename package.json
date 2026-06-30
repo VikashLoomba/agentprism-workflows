@@ -6,9 +6,17 @@
   "scripts": {
     "build": "pnpm -r exec tsc -b",
     "typecheck": "pnpm -r exec tsc --noEmit",
-    "test": "pnpm build && pnpm -r test"
+    "test": "pnpm build && pnpm -r test",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "pnpm build && changeset publish"
+  },
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=10"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.31.0",
     "@types/node": "^22.10.0",
     "tsx": "^4.22.4",
     "typescript": "^5.7.0"

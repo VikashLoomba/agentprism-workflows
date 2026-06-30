@@ -10,7 +10,7 @@
 // Everything else is a recoverable AGENT_EXECUTION_ERROR (transient process/ACP faults that
 // the engine retries). WorkflowErrors raised inside the ladder (SCHEMA_NONCOMPLIANCE,
 // AGENT_EMPTY_OUTPUT) pass through unchanged.
-import { classifyProviderLimit, isWorkflowError, WorkflowError, WorkflowErrorCode } from "@agentprism/shared-types";
+import { classifyProviderLimit, isWorkflowError, WorkflowError, WorkflowErrorCode } from "@automatalabs/shared-types";
 
 export function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;

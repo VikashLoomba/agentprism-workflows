@@ -6,7 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Type } from "typebox";
-import { isWorkflowError, WorkflowErrorCode } from "@agentprism/shared-types";
+import { isWorkflowError, WorkflowErrorCode } from "@automatalabs/shared-types";
 import {
   extractValidated,
   findJsonBlock,

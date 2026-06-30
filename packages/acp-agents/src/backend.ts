@@ -1,4 +1,4 @@
-// The internal Backend strategy (NOT part of @agentprism/shared-types). One AcpAgentSession
+// The internal Backend strategy (NOT part of @automatalabs/shared-types). One AcpAgentSession
 // transport drives either backend; the Backend supplies the three things that genuinely
 // differ between Claude and Codex:
 //   1. how to spawn the ACP server subprocess,
