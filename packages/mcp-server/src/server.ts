@@ -2,62 +2,34 @@
 //
 // The MCP shell: constructs an McpServer, registers the single SYNCHRONOUS `workflow` tool,
 // and is the composition root where all three packages meet — the injected acp-agents
-// AgentRunner is threaded into the workflow-engine run from inside the tool handler.
+// AgentRunner is wired into a workflow-engine WorkflowManager (DI) and every tool call runs
+// through WorkflowManager.runSync.
 //
 // Run model (frozen contract + ground-truth finding 5): one tools/call == one full run,
 // awaited to completion (taskSupport:'forbidden' — a plain ToolCallback, never a task
-// handler). Mid-run progress streams via notifications/progress; extra.signal threads
-// cancellation into the engine; resumeFromRunId continues a paused run from its journal;
-// checkpoint() is driven by the engine's `confirm` hook, wired here to server.elicitInput
-// with a headless fallback when the host cannot elicit.
-import { randomUUID } from "node:crypto";
-
+// handler). The engine OWNS run identity, status stamping, and resume:
+//   - runSync RESOLVES to a TERMINAL WorkflowRunResult (status completed|paused|failed|
+//     aborted, carrying reason/resetHint) and does NOT throw on pause/fail/abort — so the
+//     shell does no status composition and needs no lifecycle try/catch.
+//   - resumeFromRunId is mapped to the engine's own persisted journal (manager persistence
+//     loads it) and handed back as exec.resumeJournal; the engine replays the unchanged
+//     prefix. The shell no longer owns/forges a runId.
+// Mid-run progress streams via notifications/progress; extra.signal threads cancellation into
+// the engine; checkpoint() is driven by the engine's `confirm` hook, wired here to
+// server.elicitInput with a headless fallback when the host cannot elicit.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
-import { runWorkflow } from "@agentprism/workflow-engine";
-import type { WorkflowRunOptions } from "@agentprism/workflow-engine";
-import type { AgentRunner, RunStatus, WorkflowRunResult } from "@agentprism/shared-types";
-import { WorkflowErrorCode, isWorkflowError } from "@agentprism/shared-types";
+import { WorkflowManager } from "@agentprism/workflow-engine";
+import type { ExecOptions, WorkflowSnapshot } from "@agentprism/workflow-engine";
+import type { AgentRunner, JournalEntry, WorkflowRunResult } from "@agentprism/shared-types";
 
 import { clampWorkflowInput, workflowToolInputShape } from "./workflow-tool-input.js";
 import { toWorkflowToolResult, workflowToolOutputShape } from "./workflow-tool-output.js";
-import type { WorkflowToolResult } from "./workflow-tool-output.js";
 import { createProgressReporter } from "./progress.js";
-import type { WorkflowProgressCallback } from "./progress.js";
 
 const SERVER_NAME = "agentprism-workflow";
 const SERVER_VERSION = "0.0.0";
-
-/**
- * The options bag the shell hands to the engine's `runWorkflow`. It IS the frozen
- * `WorkflowRunOptions` seam (script + injected AgentRunner + args + signal) WIDENED with the
- * run-manager knobs the shell threads through from the validated/clamped MCP tool input and
- * the live protocol context: the numeric limits, the explicit resume identity, the progress
- * sink, and the human-in-the-loop confirm hook. The engine reads each field BY NAME.
- */
-export interface EngineExecOptions extends WorkflowRunOptions {
-  /** Stable id for this run, owned by the shell so a paused/failed run stays addressable for
-   *  resume even when `runWorkflow` throws before returning a value. On a resume it is the
-   *  incoming resumeFromRunId; on a fresh run a new uuid. */
-  runId?: string;
-  /** Resume a prior run from its persisted journal (the engine loads the journal for this id). */
-  resumeFromRunId?: string;
-  /** Clamped: max agents allowed in this run. */
-  maxAgents?: number;
-  /** Clamped to MAX_CONCURRENCY by the engine. */
-  concurrency?: number;
-  /** Clamped to MAX_AGENT_RETRIES by the engine. */
-  agentRetries?: number;
-  /** ms; null => no hard per-agent timeout (the engine owns timeout policy). */
-  agentTimeoutMs?: number | null;
-  /** null => no total-token budget. */
-  tokenBudget?: number | null;
-  /** Engine progress -> MCP notifications/progress. */
-  onProgress?: WorkflowProgressCallback;
-  /** Human-in-the-loop checkpoint hook (the engine's `options.confirm`). */
-  confirm?: WorkflowConfirmCallback;
-}
 
 /**
  * The checkpoint metadata the engine forwards to `confirm` (workflow.ts checkpoint()). Only
@@ -70,14 +42,19 @@ export interface WorkflowCheckpointOptions {
 }
 
 /**
- * The engine's `options.confirm` shape: `await confirm(promptText, checkpointOptions)`. The
- * resolved value is the human's reply (truthy => proceed). The shell maps an MCP elicitation
- * result onto it, or returns the headless default when the host cannot elicit.
+ * The engine's `confirm` hook (ExecOptions.confirm): `await confirm(promptText, options)`.
+ * The resolved value is the human's reply (truthy => proceed). The shell maps an MCP
+ * elicitation result onto it, or returns the headless default when the host cannot elicit.
  */
-export type WorkflowConfirmCallback = (
-  prompt: string,
-  options: WorkflowCheckpointOptions,
-) => Promise<unknown>;
+export type WorkflowConfirmCallback = NonNullable<ExecOptions["confirm"]>;
+
+/** Read the checkpoint `default` from the opaque options bag the engine forwards. */
+function readCheckpointDefault(options: unknown): unknown {
+  if (options && typeof options === "object" && "default" in options) {
+    return (options as WorkflowCheckpointOptions).default;
+  }
+  return undefined;
+}
 
 /**
  * Wire the engine's checkpoint `confirm` hook to MCP elicitation. If the connected host
@@ -88,7 +65,7 @@ export type WorkflowConfirmCallback = (
  */
 function createConfirm(server: Server): WorkflowConfirmCallback {
   return async (prompt, options) => {
-    const headlessReply = (): unknown => options.default ?? true;
+    const headlessReply = (): unknown => readCheckpointDefault(options) ?? true;
 
     // No elicitation capability advertised -> cannot prompt the human; reply headlessly.
     if (!server.getClientCapabilities()?.elicitation) {
@@ -124,47 +101,7 @@ function createConfirm(server: Server): WorkflowConfirmCallback {
   };
 }
 
-/** Terminal outcome of a run that threw, narrowed for the MCP envelope. */
-interface FailureOutcome {
-  result: WorkflowToolResult;
-  summary: string;
-  isError: boolean;
-}
-
-/**
- * Compose the terminal status the run-manager would have stamped, from a thrown error.
- * PROVIDER_USAGE_LIMIT => "paused" (resumable, carries resetHint); an abort (WORKFLOW_ABORTED
- * or a tripped signal) => "aborted"; anything else non-recoverable => "failed". paused is NOT
- * a tool error (it is a normal resumable outcome); failed/aborted are surfaced with isError.
- */
-function composeFailure(error: unknown, runId: string, signal: AbortSignal): FailureOutcome {
-  let status: RunStatus;
-  let reason: string;
-  let resetHint: string | undefined;
-
-  if (isWorkflowError(error)) {
-    reason = error.message;
-    if (error.code === WorkflowErrorCode.PROVIDER_USAGE_LIMIT) {
-      status = "paused";
-      resetHint = error.resetHint;
-    } else if (error.code === WorkflowErrorCode.WORKFLOW_ABORTED || signal.aborted) {
-      status = "aborted";
-    } else {
-      status = "failed";
-    }
-  } else {
-    reason = error instanceof Error ? error.message : String(error);
-    status = signal.aborted ? "aborted" : "failed";
-  }
-
-  const result: WorkflowToolResult = { runId, status, result: undefined };
-  return {
-    result,
-    summary: formatTerminalSummary(runId, status, reason, resetHint),
-    isError: status === "failed" || status === "aborted",
-  };
-}
-
+/** Human-readable summary for a completed run. */
 function formatCompletedSummary(run: WorkflowRunResult): string {
   const lines: string[] = [
     `Workflow "${run.meta.name}" completed.`,
@@ -182,34 +119,43 @@ function formatCompletedSummary(run: WorkflowRunResult): string {
   return lines.join("\n");
 }
 
-function formatTerminalSummary(
-  runId: string,
-  status: RunStatus,
-  reason: string,
-  resetHint: string | undefined,
-): string {
-  const lines: string[] = [`Workflow run ${status}.`, `runId: ${runId}`];
-  if (reason) {
-    lines.push(`reason: ${reason}`);
+/**
+ * Human-readable summary for a terminal non-completed run (paused | failed | aborted). The
+ * engine already stamped status/reason/resetHint on the WorkflowRunResult; this is a pure
+ * projection — no status is re-derived here.
+ */
+function formatTerminalSummary(run: WorkflowRunResult): string {
+  const lines: string[] = [`Workflow run ${run.status}.`, `runId: ${run.runId}`];
+  if (run.reason) {
+    lines.push(`reason: ${run.reason}`);
   }
-  if (resetHint) {
-    lines.push(`reset hint: ${resetHint}`);
+  if (run.resetHint) {
+    lines.push(`reset hint: ${run.resetHint}`);
   }
-  if (status === "paused") {
+  if (run.status === "paused") {
     lines.push(
-      `This run is resumable — call the workflow tool again with resumeFromRunId="${runId}" to continue from its journal.`,
+      `This run is resumable — call the workflow tool again with resumeFromRunId="${run.runId}" to continue from its journal.`,
     );
   }
   return lines.join("\n");
 }
 
+function formatRunSummary(run: WorkflowRunResult): string {
+  return run.status === "completed" ? formatCompletedSummary(run) : formatTerminalSummary(run);
+}
+
 /**
  * Build the MCP server with the single `workflow` tool registered. The AgentRunner is the
- * DI seam: it is injected here and threaded into every engine run. The returned McpServer is
- * not yet connected — the caller attaches a transport (see index.ts / StdioServerTransport).
+ * DI seam: it is injected here into a single WorkflowManager (so persistence — and therefore
+ * resume — is shared across calls) and every run goes through manager.runSync. The returned
+ * McpServer is not yet connected — the caller attaches a transport (see index.ts).
  */
 export function createWorkflowServer(runner: AgentRunner): McpServer {
   const mcp = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { capabilities: { tools: {} } });
+
+  // Composition root: the ACP-backed AgentRunner is injected into the engine here. The
+  // manager owns run lifecycle, status stamping, and the persisted journal used by resume.
+  const manager = new WorkflowManager({ agent: runner });
 
   mcp.registerTool(
     "workflow",
@@ -225,44 +171,51 @@ export function createWorkflowServer(runner: AgentRunner): McpServer {
     },
     async (args, extra) => {
       const input = clampWorkflowInput(args);
-      // A fresh run gets a new id; a resume keeps the prior id so its journal is reused and the
-      // returned runId stays stable across the pause/resume round-trip.
-      const runId = input.resumeFromRunId ?? randomUUID();
+      const reporter = createProgressReporter(extra);
 
-      const engineOptions: EngineExecOptions = {
-        script: input.script,
-        agent: runner,
-        args: input.args,
+      const exec: ExecOptions = {
         signal: extra.signal,
-        runId,
-        resumeFromRunId: input.resumeFromRunId,
         maxAgents: input.maxAgents,
         concurrency: input.concurrency,
         agentRetries: input.agentRetries,
         agentTimeoutMs: input.agentTimeoutMs,
         tokenBudget: input.tokenBudget,
-        onProgress: createProgressReporter(extra),
+        // The engine drives progress with the live snapshot; project it onto the MCP wire
+        // shape (settled agents / total seen so far / current phase). `settled` is monotonic.
+        onProgress: (snapshot: WorkflowSnapshot) => {
+          const settled = snapshot.agents.filter(
+            (a) => a.status === "done" || a.status === "error" || a.status === "skipped",
+          ).length;
+          reporter(settled, snapshot.agents.length || undefined, snapshot.currentPhase);
+        },
         confirm: createConfirm(mcp.server),
       };
 
-      try {
-        const engineResult = await runWorkflow(engineOptions);
-        // The engine seam returns the host-facing result MINUS the terminal status trio; a
-        // normal return is, by definition, "completed". (reason/resetHint stay unset.)
-        const run: WorkflowRunResult = { ...engineResult, status: "completed" };
-        const structuredContent = toWorkflowToolResult(run);
-        return {
-          structuredContent: { ...structuredContent },
-          content: [{ type: "text", text: formatCompletedSummary(run) }],
-        };
-      } catch (error) {
-        const failure = composeFailure(error, runId, extra.signal);
-        return {
-          structuredContent: { ...failure.result },
-          content: [{ type: "text", text: failure.summary }],
-          isError: failure.isError,
-        };
+      // Resume: the engine owns run identity. The shell only re-hydrates the journal the
+      // engine persisted for the prior runId and hands it back as resumeJournal; the engine
+      // replays the unchanged prefix and runs the rest live.
+      if (input.resumeFromRunId) {
+        const persisted = manager.getPersistence().load(input.resumeFromRunId);
+        if (persisted?.journal) {
+          exec.resumeJournal = new Map<number, JournalEntry>(
+            persisted.journal.map((entry) => [entry.index, entry] as const),
+          );
+        }
       }
+
+      // runSync RESOLVES to a terminal WorkflowRunResult (status already stamped); it does not
+      // throw on pause/fail/abort, so there is no shell-side status composition. A malformed
+      // script throws BEFORE a run exists (no runId) — that propagates to the SDK, which
+      // surfaces it as a tool error.
+      const run = await manager.runSync(input.script, input.args, exec);
+
+      const structuredContent = toWorkflowToolResult(run);
+      const isError = run.status === "failed" || run.status === "aborted";
+      return {
+        structuredContent: { ...structuredContent },
+        content: [{ type: "text", text: formatRunSummary(run) }],
+        isError,
+      };
     },
   );
 

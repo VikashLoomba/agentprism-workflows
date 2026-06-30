@@ -12,7 +12,7 @@ import { createAcpRunner } from "@agentprism/acp-agents";
 import { createWorkflowServer } from "./server.js";
 
 export { createWorkflowServer } from "./server.js";
-export type { EngineExecOptions, WorkflowConfirmCallback, WorkflowCheckpointOptions } from "./server.js";
+export type { WorkflowConfirmCallback, WorkflowCheckpointOptions } from "./server.js";
 export { clampWorkflowInput, workflowToolInputShape } from "./workflow-tool-input.js";
 export type { WorkflowToolInput } from "./workflow-tool-input.js";
 export { toWorkflowToolResult, workflowToolOutputShape } from "./workflow-tool-output.js";

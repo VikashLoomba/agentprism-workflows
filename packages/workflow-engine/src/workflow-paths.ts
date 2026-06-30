@@ -2,8 +2,8 @@
  * Filesystem layout for workflow-engine run state.
  *
  * New writes live under the user's workflow home so projects do not get
- * scattered `.pi/workflows` directories. Project-scoped state is still isolated
- * by a stable cwd-derived namespace.
+ * scattered `.agentprism/workflows` directories. Project-scoped state is still
+ * isolated by a stable cwd-derived namespace.
  */
 
 import { createHash } from "node:crypto";
@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { WORKFLOW_RUNS_DIR, WORKFLOW_SAVED_DIR } from "./config.js";
 
-export const WORKFLOW_HOME_RELATIVE_DIR = ".pi/workflows";
+export const WORKFLOW_HOME_RELATIVE_DIR = ".agentprism/workflows";
 export const WORKFLOW_PROJECTS_SUBDIR = "projects";
 
 export interface WorkflowProjectPaths {

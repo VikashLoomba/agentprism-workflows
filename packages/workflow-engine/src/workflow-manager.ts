@@ -100,7 +100,7 @@ export interface WorkflowManagerOptions {
   defaultAgentTimeoutMs?: number | null;
   /** Default retry attempts after recoverable agent failures. */
   defaultAgentRetries?: number;
-  /** Override the directory scanned for `agentType` definitions (de-Pi'd `.pi/agents`). */
+  /** Override the directory scanned for `agentType` definitions (defaults to AGENTS_DIR). */
   agentsDir?: string;
 }
 

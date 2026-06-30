@@ -85,8 +85,8 @@ export interface WorkflowRunOptions extends WorkflowAgentOptions {
   agentRegistry?: AgentRegistry;
   /**
    * Override the directory scanned for `agentType` definitions (`*.md`). When set,
-   * it replaces BOTH the project and user defaults — the de-Pi'd parameterization of
-   * the old hardcoded `.pi/agents`. Ignored when `agentRegistry` is supplied directly.
+   * it replaces BOTH the project and user defaults — the parameterization of the old
+   * hardcoded agents directory. Ignored when `agentRegistry` is supplied directly.
    */
   agentsDir?: string;
   concurrency?: number;
@@ -263,7 +263,7 @@ export async function runWorkflow<T = unknown>(
   const baseCwd = options.cwd ?? process.cwd();
   // Snapshot the agentType registry ONCE per run so two agent() calls can't
   // observe a mid-run edit (determinism); a later resume re-reads it. The agents
-  // directory is parameterized via options.agentsDir (de-Pi'd from `.pi/agents`).
+  // directory is parameterized via options.agentsDir (defaults to AGENTS_DIR).
   const agentRegistry =
     options.agentRegistry ??
     loadAgentRegistry(

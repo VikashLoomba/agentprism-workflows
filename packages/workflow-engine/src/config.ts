@@ -18,19 +18,19 @@ export const MAX_AGENT_RETRIES = 3;
 export const DEFAULT_TOKEN_BUDGET = null;
 
 /** Legacy project-relative directory for persisted workflow run state. New writes use workflowProjectPaths(). */
-export const WORKFLOW_RUNS_DIR = ".pi/workflows/runs";
+export const WORKFLOW_RUNS_DIR = ".agentprism/workflows/runs";
 
 /** Legacy project-relative directory for saved workflow commands. New writes use workflowProjectPaths(). */
-export const WORKFLOW_SAVED_DIR = ".pi/workflows/saved";
+export const WORKFLOW_SAVED_DIR = ".agentprism/workflows/saved";
 
 /** User-level saved workflows directory. */
-export const USER_WORKFLOW_SAVED_DIR = "~/.pi/workflows/saved";
+export const USER_WORKFLOW_SAVED_DIR = "~/.agentprism/workflows/saved";
 
 /** User-level model tiers config file, relative to the home directory. */
-export const MODEL_TIERS_FILE = ".pi/workflows/model-tiers.json";
+export const MODEL_TIERS_FILE = ".agentprism/workflows/model-tiers.json";
 
 /** User-level workflow extension settings file, relative to the home directory. */
-export const WORKFLOW_SETTINGS_FILE = ".pi/workflows/settings.json";
+export const WORKFLOW_SETTINGS_FILE = ".agentprism/workflows/settings.json";
 
 /** Default keyword that arms workflows mode from interactive input. */
 export const DEFAULT_KEYWORD_TRIGGER_WORD = "workflow";
@@ -47,8 +47,8 @@ export function normalizeKeywordTriggerWord(value: unknown): string | undefined 
  * Default named workflow subagent definitions directory, relative to a base dir.
  * Resolved both project-relative (cwd/<AGENTS_DIR>) and home-relative
  * (~/<AGENTS_DIR>); project entries win on name collision. Each `*.md` file is an
- * agent definition (frontmatter + body prompt). The engine no longer assumes Pi's
- * `.pi/agents`; callers may override the directory via the engine's `agentsDir`
- * option (see WorkflowRunOptions.agentsDir).
+ * agent definition (frontmatter + body prompt). The engine no longer hardcodes the
+ * agents directory; callers may override it via the engine's `agentsDir` option
+ * (see WorkflowRunOptions.agentsDir).
  */
 export const AGENTS_DIR = ".agentprism/agents";

@@ -33,7 +33,7 @@ export interface ModelTierConfig {
 // Configuration path
 // ---------------------------------------------------------------------------
 
-/** Path to the model tiers JSON config file (~/.pi/workflows/model-tiers.json). */
+/** Path to the model tiers JSON config file (~/.agentprism/workflows/model-tiers.json). */
 export function getModelTierConfigPath(): string {
   return join(homedir(), MODEL_TIERS_FILE);
 }
