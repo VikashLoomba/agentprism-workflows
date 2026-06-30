@@ -7,8 +7,13 @@
 // ===== packages/shared-types/src/errors.ts =====
 // The seam-level ERROR contract. Lives HERE (not in the engine) because the runner
 // (acp-agents) THROWS these and the engine reads .code + .recoverable via instanceof —
-// both sides MUST import the SAME class. Lifted VERBATIM from pi errors.ts (enum +
-// class + guard). wrapError/classifyProviderLimit stay engine-local (engine concern).
+// both sides MUST import the SAME class. Adapted from pi errors.ts (enum + WorkflowError
+// class + guards + the PURE, dependency-free classifyProviderLimit text classifier).
+// classifyProviderLimit is SHARED because its PRIMARY caller is the runner (acp-agents
+// raises PROVIDER_USAGE_LIMIT + resetHint) and the engine's wrapError uses it only as
+// defense-in-depth — both import ONE source so they can never diverge. The engine-local
+// wrapError/isAbortError/isTimeoutError stay in workflow-engine and import the classifier
+// from here.
 export enum WorkflowErrorCode {
   AGENT_TIMEOUT = "AGENT_TIMEOUT",
   WORKFLOW_ABORTED = "WORKFLOW_ABORTED",
@@ -54,4 +59,31 @@ export class WorkflowError extends Error {
 
 export function isWorkflowError(error: unknown): error is WorkflowError {
   return error instanceof WorkflowError;
+}
+
+export function isProviderUsageLimit(error: unknown): error is WorkflowError {
+  return isWorkflowError(error) && error.code === WorkflowErrorCode.PROVIDER_USAGE_LIMIT;
+}
+
+/**
+ * Detect a provider subscription/usage/quota/rate-limit exhaustion from free-form
+ * error text, and extract the provider's human reset hint when present. PURE +
+ * dependency-free — lifted verbatim from pi errors.ts:77-86. SHARED so the runner
+ * (acp-agents — PRIMARY caller, raises PROVIDER_USAGE_LIMIT) and the engine's wrapError
+ * (defense-in-depth) classify against ONE table and can never diverge.
+ *
+ * Callers reading SDK message metadata MUST gate on stopReason === "error" before
+ * trusting this, so a task whose own output merely mentions "rate limit" is never
+ * misclassified. Patterns mirror the SDK's non-retryable-limit table; transient
+ * overloaded/5xx errors are deliberately excluded (they stay recoverable and keep retrying).
+ */
+export function classifyProviderLimit(text: string | undefined): { matched: boolean; resetHint?: string } {
+  if (!text) return { matched: false };
+  const matched =
+    /usage limit|limit reached|insufficient[_\s]?quota|quota exceeded|exceeded your current quota|out of budget|available balance|\bquota\b|rate.?limit|too many requests|\b429\b|GoUsageLimitError|FreeUsageLimitError|\bbilling\b/i.test(
+      text,
+    );
+  if (!matched) return { matched: false };
+  const reset = text.match(/resets?\s+(?:in|at)\s+[^.\n]+/i);
+  return { matched: true, resetHint: reset?.[0]?.trim() };
 }
