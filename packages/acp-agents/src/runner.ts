@@ -137,7 +137,7 @@ export class AcpAgentRunner implements AgentRunner {
 /** Factory the mcp-server composition root calls to inject the runner into the engine. The pool
  *  size is a runner-level option (default 1, else AGENTPRISM_ACP_POOL_SIZE) — NOT a RunOptions
  *  field, so it never enters hashAgentCall / the resume identity. */
-export function createAcpRunner(options?: AcpPoolOptions): AgentRunner {
+export function createAcpRunner(options?: AcpPoolOptions): AcpAgentRunner {
   return new AcpAgentRunner(options);
 }
 
