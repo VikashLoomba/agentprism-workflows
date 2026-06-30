@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { WorkflowError, WorkflowErrorCode } from "@agentprism/shared-types";
+import { WorkflowError, WorkflowErrorCode } from "@automatalabs/shared-types";
 
 import {
   connect,

@@ -14,7 +14,7 @@
 // assistant's own task text here.
 import type { TSchema } from "typebox";
 import { Check, Convert } from "typebox/value";
-import { WorkflowError, WorkflowErrorCode } from "@agentprism/shared-types";
+import { WorkflowError, WorkflowErrorCode } from "@automatalabs/shared-types";
 
 /**
  * Find a JSON object/array in free-form text: a fenced ```json block if present, else the

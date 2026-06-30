@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 // Ported from pi tests/errors.test.ts. Only the parts that now live in
-// @agentprism/shared-types are kept here: classifyProviderLimit, isProviderUsageLimit,
+// @automatalabs/shared-types are kept here: classifyProviderLimit, isProviderUsageLimit,
 // and the WorkflowError class. wrapError moved to the engine and is covered by
 // engine-core, so its describe block (and its import) are intentionally NOT ported here.
 import {

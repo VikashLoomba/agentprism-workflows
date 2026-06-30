@@ -1,8 +1,8 @@
-// @agentprism/acp-agents — implements the AgentRunner seam from @agentprism/shared-types over
+// @automatalabs/acp-agents — implements the AgentRunner seam from @automatalabs/shared-types over
 // the Agent Client Protocol. It spawns claude-agent-acp / the installed npm dep codex-acp
 // (patched via pnpm patchedDependencies) as child processes and drives one subagent run to
 // completion. It NEVER imports
-// @agentprism/workflow-engine; the two siblings meet ONLY at AgentRunner, injected by
+// @automatalabs/workflow-engine; the two siblings meet ONLY at AgentRunner, injected by
 // mcp-server (the composition root) via createAcpRunner().
 export { AcpAgentRunner, createAcpRunner, selectBackend } from "./runner.js";
 

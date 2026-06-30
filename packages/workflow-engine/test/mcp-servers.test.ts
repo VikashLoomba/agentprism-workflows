@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { TSchema } from "typebox";
-import type { AgentResult, AgentRunner, JournalEntry, McpServerConfig, RunOptions } from "@agentprism/shared-types";
+import type { AgentResult, AgentRunner, JournalEntry, McpServerConfig, RunOptions } from "@automatalabs/shared-types";
 import { runWorkflow } from "../src/workflow.js";
 
 // (#5) agent({ mcpServers }) is an ADDITIVE run input: the engine must thread it through to

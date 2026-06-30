@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { isWorkflowError, WorkflowErrorCode } from "@agentprism/shared-types";
+import { isWorkflowError, WorkflowErrorCode } from "@automatalabs/shared-types";
 import { AcpAgentRunner } from "../src/index.js";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));

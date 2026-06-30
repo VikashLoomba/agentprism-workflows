@@ -1,6 +1,6 @@
 // packages/shared-types/src/agent-runner.ts
 //
-// THE SEAM — the single, frozen coupling point between @agentprism/workflow-engine
+// THE SEAM — the single, frozen coupling point between @automatalabs/workflow-engine
 // and ANY agent backend (acp-agents). The engine references the runner by THIS one
 // method only: it is the exact shape behind `Pick<WorkflowAgent,"run">` (pi
 // workflow.ts:59). It is BOUND at workflow.ts:283 (`const agentRunner = options.agent`

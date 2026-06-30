@@ -1,5 +1,5 @@
 /**
- * Configuration constants for @agentprism/workflow-engine.
+ * Configuration constants for @automatalabs/workflow-engine.
  */
 
 /** Maximum number of agents allowed per workflow run. */

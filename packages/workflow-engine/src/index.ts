@@ -1,6 +1,6 @@
-// @agentprism/workflow-engine — the lifted Pi engine, de-coupled from any agent
-// backend. It NEVER imports @agentprism/acp-agents; it references the backend ONLY
-// through the injected AgentRunner seam from @agentprism/shared-types.
+// @automatalabs/workflow-engine — the lifted Pi engine, de-coupled from any agent
+// backend. It NEVER imports @automatalabs/acp-agents; it references the backend ONLY
+// through the injected AgentRunner seam from @automatalabs/shared-types.
 
 // ── Engine entry ──
 export {
@@ -131,4 +131,4 @@ export type {
   JournalEntry,
   WorkflowRunResult,
   TokenUsage,
-} from "@agentprism/shared-types";
+} from "@automatalabs/shared-types";

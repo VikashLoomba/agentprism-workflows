@@ -22,7 +22,7 @@ import {
   type AgentResult,
   type AgentRunner,
   type RunOptions,
-} from "@agentprism/shared-types";
+} from "@automatalabs/shared-types";
 import type { StopReason } from "@agentclientprotocol/sdk";
 import type { TSchema } from "typebox";
 import type { SessionHandle } from "./acp-client.js";

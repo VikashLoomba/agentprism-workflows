@@ -1,4 +1,4 @@
-// Shared test harness for the @agentprism/mcp-server suite.
+// Shared test harness for the @automatalabs/mcp-server suite.
 //
 // NOT a test file (no `.test.ts` suffix => excluded from the `test/**/*.test.ts`
 // runner glob); it is imported by the real suites. It provides:
@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { AgentRunner, RunOptions } from "@agentprism/shared-types";
+import type { AgentRunner, RunOptions } from "@automatalabs/shared-types";
 
 import { createWorkflowServer } from "../src/index.js";
 

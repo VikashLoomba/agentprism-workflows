@@ -1,5 +1,5 @@
 {
-  "name": "@agentprism/mcp-server",
+  "name": "@automatalabs/mcp-server",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -21,9 +21,9 @@
     "test": "tsx --test \"test/**/*.test.ts\""
   },
   "dependencies": {
-    "@agentprism/shared-types": "workspace:*",
-    "@agentprism/acp-agents": "workspace:*",
-    "@agentprism/workflow-engine": "workspace:*",
+    "@automatalabs/shared-types": "workspace:*",
+    "@automatalabs/acp-agents": "workspace:*",
+    "@automatalabs/workflow-engine": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29",
     "zod": "^4.0.0"
   }

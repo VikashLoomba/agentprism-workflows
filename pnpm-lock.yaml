@@ -34,7 +34,7 @@ importers:
       '@agentclientprotocol/sdk':
         specifier: 1.0.0
         version: 1.0.0(zod@4.4.3)
-      '@agentprism/shared-types':
+      '@automatalabs/shared-types':
         specifier: workspace:*
         version: link:../shared-types
       typebox:
@@ -43,13 +43,13 @@ importers:
 
   packages/mcp-server:
     dependencies:
-      '@agentprism/acp-agents':
+      '@automatalabs/acp-agents':
         specifier: workspace:*
         version: link:../acp-agents
-      '@agentprism/shared-types':
+      '@automatalabs/shared-types':
         specifier: workspace:*
         version: link:../shared-types
-      '@agentprism/workflow-engine':
+      '@automatalabs/workflow-engine':
         specifier: workspace:*
         version: link:../workflow-engine
       '@modelcontextprotocol/sdk':
@@ -67,7 +67,7 @@ importers:
 
   packages/workflow-engine:
     dependencies:
-      '@agentprism/shared-types':
+      '@automatalabs/shared-types':
         specifier: workspace:*
         version: link:../shared-types
       acorn:

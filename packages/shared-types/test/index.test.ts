@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 // tests/*.test.ts. tsx rewrites the .js specifier to the .ts source at run time.
 import { META_NS, META_KEYS } from "../src/index.js";
 
-test("@agentprism/shared-types public entry is reachable via ../src", () => {
+test("@automatalabs/shared-types public entry is reachable via ../src", () => {
   assert.equal(META_NS, "agentprism");
   assert.equal(typeof META_KEYS, "object");
 });

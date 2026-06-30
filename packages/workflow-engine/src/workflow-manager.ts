@@ -2,7 +2,7 @@
  * Workflow manager for background execution, pause/resume, and run management.
  *
  * The injected agent backend is an `AgentRunner` (the frozen seam from
- * @agentprism/shared-types); the manager never constructs a concrete agent. It
+ * @automatalabs/shared-types); the manager never constructs a concrete agent. It
  * COMPOSES the host-facing `WorkflowRunResult` (which carries the terminal status
  * trio) on top of the engine's bare `EngineRunResult` — the engine seam stays
  * unchanged. `runSync` (the path the MCP shell drives) resolves to a TERMINAL
@@ -11,7 +11,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import type { AgentRunner, JournalEntry, TokenUsage, WorkflowMeta, WorkflowRunResult } from "@agentprism/shared-types";
+import type { AgentRunner, JournalEntry, TokenUsage, WorkflowMeta, WorkflowRunResult } from "@automatalabs/shared-types";
 import { preview, type WorkflowSnapshot } from "./display.js";
 import { WorkflowError, WorkflowErrorCode } from "./errors.js";
 import {

@@ -3,7 +3,7 @@
 // seam errors pass through untouched; everything else is a recoverable AGENT_EXECUTION_ERROR.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { WorkflowError, WorkflowErrorCode } from "@agentprism/shared-types";
+import { WorkflowError, WorkflowErrorCode } from "@automatalabs/shared-types";
 import { errorText, mapThrownError } from "../src/index.js";
 
 test("errorText extracts a message from Error, string, {message}, and falls back to JSON/String", () => {

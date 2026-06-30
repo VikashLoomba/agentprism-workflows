@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 // Adapted import: AgentUsage is part of the frozen seam contract, which now lives in
-// @agentprism/shared-types (pi imported it from "../src/agent.js"). The engine re-exports
+// @automatalabs/shared-types (pi imported it from "../src/agent.js"). The engine re-exports
 // it, but importing from its canonical home keeps the seam explicit.
-import type { AgentUsage } from "@agentprism/shared-types";
+import type { AgentUsage } from "@automatalabs/shared-types";
 import { WorkflowError, WorkflowErrorCode } from "../src/errors.js";
 import { type JournalEntry, runWorkflow } from "../src/workflow.js";
 

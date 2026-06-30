@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 // wrapError is the engine-local helper (workflow-engine/src/errors.ts). It imports
-// classifyProviderLimit from @agentprism/shared-types and re-exports the shared
+// classifyProviderLimit from @automatalabs/shared-types and re-exports the shared
 // WorkflowError class / enum / guards, so the engine and the runner share ONE class.
 // These ported pi tests assert that re-export + the engine's own classification.
 import {

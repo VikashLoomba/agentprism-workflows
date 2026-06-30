@@ -3,7 +3,7 @@
  *
  * The seam-level error CONTRACT (the WorkflowError runtime class, the
  * WorkflowErrorCode enum, isWorkflowError/isProviderUsageLimit, and the pure
- * classifyProviderLimit text classifier) lives in @agentprism/shared-types so the
+ * classifyProviderLimit text classifier) lives in @automatalabs/shared-types so the
  * runner (acp-agents) and this engine share ONE class — `instanceof WorkflowError`
  * holds across packages. They are re-exported here so the lifted engine modules can
  * keep importing them from "./errors.js".
@@ -11,7 +11,7 @@
  * wrapError / isAbortError / isTimeoutError stay engine-local: they are the engine's
  * own classification of the failures it observes when calling the injected runner.
  */
-import { classifyProviderLimit, WorkflowError, WorkflowErrorCode } from "@agentprism/shared-types";
+import { classifyProviderLimit, WorkflowError, WorkflowErrorCode } from "@automatalabs/shared-types";
 
 export {
   WorkflowError,
@@ -19,8 +19,8 @@ export {
   isWorkflowError,
   isProviderUsageLimit,
   classifyProviderLimit,
-} from "@agentprism/shared-types";
-export type { WorkflowErrorOptions } from "@agentprism/shared-types";
+} from "@automatalabs/shared-types";
+export type { WorkflowErrorOptions } from "@automatalabs/shared-types";
 
 export function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;

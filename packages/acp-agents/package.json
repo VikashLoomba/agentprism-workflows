@@ -1,5 +1,5 @@
 {
-  "name": "@agentprism/acp-agents",
+  "name": "@automatalabs/acp-agents",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -18,7 +18,7 @@
     "test": "tsx --test \"test/**/*.test.ts\""
   },
   "dependencies": {
-    "@agentprism/shared-types": "workspace:*",
+    "@automatalabs/shared-types": "workspace:*",
     "@agentclientprotocol/sdk": "1.0.0",
     "@agentclientprotocol/claude-agent-acp": "0.53.0",
     "@agentclientprotocol/codex-acp": "1.0.2",

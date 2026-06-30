@@ -3,7 +3,7 @@
 //
 // This MIRRORS the ACP SDK's `McpServer` union (types.gen.d.ts) structurally so the
 // acp-agents runner can hand it straight to `session/new { mcpServers }` with no
-// transform — but it lives HERE, in @agentprism/shared-types, because shared-types has
+// transform — but it lives HERE, in @automatalabs/shared-types, because shared-types has
 // ZERO ACP/MCP deps (it is the only module BOTH the engine and acp-agents import, and
 // neither may pull the ACP SDK through it). The three transports below are the ones a
 // client may provide over ACP: stdio (command/args/env), http (url/headers), sse
