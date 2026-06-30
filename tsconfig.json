@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared-types" },
+    { "path": "packages/acp-agents" },
+    { "path": "packages/workflow-engine" },
+    { "path": "packages/mcp-server" }
+  ]
+}

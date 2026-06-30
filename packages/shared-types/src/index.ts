@@ -1,0 +1,7 @@
+// ===== packages/shared-types/src/index.ts =====
+export * from "./errors.js";
+export * from "./agent-history.js";
+export * from "./agent-run.js"; // RunOptions, AgentResult, AgentUsage (+ AgentRunOptions/AgentRunResult aliases)
+export * from "./agent-runner.js"; // AgentRunner — THE SEAM
+export * from "./meta.js"; // META_NS, META_KEYS, ClaudeCodeSessionMeta
+export * from "./workflow-result.js"; // WorkflowRunResult, RunStatus, WorkflowMeta, TokenUsage, JournalEntry
