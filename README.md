@@ -1,636 +1,240 @@
-# ACP + MCP Dynamic Workflow Orchestrator — Design & API Reference
+# AgentPrism Workflows
 
-A working document for a **Pi-independent** rebuild of `pi-dynamic-workflows`. It records
-*what* we're building, *which libraries* we use, and *what each library actually supports*
-with concrete, package-specific API references (field/method names, file:line, versions) so
-the implementation path is unambiguous.
+Run **dynamic, multi-agent workflow scripts** — `agent()`, `parallel()`, `pipeline()` — over real coding agents (Claude Code and OpenAI Codex), with deterministic journaling, resume, token budgets, and git-worktree isolation.
 
-> This is a reference/design doc, not a roadmap. It describes the system and how its pieces fit.
+You author a small JavaScript *script* (`export const meta`, then call `agent()` / `parallel()` / `pipeline()`); the engine runs it in a sandboxed realm, fanning each `agent()` call out to an [Agent Client Protocol](https://agentclientprotocol.com) (ACP) backend. It's available two ways:
+
+- **As a TypeScript SDK** — `@automatalabs/workflows` — embed the runner in your own program.
+- **As a stdio MCP server** — `@automatalabs/mcp-server` — expose a `workflow` tool to any MCP host (Claude Code, Zed, …).
+
+> **Status: pre-release.** The packages are versioned `0.1.0` under the `@automatalabs` scope and are being prepared for npm. Until they're published, install from source (see [Install](#install)). The `npm i …` lines below are how it will work once published.
 
 ---
 
-## 1. Goal
+## How it works
 
-Rebuild the dynamic-workflow orchestrator so it has **no dependency on Pi**:
-
-- The **`workflow` tool** is exposed by a **stdio MCP server** (instead of a Pi extension's
-  `registerTool`). Any MCP-capable host (Claude Code, Zed, etc.) can call it.
-- Each **`agent()` call inside a workflow script** is backed by an **ACP agent server**
-  (`claude-agent-acp` for Claude, `codex-acp` for Codex) over the **Agent Client Protocol**
-  (instead of Pi's in-process `createAgentSession`).
-
-The deterministic orchestration engine (the JS `vm` realm, `parallel`/`pipeline`, the
-journal/resume machinery, token budget, git-worktree isolation) is **reused essentially
-unchanged** from `pi-dynamic-workflows` — only the *leaf* (how one subagent runs) and the
-*shell* (how the tool is exposed) change.
-
-This is built as a **new, standalone codebase** that *lifts* the reused pieces (copy + adapt the
-source) rather than modifying the Pi extension; nothing imports Pi at runtime. It is split into
-three modules so the agent logic and the engine are each usable on their own, independent of the
-MCP server — see §2 for the module layout.
-
-### The core inversion
-
-The orchestrator process plays **two protocol roles at once**:
+One process plays **two protocol roles at once**: it's an **MCP server** (or a library) that accepts a workflow script, and an **ACP client** that drives one or more agent subprocesses to execute each `agent()` call.
 
 ```
-   MCP host (Claude Code / Zed / …)
-        │  calls tool "workflow"  (MCP, stdio)
+   your program  ──or──  MCP host (Claude Code / Zed / …)
+        │  runDynamicWorkflow(script)      calls tool "workflow"
         ▼
 ┌──────────────────────────────────────────────┐
-│  workflow-orchestrator process                │
-│   • MCP SERVER  → exposes the `workflow` tool │
-│   • ACP CLIENT  → drives agent servers        │
+│  AgentPrism orchestrator                      │
 │   • the deterministic engine runs the script  │
+│   • ACP CLIENT → drives agent servers         │
 └──────────────────────────────────────────────┘
         │  session/new, session/prompt … (ACP, JSON-RPC over stdio)
         ▼
-   claude-agent-acp / codex-acp  (one or more long-lived subprocesses)
-        │  → real Claude / Codex agents, each in its own session
+   claude-agent-acp / codex-acp   (long-lived, pooled subprocesses)
+        │  → real Claude / Codex agents, one session per agent() call
 ```
 
-ACP and MCP are sibling JSON-RPC protocols from the same design space (ACP = host↔agent,
-MCP = agent↔tools), so this is a clean composition, not a hack.
+The deterministic engine (sandboxed `vm` realm, `parallel`/`pipeline`, journal/resume, token budget, worktree isolation) is independent of *how* a single agent runs and of *how* the tool is exposed. See [`docs/design-notes.md`](docs/design-notes.md) for the full protocol-level design.
 
 ---
 
-## 2. Codebase & module structure
+## Requirements
 
-This is a **new, greenfield codebase** — not a fork, a patch, or a runtime dependency of the Pi
-extension. We **lift** the specific pieces of `pi-dynamic-workflows` we need (copy + adapt the
-source) and write the rest fresh. Nothing imports Pi at runtime.
+- **Node.js ≥ 22** and **pnpm ≥ 10** (see `.nvmrc` / `packageManager`).
+- A backend agent CLI, authenticated on your machine:
+  - **Claude** — via the bundled `@agentclientprotocol/claude-agent-acp`; auth from `~/.claude/.credentials.json` or `ANTHROPIC_API_KEY` (the orchestrator inherits your environment).
+  - **Codex** — via `@agentclientprotocol/codex-acp` (+ the `@openai/codex` binary, installed as a dependency); auth from `~/.codex/auth.json`.
 
-The code is split into **three modules** with a one-way dependency direction, so each lower layer
-is usable on its own — in particular, the ACP agent logic and the workflow engine are both usable
-**with no MCP server at all**.
+You only need auth for the backend(s) you actually call.
 
-```
-                 ┌────────────────────────────────────────────────┐
-                 │  mcp-server   (the shell / one entrypoint)      │
-                 │   • the `workflow` TOOL DEFINITION + handler    │
-                 │   • stdio MCP transport, progress, resume param │
-                 └───────────────┬────────────────┬───────────────┘
-                       composes …  │                │
-                 ┌───────────────▼───────┐  ┌──────▼────────────────────────┐
-                 │  workflow-engine      │  │  acp-agents                   │
-                 │   vm runtime,         │  │   ACP client + Claude/Codex   │
-                 │   parallel/pipeline,  │  │   backends; structured output,│
-                 │   journal, budget,    │  │   model select, permissions,  │
-                 │   resume, worktree    │  │   usage, cancel               │
-                 └───────────┬───────────┘  └──────────┬────────────────────┘
-                             │   meet at the AgentRunner interface (DI)
-                             └──────────────┬──────────┘
-                                   run(prompt, opts) → result
+---
+
+## Install
+
+### From source (current)
+
+```bash
+git clone <this-repo> agentprism-workflows
+cd agentprism-workflows
+pnpm install      # applies the codex-acp patch + fetches backend binaries
+pnpm build        # tsc -b across all packages
 ```
 
-`workflow-engine` and `acp-agents` are **siblings**: neither imports the other. They meet only at
-the `AgentRunner` interface (`run(prompt, opts) → result`), injected at composition time. The
-engine never names a concrete backend; the agents module never knows it's inside a workflow.
+### From npm (once published)
 
-### `acp-agents` — *its own module, independent of the MCP server and the engine*
+```bash
+pnpm add @automatalabs/workflows        # the SDK
+# or, to run the MCP server:
+pnpm add @automatalabs/mcp-server
+```
 
-All the logic for actually using the ACP agents: opening and holding ACP client connections to
-`claude-agent-acp` / `codex-acp`, the `ClaudeBackend` / `CodexBackend`, model selection (§5.4),
-permission allow/deny (§5.5), usage extraction (§5.6), cancellation (§5.7), and the
-structured-output vendor wiring (§6). It exposes one method — `run(prompt, opts): Promise<result>`
-— satisfying the `AgentRunner` interface. Depends only on `@agentclientprotocol/sdk`.
+---
 
-The Codex backend drives the **installed npm dependency** `@agentclientprotocol/codex-acp@1.0.2`,
-patched via pnpm's native `patchedDependencies` (`patches/@agentclientprotocol__codex-acp@1.0.2.patch`)
-to forward the turn-level `outputSchema` (§6.3). The patch is applied at `pnpm install`, so Codex
-ships on a clean `git clone && pnpm install && pnpm build` — no vendored tree, no opt-in build step.
+## Packages
 
-Usable standalone, with no workflow and no MCP server:
+| Package | What it is |
+|---|---|
+| **`@automatalabs/workflows`** | The importable **SDK** — a thin facade to run workflow scripts programmatically with the default ACP backend. Start here. |
+| **`@automatalabs/mcp-server`** | The stdio **MCP server** exposing the `workflow` tool (bin: `agentprism-workflow`). |
+| **`@automatalabs/acp-agents`** | The ACP client + `Claude`/`Codex` backends (the `AgentRunner` implementation, connection pooling, structured output, permissions, usage). |
+| **`@automatalabs/workflow-engine`** | The deterministic engine: the script realm, `parallel`/`pipeline`, journal/resume, budgets, worktree isolation. |
+| **`@automatalabs/shared-types`** | The `AgentRunner` seam + shared types the others compose against. |
+
+Dependency direction: `mcp-server` and `workflows` both compose `acp-agents` + `workflow-engine`, which meet only at the `AgentRunner` seam in `shared-types`. The engine never names a backend; the agents never know they're inside a workflow.
+
+---
+
+## Quickstart — SDK
+
+Run a workflow script. The default backend is the ACP runner (`createAcpRunner()`), so this drives real agents and needs backend auth.
 
 ```ts
-import { ClaudeAcpAgent } from "acp-agents";
-const agent = new ClaudeAcpAgent({ /* server spawn + auth */ });
-const result = await agent.run("Summarize repo X", { schema: MY_SCHEMA, cwd, model: "opus" });
+import { runDynamicWorkflow } from "@automatalabs/workflows";
+
+const script = `
+  export const meta = {
+    name: "repo-scan",
+    description: "describe a repo as JSON, three ways in parallel",
+    phases: [{ title: "Fan" }],
+  };
+
+  const SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["repo", "fileCount"],
+    properties: { repo: { type: "string" }, fileCount: { type: "number" } },
+  };
+
+  phase("Fan");
+  const results = await parallel([
+    () => agent("Report this repo as JSON {repo, fileCount}.", { label: "a1", schema: SCHEMA }),
+    () => agent("Report this repo as JSON {repo, fileCount}.", { label: "a2", schema: SCHEMA }),
+  ]);
+  return results;
+`;
+
+const run = await runDynamicWorkflow(script, { args: {} });
+
+console.log(run.status);   // "completed" | "paused" | "failed" | "aborted"
+console.log(run.result);   // [{ repo: "...", fileCount: 123 }, …] — schema-validated objects
+console.log(run.tokenUsage, run.runId);
 ```
 
-### `workflow-engine` — the lifted Pi engine
+`runDynamicWorkflow` resolves to a **terminal** `WorkflowRunResult` even on pause/fail/abort — read `run.status` instead of catching. To swap the backend (or stub it in tests), pass your own runner: `runDynamicWorkflow(script, { runner })`. For lower-level control, use `WorkflowManager` / `runWorkflow` (also re-exported from the SDK).
 
-`runWorkflow` (the `vm` realm + determinism prelude; the
-`agent`/`parallel`/`pipeline`/`phase`/`log`/`budget` globals), the journal/resume, per-phase
-budgets, the limiter, the run manager + persistence, and the worktree helper. It depends on an
-**injected `AgentRunner`** — *not* on `acp-agents` — so it runs against a real ACP runner, a mock,
-or any other backend (exactly how the Pi tests drive it today via `options.agent`). The seam:
-`runWorkflow` accepts `options.agent?: AgentRunner` and only ever calls
-`agentRunner.run(prompt, opts)` (today `Pick<WorkflowAgent,"run">`, [`src/workflow.ts:59`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L59), bound at [`:283`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L283), called at [`:465`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L465)).
-
-### `mcp-server` — the shell / composition root
-
-Owns the **`workflow` tool definition** (input schema + handler) and the stdio MCP transport;
-streams progress via MCP `notifications/progress`; exposes the `resumeFromRunId` param. It wires
-an `acp-agents` runner into `workflow-engine` and registers the tool. It is just **one** consumer
-— the engine + agents could equally be driven by a CLI, a test harness, or another server, with no
-MCP involved.
-
-> Packaging is open: a monorepo with three packages (`acp-agents` independently publishable), or a
-> single package with three internal module directories. Either way the dependency direction and
-> the `AgentRunner` seam are the contract.
-
-### Lifted from `pi-dynamic-workflows` → `workflow-engine` (copied/adapted, mostly unchanged)
-
-| Concern | Source (`pi-dynamic-workflows`) | Notes |
-|---|---|---|
-| Script execution | [`src/workflow.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts) — `runWorkflow`, `vm.createContext`/`vm.Script` (`:835`,`:866`) | Node `vm` realm; globals `agent`/`parallel`/`pipeline`/`phase`/`log`/`budget` injected |
-| Determinism | [`src/workflow.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts) `DETERMINISM_PRELUDE` (`:227`), parse blocklist (`:212`,`:890`) | neuters `Date.now`/`Math.random`/`new Date()` for resume reproducibility |
-| Fan-out | `parallel` (`:555`, barrier), `pipeline` (`:579`, no *inter-stage* barrier — but still `Promise.all`-joins all items at `:588`, so don't drop that on a port), `createLimiter` (`:1013`) | concurrency gate |
-| Journal / resume | [`src/run-persistence.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/run-persistence.ts), journal in [`workflow.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts) (`hashAgentCall` `:1045`, `firstMiss` longest-unchanged-prefix `:407`) | crash recovery + resume |
-| Budget | `budget` object (`:315`), per-phase sub-budgets (`:303`) | soft token gate |
-| Worktree isolation | [`src/worktree.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/worktree.ts) — `git worktree add` per agent | engine creates it (deterministic name) and passes `cwd` to `agent.run({cwd})` |
-| Model tiering logic | [`src/model-routing.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/model-routing.ts), [`src/model-tier-config.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/model-tier-config.ts) | pure logic; resolution *target* becomes an ACP session config option (§5.4) |
-| Schema validate/extract | [`src/agent.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/agent.ts) `resolveStructuredOutput` (`:113`), `extractValidated` (`:47`) | lifted into **`acp-agents`** (not the engine) as the schema guard (§6) |
-
-### Written fresh in the new codebase
-
-| Module | Piece | Replaces (Pi) | New |
-|---|---|---|---|
-| `acp-agents` | **Leaf** — run one subagent | `WorkflowAgent` in [`src/agent.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/agent.ts) (`createAgentSession`, `ModelRegistry`, `createCodingTools`) | `ACPAgent.run()` — drives `claude-agent-acp` / `codex-acp` over ACP |
-| `mcp-server` | **Shell** — expose the tool | [`extensions/workflow.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/extensions/workflow.ts) + `createWorkflowTool` `defineTool` + TUI ([`display.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/display.ts), [`task-panel.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/task-panel.ts), [`workflow-ui.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow-ui.ts)) | stdio MCP server registering the `workflow` tool; progress via MCP notifications |
-| `acp-agents` | **Structured output** | injected `structured_output` tool ([`src/structured-output.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/structured-output.ts)) | native backend schema constraint (§6); the injected tool is no longer the primary path |
-
----
-
-## 3. Libraries & packages
-
-All versions below were verified locally (cloned + `npm install`) on 2026-06-29.
-
-### Tool exposure (MCP server)
-
-- **`@modelcontextprotocol/sdk`** — official TypeScript MCP SDK. Use its stdio server
-  transport to expose the `workflow` tool. (Pulled transitively by claude-agent-sdk as
-  `@modelcontextprotocol/sdk@1.29.0`; pin your own direct dependency.)
-  Ref: https://github.com/modelcontextprotocol/typescript-sdk · https://modelcontextprotocol.io
-
-### Agent backends (ACP)
-
-- **`@agentclientprotocol/sdk@1.0.0`** — the ACP protocol SDK (JSON-RPC-over-stdio types +
-  client/connection helpers). This is what your orchestrator uses to *speak ACP as a client*.
-  Ref: https://agentclientprotocol.com · https://github.com/agentclientprotocol
-
-- **`@agentclientprotocol/claude-agent-acp@0.53.0`** — ACP server wrapping Claude.
-  Bin: `claude-agent-acp` (`npx @agentclientprotocol/claude-agent-acp`). Author: Zed Industries.
-  Wraps **`@anthropic-ai/claude-agent-sdk@0.3.195`**.
-  Ref: https://github.com/agentclientprotocol/claude-agent-acp
-  > Naming note: the canonical package is **`claude-agent-acp`**, not "claude-acp".
-
-- **`@agentclientprotocol/codex-acp@1.0.2`** — ACP server wrapping OpenAI Codex (TypeScript
-  rewrite over the **Codex App Server**). Bin: `codex-acp` (`npx -y @agentclientprotocol/codex-acp`).
-  Ref: https://github.com/agentclientprotocol/codex-acp
-  > The Rust `zed-industries/codex-acp` is the deprecated predecessor; development moved to the
-  > `agentclientprotocol/codex-acp` TypeScript package.
-
-### Engine support (lifted from pi-dynamic-workflows; no Pi runtime needed)
-
-- **`acorn`** — parse the workflow script + extract/validate the `meta` literal.
-- **`node:vm`**, **`node:crypto`** — script realm + journal hashing.
-- A JSON-Schema lib (**`typebox`** today, or **`zod`** — note `claude-agent-acp` itself uses
-  `zod ^3.25 || ^4`) for the `agent({schema})` contract and client-side validation.
-- **`git`** — worktree isolation (`git worktree add/remove`).
-
----
-
-## 4. The MCP side — exposing the `workflow` tool
-
-The `workflow` tool keeps essentially the same input contract as today
-([`src/workflow-tool.ts:61`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow-tool.ts#L61)), exposed via the MCP server instead of `defineTool`:
-
-- `script` (**required** string) — raw JS; must start with
-  `export const meta = { name, description, phases? }` and call `agent()` at least once.
-- `args` (optional) — exposed to the script as global `args`.
-- `maxAgents` (optional, default 1000), `concurrency` (optional, clamped to 16),
-  `agentRetries` (optional, ≤3), `agentTimeoutMs` (optional, default none),
-  `tokenBudget` (optional, default none).
-- **Bounds clamp, don't reject:** accept `concurrency`/`agentRetries` as plain numbers in the tool
-  schema — *not* Zod `.max()`, which rejects out-of-range input with `InvalidParams`. The engine
-  already clamps them (`normalizeConcurrency` → `MAX_CONCURRENCY` 16, `normalizeAgentRetries` →
-  `MAX_AGENT_RETRIES` 3), so defer to it and keep the "clamped" semantics above (matches Pi).
-
-**One semantic changes vs. Pi.** MCP tool calls are request/response within the caller's turn;
-there is no "return immediately, deliver the result into a *later* turn" mechanism (that was a
-Pi-extension affordance, `installResultDelivery`). So the MCP `workflow` tool runs
-**synchronously**: execute to completion, stream progress via MCP **`notifications/progress`**,
-return the final result. This is exactly the existing `background:false` / `runSync` path
-([`src/workflow-tool.ts:223`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow-tool.ts#L223)) — make it the default and drop `startInBackground`.
-
-Resume is **not lost**, it becomes **explicit**: expose a `resumeFromRunId` tool parameter; the
-host calls `workflow` again to continue from the persisted journal (the engine already supports
-this via `resumeJournal` in `runWorkflow`).
-
-Human-in-the-loop: `checkpoint()` relied on Pi's `ui.confirm`. Over MCP it falls back to the
-headless default (already handled at [`src/workflow.ts:828`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L828)), unless the MCP client supports
-**elicitation**, which you can wire `checkpoint()` to.
-
----
-
-## 5. The ACP side — driving agent servers
-
-ACP is **JSON-RPC 2.0 over stdio**, newline-delimited (messages MUST NOT contain embedded
-newlines; stdout = protocol, stderr = free for logs). Protocol version is `1`.
-Spec: https://agentclientprotocol.com/protocol/v1/transports
-
-### 5.1 Lifecycle / a single turn
-
-```
-initialize                         → capability handshake (protocolVersion, clientCapabilities, authMethods)
-session/new   { cwd, mcpServers }  → returns sessionId (+ configOptions)
-session/prompt { sessionId, prompt }  (request)
-  ↳ session/update  notifications  → agent_message_chunk, tool_call, tool_call_update,
-                                      plan, usage_update, …  (streaming, agent→client)
-session/prompt response            → { stopReason, usage? }
-session/cancel { sessionId }       (notification, client→agent)
-```
-
-- **Stop reasons** (on the `session/prompt` result): `end_turn`, `max_tokens`,
-  `max_turn_requests`, `refusal`, `cancelled`.
-  Ref: https://agentclientprotocol.com/protocol/v1/prompt-turn
-
-### 5.2 Sessions & concurrency — supported
-
-A single agent-server **process hosts many concurrent sessions** (each keyed by `sessionId`).
-Both servers implement a real `sessionId → session` map:
-
-- `claude-agent-acp`: `sessions` map; prompts on **different** sessions run concurrently;
-  prompts **within** one session are queued (`promptQueueing`). ([`src/acp-agent.ts`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts))
-- `codex-acp`: `private readonly sessions: Map<string, SessionState>` with per-session prompt
-  state + generation fencing. ([`src/CodexAcpServer.ts`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/CodexAcpServer.ts))
-
-**Efficient fan-out:** run one (or a few) long-lived server processes and open **N sessions**;
-the engine's `createLimiter` caps real concurrency. You're bound by API rate limits and
-per-session memory, not by the protocol.
-Ref: https://agentclientprotocol.com/protocol/v1/session-setup
-
-### 5.3 Working directory / worktree isolation — supported, clean
-
-`cwd` is a **required, per-session, absolute** field on `session/new` (independent per session
-in one process); optional `additionalDirectories` expands the root set. So worktree isolation
-maps directly: `createWorktree()` → `session/new({ cwd: worktree.cwd })`. Both servers store
-`cwd` per session.
-Ref: https://agentclientprotocol.com/protocol/v1/session-setup#working-directory
-
-### 5.4 Model selection — supported, via Session Config Options (not `session/new`, not `initialize`)
-
-The client picks the model **per session** (switchable per turn) from the catalog the agent
-advertises:
-
-- Mechanism: agent returns `configOptions` (in the `session/new` result, updatable later)
-  including `{ id:"model", category:"model", type:"select", currentValue, options[] }`;
-  client switches with **`session/set_config_option`** `{ configId:"model", value }`.
-  Categories also include `model_config` (context/speed/quality) and `thought_level`.
-  Refs: https://agentclientprotocol.com/protocol/v1/session-config-options ·
-  https://agentclientprotocol.com/rfds/model-config-category
-- `claude-agent-acp`: `model` option → `query.setModel(...)`; accepts aliases (`opus`/`sonnet`);
-  initial precedence `ANTHROPIC_MODEL` env → `settings.model` → SDK default; per-call override
-  `_meta.claudeCode.options.model`.
-- `codex-acp`: model encoded as `"model[effort]"` (e.g. `gpt-5.2[high]`) + separate
-  `reasoning_effort` select; switch via `session/set_config_option` (the wire method;
-  `setConfigOption` is just the ACP SDK's JS accessor for it).
-
-> The **catalog** belongs to the server (Claude models on `claude-agent-acp`, Codex models on
-> `codex-acp`), so cross-**provider** routing = choosing which server; within a provider,
-> per-call tiering works. This is what the engine's `tier: small/medium/big` maps onto.
-
-### 5.5 Permissions → tool allow/deny — supported
-
-The agent requests approval per gated tool call via **`session/request_permission`**
-(agent→client), with options whose `kind ∈ {allow_once, allow_always, reject_once,
-reject_always}`. The spec explicitly allows clients to **auto-respond**, so an allow/deny-list
-is implemented by deciding at that boundary (by tool name / command / kind) without user
-interaction. Both servers also expose coarse permission modes (`acceptEdits`, `plan`, `dontAsk`,
-`bypassPermissions`/`agent-full-access`, …).
-Ref: https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission
-
-### 5.6 Usage / token accounting — supported
-
-- **`usage_update`** `session/update` notification: `used` + `size` (token counts), optional
-  `cost { amount, currency }`.
-- Per-turn `usage` object on the `session/prompt` response (still a **Draft RFD**, but both
-  servers already emit it).
-- `claude-agent-acp` reports **tokens + dollar cost** (`cost = total_cost_usd`, USD); response
-  `usage { inputTokens, outputTokens, cachedReadTokens, cachedWriteTokens, totalTokens }`.
-- `codex-acp` reports **tokens/quota only** (no dollar cost).
-
-This maps onto the engine's `onUsage` / token accounting; no need for the chars/4 estimator
-fallback in the normal case.
-Refs: https://agentclientprotocol.com/protocol/v1/prompt-turn · https://agentclientprotocol.com/rfds/session-usage
-
-### 5.7 Cancellation — supported
-
-`session/cancel { sessionId }` is a fire-and-forget notification; the agent aborts model+tool
-work and then resolves the original `session/prompt` with `stopReason: "cancelled"`. A
-`session/close` (when advertised) also frees the session. Maps onto the engine's
-`AbortController`/`signal`.
-Ref: https://agentclientprotocol.com/protocol/v1/cancellation
-
-### 5.8 Giving agents extra tools — `mcpServers` on `session/new`
-
-The client passes MCP server configs (stdio mandatory; http/sse optional per capability) in
-`session/new`; the agent connects to them. This is the **only** client-side tool-injection path
-in ACP (the client does not hand the agent a tool object directly).
-- `claude-agent-acp`: ACP `mcpServers` → SDK `McpServerConfig`, merged with user options
-  ([`src/acp-agent.ts:3127-3149`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3127-L3149), [`:3242`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3242)).
-- `codex-acp`: supports stdio + http (rejects `acp`/`sse`).
-Ref: https://agentclientprotocol.com/protocol/v1/session-setup#mcp-servers
-
----
-
-## 6. Structured output (the crux)
-
-**Both backends natively constrain a result to a JSON Schema.** What differs is *scope* and the
-*vendor channel* used to reach it. ACP **core** models none of it — only an open `_meta`
-extension point — so each backend tunnels its native support through a vendor-specific path.
-
-### 6.1 ACP core (`@agentclientprotocol/sdk@1.0.0`) — no native structured output
-
-Verified by exhaustive grep (zero matches for `outputSchema|structuredContent|json_schema|…`).
+### Run a single agent directly
 
 ```ts
-// dist/schema/types.gen.d.ts:5017
-export type PromptRequest = {
-  sessionId: SessionId;
-  prompt: Array<ContentBlock>;
-  _meta?: { [key: string]: unknown } | null;   // the ONLY extension point
-};
-// :2943  PromptResponse = { stopReason, usage?, _meta }   — no result payload
-// :213   ToolCallContent = Content | Diff | Terminal      — no structuredContent
+import { createAcpRunner } from "@automatalabs/workflows";
+
+const runner = createAcpRunner();
+const data = await runner.run("Summarize this repo as JSON {summary}.", {
+  schema: {
+    type: "object", additionalProperties: false,
+    required: ["summary"], properties: { summary: { type: "string" } },
+  },
+  model: "opus",          // routes to Claude; e.g. "gpt-5-codex" routes to Codex
+  cwd: process.cwd(),
+});
+// data is typed/validated against the schema (a plain object, not text)
+await runner.dispose();   // closes pooled backend processes
 ```
 
-### 6.2 Claude — `@agentclientprotocol/claude-agent-acp@0.53.0` → `@anthropic-ai/claude-agent-sdk@0.3.195`
+---
 
-**Supported, session-scoped, via the `_meta.claudeCode` vendor extension.**
+## Quickstart — MCP server
 
-**(a) Set the schema — IN.** The SDK's `Options.outputFormat` is the native lever:
+The `workflow` tool runs a script to completion synchronously, streaming `notifications/progress`, and returns the structured result.
 
-```ts
-// claude-agent-sdk  sdk.d.ts:1651
-/** Output format configuration for structured responses.
- *  When specified, the agent will return structured data matching the schema. */
-outputFormat?: OutputFormat;
-// :1981  OutputFormat = JsonSchemaOutputFormat
-// :870   JsonSchemaOutputFormat = { type: 'json_schema'; schema: Record<string, unknown> }
-// :1983  OutputFormatType = 'json_schema'
-```
+Register the stdio server in your MCP host's config:
 
-The adapter **spreads the client-supplied options straight into the SDK query**, so a client
-sets it via `_meta.claudeCode.options.outputFormat` at `session/new`:
-
-```ts
-// claude-agent-acp  src/acp-agent.ts:3180
-const userProvidedOptions = sessionMeta?.claudeCode?.options;   // = params._meta.claudeCode.options
-// :3216
-const options: Options = {
-  systemPrompt,
-  settingSources: ["user", "project", "local"],
-  ...(thinking !== undefined && { thinking }),
-  ...userProvidedOptions,   // ← :3220  carries outputFormat straight into the SDK query
-  // ACP-managed overrides AFTER the spread (cwd, mcpServers, permissionMode, tools,
-  // canUseTool, hooks, env, …) do NOT touch outputFormat
-};
-```
-
-> Source (claude-agent-acp): [`acp-agent.ts:3180`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3180), [`:3216`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3216), [`:3220`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3220), [`:3242`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3242).
-
-Client `session/new` payload:
-
-```jsonc
+```json
 {
-  "cwd": "/abs/path/to/worktree",
-  "_meta": {
-    "claudeCode": {
-      "options": {
-        "outputFormat": { "type": "json_schema", "schema": { /* your JSON Schema */ } }
-      },
-      "emitRawSDKMessages": true          // required to READ the result (see (c))
+  "mcpServers": {
+    "agentprism-workflow": {
+      "command": "agentprism-workflow",
+      "env": { "AGENTPRISM_DEFAULT_BACKEND": "claude" }
     }
   }
 }
 ```
 
-**(b) Constraint + retry — built in.** The SDK validates the final message against the schema
-and retries; on exhaustion it ends with a terminal subtype:
+From source (before publishing), point at the built entry instead:
 
-```ts
-// claude-agent-sdk  sdk.d.ts:3943  (SDKResultError.subtype)
-'error_during_execution' | 'error_max_turns' | 'error_max_budget_usd'
-  | 'error_max_structured_output_retries'
-```
-
-The adapter already handles that subtype ([`src/acp-agent.ts:1763`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L1763), mapped to an internal
-error / `max_turn_requests` stop reason).
-
-**(c) Read the result — OUT (the one rough edge).** The parsed object lands in:
-
-```ts
-// claude-agent-sdk  sdk.d.ts:3983  (SDKResultSuccess)
-structured_output?: unknown;
-```
-
-…but ACP `PromptResponse` only carries `{ stopReason, usage }`, and the adapter does **not** give
-`structured_output` a first-class ACP field. You read it by opting into raw SDK messages:
-
-```ts
-// claude-agent-acp  src/acp-agent.ts:357 (flag), :3488 (wired), :1337 (forwarded)
-if (session.emitRawSDKMessages && shouldEmitRawMessage(session.emitRawSDKMessages, message)) {
-  await this.client.extNotification("_claude/sdkMessage", {
-    sessionId: params.sessionId,
-    message: message as Record<string, unknown>,
-  });
+```json
+{
+  "mcpServers": {
+    "agentprism-workflow": {
+      "command": "node",
+      "args": ["/abs/path/to/agentprism-workflows/packages/mcp-server/dist/index.js"]
+    }
+  }
 }
 ```
 
-> Source (claude-agent-acp): [`acp-agent.ts:357`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L357) (flag), [`:3488`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L3488) (wired), [`:1337`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L1337) (forwarded).
+**Tool: `workflow`** — input parameters:
 
-So: set `_meta.claudeCode.emitRawSDKMessages = true`, then read `structured_output` off the
-`_claude/sdkMessage` notification carrying the `type:"result", subtype:"success"` message.
+| Param | Type | Notes |
+|---|---|---|
+| `script` | string (**required**) | Raw JS; first statement must be `export const meta = { name, description, phases? }`; must call `agent()` at least once. |
+| `args` | any | Exposed to the script as the global `args`. |
+| `maxAgents` | number | Default 1000. |
+| `concurrency` | number | **Clamped** to 16 (not rejected). |
+| `agentRetries` | number | **Clamped** to 3. |
+| `agentTimeoutMs` | number \| null | Per-agent timeout; omit for none. |
+| `tokenBudget` | number \| null | Hard total-token cap for the run; omit for none. |
+| `resumeFromRunId` | string | Resume a prior run from its persisted journal (resume is **explicit**). |
 
-**Scope:** **session-scoped** — `outputFormat` is read at `session/new`; `prompt()`
-([`src/acp-agent.ts:1034`](https://github.com/agentclientprotocol/claude-agent-acp/blob/b8df8e0e5460fd782214f4dde488f7476c80c454/src/acp-agent.ts#L1034)) reads no per-turn schema. With the engine's one-session-per-`agent()`
-model this is a non-issue (one schema per agent call = one session).
-
-### 6.3 Codex — `@agentclientprotocol/codex-acp` (Codex App Server)
-
-**The Codex App Server natively constrains the final message AND the shipped binary honors it —
-but the stock codex-acp adapter never forwards a client schema, so Codex structured output needs a
-~1-line adapter patch.** (Verified end-to-end below.)
-
-**Protocol declares it (turn-level `outputSchema`):**
-
-```ts
-// codex-acp  src/app-server/v2/TurnStartParams.ts:43-46  — the LIVE path is v2 `turn/start`
-/** Optional JSON Schema used to constrain the final assistant message for this turn. */
-outputSchema?: JsonValue | null;
-// src/app-server/SendUserTurnParams.ts (v1) is DEAD CODE — the server speaks v2 turn/start only
-```
-
-> Source (codex-acp): [`TurnStartParams.ts:43-46`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/v2/TurnStartParams.ts#L43-L46). These TS types are **generated from the codex binary** (`codex app-server generate-ts`).
-
-**The shipped binary honors it.** codex-acp@1.0.2 ships `@openai/codex@^0.142.4`; verified at tag
-`rust-v0.142.4` (SHA `d0fd966`), the App Server threads `turn/start.outputSchema` all the way into
-the OpenAI Responses API as a **strict** structured-output constraint:
-
-```
-turn/start.output_schema            app-server-protocol/.../v2/turn.rs:143
-  → final_output_json_schema        app-server/.../turn_processor.rs:523   (the handler wires it in)
-  → turn_context.final_output_json_schema   core/.../session/turn_context.rs:780
-  → prompt.output_schema            core/.../session/turn.rs:1109
-  → Responses API (strict)          core/.../client.rs:818-819  (&prompt.output_schema, _strict)
-```
-
-> Source (openai/codex @ `rust-v0.142.4`): [`turn.rs:143`](https://github.com/openai/codex/blob/d0fd96663e19a6cd5d6f315e3420c4d154562013/codex-rs/app-server-protocol/src/protocol/v2/turn.rs#L143), [`turn_processor.rs:523`](https://github.com/openai/codex/blob/d0fd96663e19a6cd5d6f315e3420c4d154562013/codex-rs/app-server/src/request_processors/turn_processor.rs#L523), [`turn_context.rs:780`](https://github.com/openai/codex/blob/d0fd96663e19a6cd5d6f315e3420c4d154562013/codex-rs/core/src/session/turn_context.rs#L780), [`turn.rs:1109`](https://github.com/openai/codex/blob/d0fd96663e19a6cd5d6f315e3420c4d154562013/codex-rs/core/src/session/turn.rs#L1109), [`client.rs:818-819`](https://github.com/openai/codex/blob/d0fd96663e19a6cd5d6f315e3420c4d154562013/codex-rs/core/src/client.rs#L818-L819).
-
-**The gap + the patch.** The stock adapter's `sendPrompt()` builds the `runTurn({…})` call but
-never sets `outputSchema`. Forward it from the prompt's `_meta` (the adapter already reads
-`request._meta` nearby) — a ~1-line patch in [`src/CodexAcpClient.ts`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/CodexAcpClient.ts):
-
-    // inside sendPrompt() → the runTurn({ ... }) call
-    outputSchema: (request._meta as any)?.["agentprism/outputSchema"] ?? null,
-
-`runTurn → turnStart → sendRequest({ method: "turn/start", params })` passes it through verbatim;
-`TurnStartParams.outputSchema` already exists, so it's type-clean.
-
-**Delivery.** The patch ships as a pnpm-native patch over the pinned npm dep — `pnpm.patchedDependencies`
-in the root `package.json` points at `patches/@agentclientprotocol__codex-acp@1.0.2.patch` (anchored to
-the published `1.0.2` bundle's `runTurn({…})` call). pnpm re-applies it on every `pnpm install`, so the
-patched adapter is present on a clean checkout with no vendoring and no postinstall hook. `CodexBackend`
-spawns the resolved package main (`require.resolve("@agentclientprotocol/codex-acp")`) under the current
-node.
-
-**Output needs no patch.** `outputSchema` constrains the FINAL assistant message, which already
-flows back over the normal `session/update` agent-message stream — `CodexBackend` reads the final
-text and `JSON.parse`s it. (Cleaner than Claude, which needs `emitRawSDKMessages`.)
-
-**Strict-mode caveat.** `output_schema_strict` is `true` for normal turns, so the schema is sent in
-strict mode — `CodexBackend` must normalize the engine's JSON Schema to OpenAI strict rules (every
-property `required`, `additionalProperties:false`, supported types/keywords only) before sending.
-Keep the validate→re-prompt guard regardless.
-
-**Tool-level structured output also exists, but it's the wrong lever for a client (see §6.4):**
-
-```ts
-// src/app-server/Tool.ts:9            outputSchema?: JsonValue   (on the tool definition)
-// src/app-server/ToolOutputSchema.ts:6-10   { properties?, required?: string[], type: string }
-// src/app-server/CallToolResult.ts:9          structuredContent?: JsonValue
-// src/app-server/v2/McpToolCallResult.ts:6    structuredContent: JsonValue | null
-// src/app-server/v2/McpServerToolCallResponse.ts:6  structuredContent?: JsonValue
-```
-
-> Source (codex-acp): [`Tool.ts:9`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/Tool.ts#L9), [`ToolOutputSchema.ts:6-10`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/ToolOutputSchema.ts#L6-L10), [`CallToolResult.ts:9`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/CallToolResult.ts#L9), [`McpToolCallResult.ts:6`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/v2/McpToolCallResult.ts#L6), [`McpServerToolCallResponse.ts:6`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/app-server/v2/McpServerToolCallResponse.ts#L6).
-
-### 6.4 Why tool-level structured output is the wrong lever for a *client*
-
-For both backends, a tool's `structuredContent` flows back to **the model**, not to your
-orchestrator. The SDK's in-process `tool()` helper exposes **no `outputSchema`**
-(`claude-agent-sdk sdk.d.ts:6506`, `:3683`). The only client-capturable tool signal is the
-tool's **inputSchema** (the *args* the model passes when it calls a client-hosted tool). So
-schema-conformance for a subagent **result** should use the turn/session output format, not a
-tool.
-
-### 6.5 What this means for us
-
-- **Drop the injected `structured_output` tool as the primary path.** The backend constrains
-  natively — **Claude out-of-the-box via `_meta`; Codex after the ~1-line adapter patch (§6.3)** —
-  stronger than hoping the model calls a tool.
-- **Keep `resolveStructuredOutput`'s validate-then-re-prompt ([`src/agent.ts:113`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/agent.ts#L113)) as a guard**,
-  because `structured_output` is typed `unknown` and the constraint can still fail
-  (`error_max_structured_output_retries`). Ladder: native constraint → client-side validate →
-  re-prompt on failure.
-- **Abstract behind a per-backend adapter** — the two paths genuinely differ (Claude:
-  session-scoped vendor `_meta.claudeCode` + `emitRawSDKMessages`, read off the raw message stream;
-  Codex: per-turn `outputSchema` forwarded by a **patched** adapter, read off the normal message
-  stream, with strict-schema normalization). Same `run(prompt, { schema })` interface above them.
+The run is synchronous (one `tools/call` = one full run). Resume after a pause/crash by calling `workflow` again with `resumeFromRunId`.
 
 ---
 
-## 7. The leaf interface: `ACPAgent.run(prompt, opts)`
+## Writing workflow scripts
 
-This lives in the **`acp-agents`** module (§2) and is usable on its own — no `workflow-engine`,
-no `mcp-server`. It drives `claude-agent-acp` and the pnpm-patched `@agentclientprotocol/codex-acp`
-npm dep (§2, §6.3) as ACP server subprocesses. It implements the `AgentRunner` seam the engine injects against (today
-`Pick<WorkflowAgent, "run">`, [`src/workflow.ts:59`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L59)). One method, two backend strategies behind it:
+A script is plain JavaScript whose **first statement** is the `meta` literal. Inside it, these globals are available (injected into the run's realm — they are not importable functions; `@automatalabs/workflows` ships an ambient `.d.ts` so your editor knows them):
 
-```
-run(prompt, { schema?, model?, tier?, cwd?, signal?, toolNames?, … }) →
-  1. pick backend (Claude vs Codex) by agentType/model
-  2. session/new({ cwd: worktree?.cwd })           // §5.3 worktree isolation
-  3. select model via session config option         // §5.4
-  4. apply schema:
-       Claude → already set in session/new _meta.claudeCode.options.outputFormat (+ emitRawSDKMessages)
-       Codex  → outputSchema on the turn params
-  5. session/prompt(prompt); drain session/update:
-       • agent_message_chunk → assistant text
-       • tool_call / request_permission → enforce allow/deny (§5.5)
-       • usage_update → token accounting (§5.6)
-  6. on stopReason:
-       schema set → extract structured result
-                     (Claude: structured_output off _claude/sdkMessage; Codex: structuredContent/result),
-                     then VALIDATE; re-prompt on failure (guard)
-       no schema   → final assistant text (empty ⇒ recoverable retry)
-  7. signal.aborted → session/cancel (§5.7)
-```
+- `agent(prompt, opts?)` — run one subagent. With `opts.schema` (a JSON Schema) you get a validated object back; without it, the assistant's text. Other opts: `label`, `phase`, `model`/`tier`, `agentType`, `isolation`, `timeoutMs`, `retries`, `mcpServers`. (Working directory comes from worktree `isolation`; tool policy and instructions come from the `agentType` definition. `cwd`/`toolNames`/`instructions` are options on the lower-level `createAcpRunner().run()` API, not script-level `agent()` opts.)
+- `parallel([fn, …])` — run thunks concurrently; **barrier** (awaits all).
+- `pipeline(items, stage1, stage2, …)` — stream each item through stages independently (no inter-stage barrier).
+- `phase(title)`, `log(msg)` — progress grouping + narration.
+- `budget` — the run's token budget (`budget.total`, `budget.remaining()`, `budget.spent()`).
+- `checkpoint()`, `gate()`, `verify()`, `judgePanel()`, `loopUntilDry()`, `completenessCheck()`, `retry()`, `workflow()`, `args`.
 
-Everything above this method — `parallel`/`pipeline`, the journal, budget, phases, resume — is
-the unchanged engine.
+Determinism is enforced (`Date.now`/`Math.random`/`new Date()` are neutered in the realm) so a killed run **resumes** from its journal with a cache-hit on the unchanged prefix.
 
 ---
 
-## 8. Caveats / version pins / things to design around
+## Structured output
 
-- **Version-specific (Claude):** the structured-output path is verified for
-  `claude-agent-acp@0.53.0` / `@anthropic-ai/claude-agent-sdk@0.3.195`. The `_meta.claudeCode`
-  channel and `emitRawSDKMessages` are vendor extensions, not standard ACP — pin versions and
-  isolate behind the backend adapter.
-- **`emitRawSDKMessages` is mandatory** to read `structured_output` on the Claude path; filter
-  the raw stream to just the `type:"result"` message.
-- **Schema scope (Claude) is per-session** → spin up a fresh ACP session per `agent()` call (or
-  per distinct schema). The engine already does one session per call.
-- **Codex structured output needs a codex-acp patch:** the shipped binary (`@openai/codex@0.142.4`,
-  verified at `rust-v0.142.4`) honors `turn/start.outputSchema`, but the stock adapter never forwards
-  it — the ~1-line `_meta` → `runTurn` forward (§6.3) ships as a **pnpm-native patch over the pinned
-  `@agentclientprotocol/codex-acp@1.0.2` npm dep** (`pnpm.patchedDependencies` →
-  `patches/@agentclientprotocol__codex-acp@1.0.2.patch`), re-applied on every `pnpm install` (no
-  vendored tree). `CodexBackend` also normalizes schemas to OpenAI **strict** rules. Output rides the
-  normal message stream (no `emitRawSDKMessages` needed).
-- **MCP turn semantics:** no "deliver result into a later turn" — run the `workflow` tool
-  synchronously with progress notifications; expose `resumeFromRunId` for continuation.
-- **Cross-provider routing = choose the server.** Per-call model tiering works *within* a
-  provider via config options; switching providers means routing to a different ACP server.
-- **Concurrency** is bound by provider API rate limits + per-session memory, not the protocol;
-  intra-session prompts serialize.
-- **Per-turn token-usage breakdown** on `PromptResponse` is still a Draft ACP RFD (servers emit
-  it ahead of stabilization). `codex-acp` reports tokens/quota but **no dollar cost**.
-- **`codex-acp` config options are our codex model/tier/effort routing channel** (the model,
-  `reasoning_effort`, and Fast-mode `SessionConfigOption`s, switched via `session/set_config_option`).
-  codex-acp disables them **only** when the connecting client is IntelliJ/JetBrains **and** its
-  `version` starts with `2026.1` (`isJetBrains2026_1Client` → `isSessionConfigEnabled` in
-  `CodexAcpServer.ts`). Since `acp-agents` controls the `clientInfo` it sends at `initialize`, just
-  don't identify as JetBrains/IntelliJ `2026.1` and config options stay enabled — so the gate never
-  affects us. It's independent of structured output, which rides the turn, not config options.
+Pass a JSON Schema as `agent({ schema })` and the result is a **validated object**, not text. Each backend constrains generation natively (Claude via its output-format channel; Codex via a turn-level `outputSchema`), then the runner validates and re-prompts on mismatch. See [`docs/design-notes.md` §6](docs/design-notes.md) for the per-backend mechanics.
 
 ---
 
-## 9. References
+## Backends & selection
 
-**Packages (verified versions, 2026-06-29):**
-- `@modelcontextprotocol/sdk` (stdio MCP server) — https://github.com/modelcontextprotocol/typescript-sdk
-- `@agentclientprotocol/sdk@1.0.0` — https://github.com/agentclientprotocol
-- `@agentclientprotocol/claude-agent-acp@0.53.0` (wraps `@anthropic-ai/claude-agent-sdk@0.3.195`) — https://github.com/agentclientprotocol/claude-agent-acp
-- `@agentclientprotocol/codex-acp@1.0.2` — https://github.com/agentclientprotocol/codex-acp
+The backend is chosen per `agent()` call from the `model`/`tier` you pass, by provider prefix:
 
-**ACP spec:**
-- Overview / transports — https://agentclientprotocol.com/protocol/v1/transports
-- Initialization — https://agentclientprotocol.com/protocol/v1/initialization
-- Session setup (cwd, mcpServers) — https://agentclientprotocol.com/protocol/v1/session-setup
-- Prompt turn / stop reasons / usage — https://agentclientprotocol.com/protocol/v1/prompt-turn
-- Tool calls / permissions — https://agentclientprotocol.com/protocol/v1/tool-calls
-- Session config options (model) — https://agentclientprotocol.com/protocol/v1/session-config-options
-- Cancellation — https://agentclientprotocol.com/protocol/v1/cancellation
-- Extensibility (`_meta`, `_`-methods) — https://agentclientprotocol.com/protocol/v1/extensibility
+- `opus`, `sonnet`, `haiku`, `claude…`, `anthropic/…` → **Claude** (`claude-agent-acp`).
+- `gpt…`, `codex…`, `o3`/`o4`, `openai/…` → **Codex** (`codex-acp`).
+- Otherwise the default backend (`AGENTPRISM_DEFAULT_BACKEND`, default `claude`).
 
-**Reused engine (lifted from [`pi-dynamic-workflows`](https://github.com/QuintinShaw/pi-dynamic-workflows)):**
-- [`src/workflow.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts) — engine, vm, determinism, journal, `agent`/`parallel`/`pipeline`, budget
-- [`src/workflow-manager.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow-manager.ts) — run lifecycle, persistence, resume
-- [`src/run-persistence.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/run-persistence.ts) — disk journal + leases
-- [`src/worktree.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/worktree.ts) — git-worktree isolation
-- [`src/agent.ts`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/agent.ts) — the leaf being replaced; `resolveStructuredOutput`/`extractValidated` reused as the schema guard
+One long-lived ACP process per backend is **pooled** and reused across `agent()` calls (one spawn + one `initialize`), with a fresh session per call — so worktree isolation is preserved via each session's `cwd`.
+
+---
+
+## Configuration
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `AGENTPRISM_DEFAULT_BACKEND` | `claude` | Backend when the model/tier doesn't imply one (`claude` \| `codex`). |
+| `AGENTPRISM_ACP_POOL_SIZE` | `1` | Long-lived processes held per backend. |
+| `AGENTPRISM_CLAUDE_ACP_CMD` / `…_ARGS` | (bundled) | Override the Claude ACP server command/args. |
+| `AGENTPRISM_CODEX_ACP_CMD` / `…_ARGS` / `…_BIN` | (bundled) | Override the Codex ACP server command/args/binary. |
+
+---
+
+## Documentation
+
+- [`docs/design-notes.md`](docs/design-notes.md) — the deep protocol-level design: ACP lifecycle, the structured-output crux, model/permission/usage/cancellation mechanics, and the engine lineage.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — local development, testing (including the gated live-backend e2e), the Codex patch, and releasing.
+- [Agent Client Protocol](https://agentclientprotocol.com) · [Model Context Protocol](https://modelcontextprotocol.io)
+
+## License
+
+Not yet set — a `LICENSE` file is a prerequisite before the first npm publish. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
