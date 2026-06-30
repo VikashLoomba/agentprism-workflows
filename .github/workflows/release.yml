@@ -51,6 +51,13 @@ jobs:
           # provenance / OIDC trusted publishing to target the public registry.
           registry-url: https://registry.npmjs.org
 
+      # npm OIDC trusted publishing needs the npm CLI >= 11.5.1 to do the token
+      # exchange. Node 22 ships npm 10, which fails the publish with a misleading
+      # E404 ("is not in this registry") even with id-token + a configured trusted
+      # publisher. `changeset publish` performs the OIDC exchange through this npm.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
       # Same frozen install as CI: re-applies the codex-acp pnpm patch and
       # fetches the linux-x64 native binaries (ubuntu glibc x64, no --no-optional).
       - name: Install dependencies
