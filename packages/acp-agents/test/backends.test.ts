@@ -1,0 +1,125 @@
+// Areas (2a)/(3a): the Backend strategy seam — how each backend carries the schema IN
+// (Claude: session/new _meta.claudeCode; Codex: per-turn _meta["agentprism/outputSchema"])
+// and reads the native structured result OUT — plus selectBackend cross-provider routing.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { Type } from "typebox";
+import { META_KEYS } from "@agentprism/shared-types";
+import { ClaudeBackend, CodexBackend, selectBackend, toStrictJsonSchema } from "../src/index.js";
+import type { Backend, StructuredSource } from "../src/index.js";
+
+const SCHEMA = Type.Object({ city: Type.String({ minLength: 1 }), hot: Type.Boolean() });
+
+function source(text: string, raw: unknown): StructuredSource {
+  return { currentTurnText: () => text, rawStructuredOutput: () => raw };
+}
+
+// ---- Claude backend -----------------------------------------------------------------
+
+test("ClaudeBackend.sessionMeta carries outputFormat + emitRawSDKMessages at session/new", () => {
+  const meta = new ClaudeBackend().sessionMeta(SCHEMA) as {
+    claudeCode: { options: { outputFormat: { type: string; schema: Record<string, unknown> } }; emitRawSDKMessages: boolean };
+  };
+  assert.equal(meta.claudeCode.options.outputFormat.type, "json_schema");
+  assert.equal(meta.claudeCode.emitRawSDKMessages, true);
+  // Claude path is non-strict: the SDK applies its own constraint, so validation keywords survive
+  // and additionalProperties is NOT forced false.
+  const schema = meta.claudeCode.options.outputFormat.schema;
+  assert.equal((schema.properties as Record<string, Record<string, unknown>>).city.minLength, 1);
+  assert.equal("additionalProperties" in schema, false);
+});
+
+test("ClaudeBackend: no schema => no session _meta; never carries schema on the turn", () => {
+  // Typed through the Backend seam (the engine only ever sees Backend), so promptMeta takes
+  // the schema arg even though Claude deliberately ignores it.
+  const backend: Backend = new ClaudeBackend();
+  assert.equal(backend.sessionMeta(undefined), undefined);
+  assert.equal(backend.promptMeta(SCHEMA), undefined); // Claude schema is session-scoped, not per-turn
+  assert.equal(backend.id, "claude");
+});
+
+test("ClaudeBackend.nativeStructured reads structured_output off the raw SDK result", () => {
+  const backend = new ClaudeBackend();
+  assert.deepEqual(backend.nativeStructured(source("ignored prose", { city: "NYC", hot: true })), {
+    city: "NYC",
+    hot: true,
+  });
+  // no raw message captured => undefined (the ladder then falls back to prose extraction)
+  assert.equal(backend.nativeStructured(source("text", undefined)), undefined);
+});
+
+// ---- Codex backend ------------------------------------------------------------------
+
+test("CodexBackend.promptMeta forwards the STRICT schema under agentprism/outputSchema", () => {
+  const backend = new CodexBackend();
+  const meta = backend.promptMeta(SCHEMA) as Record<string, unknown>;
+  assert.deepEqual(meta, { [META_KEYS.outputSchema]: toStrictJsonSchema(SCHEMA) });
+  // sanity: META key is the reserved namespace, and the schema really is strict-normalized
+  assert.equal(META_KEYS.outputSchema, "agentprism/outputSchema");
+  const strict = meta[META_KEYS.outputSchema] as Record<string, unknown>;
+  assert.equal(strict.additionalProperties, false);
+  assert.deepEqual(strict.required, ["city", "hot"]);
+  assert.equal("minLength" in (strict.properties as Record<string, Record<string, unknown>>).city, false);
+});
+
+test("CodexBackend: no schema => no prompt _meta; never carries schema at session/new", () => {
+  const backend: Backend = new CodexBackend();
+  assert.equal(backend.promptMeta(undefined), undefined);
+  assert.equal(backend.sessionMeta(SCHEMA), undefined); // Codex carries the schema on the turn, not session/new
+  assert.equal(backend.id, "codex");
+});
+
+test("CodexBackend.nativeStructured parses the constrained final message (pure JSON, then block)", () => {
+  const backend = new CodexBackend();
+  // pure JSON final message
+  assert.deepEqual(backend.nativeStructured(source('{"city":"LA","hot":false}', undefined)), {
+    city: "LA",
+    hot: false,
+  });
+  // leading prose + fenced block => balanced-block extraction
+  assert.deepEqual(
+    backend.nativeStructured(source('Here:\n```json\n{"city":"SF","hot":true}\n```', undefined)),
+    { city: "SF", hot: true },
+  );
+  // empty turn => undefined
+  assert.equal(backend.nativeStructured(source("   ", undefined)), undefined);
+});
+
+// ---- selectBackend cross-provider routing -------------------------------------------
+
+test("selectBackend routes by provider prefix and bare model id", () => {
+  // provider prefixes
+  assert.equal(selectBackend({ model: "openai/gpt-5-codex" }).id, "codex");
+  assert.equal(selectBackend({ model: "codex/whatever" }).id, "codex");
+  assert.equal(selectBackend({ model: "anthropic/claude-opus-4-1" }).id, "claude");
+  assert.equal(selectBackend({ model: "claude/sonnet" }).id, "claude");
+  // bare model ids (no provider)
+  assert.equal(selectBackend({ model: "gpt-5" }).id, "codex");
+  assert.equal(selectBackend({ model: "o3-mini" }).id, "codex");
+  assert.equal(selectBackend({ model: "claude-3-5-sonnet" }).id, "claude");
+  assert.equal(selectBackend({ model: "opus" }).id, "claude");
+});
+
+test("selectBackend: model wins over tier; falls back to default (claude) when both unknown", () => {
+  // a recognizable model overrides a tier that maps elsewhere
+  assert.equal(selectBackend({ model: "gpt-5", tier: "claude-ish" }).id, "codex");
+  // unrecognized model but tier disambiguates
+  assert.equal(selectBackend({ model: "mystery-model", tier: "openai/gpt" }).id, "codex");
+  // nothing recognizable => default backend (claude)
+  assert.equal(selectBackend({ model: "mystery-model" }).id, "claude");
+  assert.equal(selectBackend({}).id, "claude");
+});
+
+test("selectBackend honors AGENTPRISM_DEFAULT_BACKEND when nothing else matches", () => {
+  const prev = process.env.AGENTPRISM_DEFAULT_BACKEND;
+  try {
+    process.env.AGENTPRISM_DEFAULT_BACKEND = "codex";
+    assert.equal(selectBackend({}).id, "codex");
+    assert.equal(selectBackend({ model: "unknownish" }).id, "codex");
+    // an explicit recognizable spec still overrides the default
+    assert.equal(selectBackend({ model: "claude-opus" }).id, "claude");
+  } finally {
+    if (prev === undefined) delete process.env.AGENTPRISM_DEFAULT_BACKEND;
+    else process.env.AGENTPRISM_DEFAULT_BACKEND = prev;
+  }
+});
