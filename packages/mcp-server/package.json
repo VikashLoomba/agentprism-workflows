@@ -45,9 +45,8 @@
     "prepublishOnly": "tsc -b"
   },
   "dependencies": {
+    "@automatalabs/workflows": "workspace:*",
     "@automatalabs/shared-types": "workspace:*",
-    "@automatalabs/acp-agents": "workspace:*",
-    "@automatalabs/workflow-engine": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29",
     "zod": "^4.0.0"
   }

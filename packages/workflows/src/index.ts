@@ -25,6 +25,7 @@ export type {
   WorkflowManagerOptions,
   CheckpointOptions,
   WorkflowRunResult,
+  WorkflowSnapshot,
 } from "@automatalabs/workflow-engine";
 export {
   WorkflowError,
@@ -49,6 +50,7 @@ export type { AcpPoolOptions } from "@automatalabs/acp-agents";
 // ── Shared seam types: the AgentRunner contract and its opts/result/usage shapes,
 //    so callers can implement or type a custom runner without reaching past the SDK. ──
 export type { AgentRunner, RunOptions, AgentResult, AgentUsage } from "@automatalabs/shared-types";
+export type { JournalEntry } from "@automatalabs/shared-types";
 
 /** Options for {@link runDynamicWorkflow}. */
 export interface RunDynamicWorkflowOptions {

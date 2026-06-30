@@ -12,7 +12,7 @@
 // machine-readable core — {runId, status, result, tokenUsage?, logs?} — and ALSO emit a
 // human-readable text content block alongside it.
 import { z } from "zod";
-import type { WorkflowRunResult } from "@automatalabs/shared-types";
+import type { WorkflowRunResult } from "@automatalabs/workflows";
 
 /** MINIMAL MCP outputSchema (registerTool `outputSchema`). Pins WorkflowRunResult's
  *  machine-readable core. status lets a host tell completed from paused (provider

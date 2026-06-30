@@ -41,15 +41,12 @@ importers:
 
   packages/mcp-server:
     dependencies:
-      '@automatalabs/acp-agents':
-        specifier: workspace:*
-        version: link:../acp-agents
       '@automatalabs/shared-types':
         specifier: workspace:*
         version: link:../shared-types
-      '@automatalabs/workflow-engine':
+      '@automatalabs/workflows':
         specifier: workspace:*
-        version: link:../workflow-engine
+        version: link:../workflows
       '@modelcontextprotocol/sdk':
         specifier: ^1.29
         version: 1.29.0(zod@4.4.3)

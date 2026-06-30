@@ -20,9 +20,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
-import { WorkflowManager } from "@automatalabs/workflow-engine";
-import type { ExecOptions, WorkflowSnapshot } from "@automatalabs/workflow-engine";
-import type { AgentRunner, JournalEntry, WorkflowRunResult } from "@automatalabs/shared-types";
+import { WorkflowManager } from "@automatalabs/workflows";
+import type {
+  ExecOptions,
+  WorkflowSnapshot,
+  AgentRunner,
+  JournalEntry,
+  WorkflowRunResult,
+} from "@automatalabs/workflows";
 
 import { clampWorkflowInput, workflowToolInputShape } from "./workflow-tool-input.js";
 import { toWorkflowToolResult, workflowToolOutputShape } from "./workflow-tool-output.js";
