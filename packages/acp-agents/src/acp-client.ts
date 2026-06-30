@@ -1,0 +1,716 @@
+// The ACP transport, POOL-managed. A backend's ACP server (claude-agent-acp / patched
+// codex-acp) is spawned ONCE as a long-lived child process and its held ACP client connection
+// is REUSED across many agent() calls. The PROCESS lifecycle is pool-managed (PooledConnection);
+// the SESSION lifecycle stays per-agent (SessionHandle):
+//   PooledConnection.start: spawn + initialize (ONCE; benign clientInfo so Codex config options
+//                           stay enabled). NO cwd here — cwd is per-SESSION.
+//   openSession -> session/new { cwd }   (per-session cwd PRESERVES worktree isolation)
+//             -> session/set_config_option (model selection)
+//             -> session/prompt (+ drain session/update)
+//             -> session/cancel (on opts.signal)
+//             -> session/close   (release the session; the PROCESS stays pooled)
+//
+// One connection multiplexes MANY concurrent sessions (the engine limiter caps concurrency, and
+// a pinned server runs prompts on different sessions concurrently). The single ACP Client handler
+// (MultiplexClient) therefore ROUTES every notification/permission request to the right
+// per-session accumulator (SessionState) by `sessionId`.
+//
+// Draining: ACP delivers a prompt turn as session/update notifications followed by the
+// session/prompt response, in wire order on one stream. Our Client handlers are synchronous
+// (they only push into the routed session's arrays), so by the time `rpc.prompt(...)` resolves,
+// every update for THAT session's turn has already been folded into its accumulator — even while
+// other sessions' updates interleave on the same wire.
+import { spawn, type ChildProcess } from "node:child_process";
+import { Readable, Writable } from "node:stream";
+import {
+  ClientSideConnection,
+  ndJsonStream,
+  PROTOCOL_VERSION,
+  type Client,
+  type ContentBlock,
+  type NewSessionRequest,
+  type PromptRequest,
+  type PromptResponse,
+  type RequestPermissionRequest,
+  type RequestPermissionResponse,
+  type SessionConfigOption,
+  type SessionConfigSelectOption,
+  type SessionConfigSelectOptions,
+  type SessionNotification,
+} from "@agentclientprotocol/sdk";
+import type { TSchema } from "typebox";
+import { META_KEYS, type AgentHistoryEntry, type McpServerConfig } from "@agentprism/shared-types";
+import type { Backend, BackendId, StructuredSource } from "./backend.js";
+import { decidePermission, type ToolPolicy } from "./permissions.js";
+import { UsageAccumulator } from "./usage.js";
+
+/** A benign client identity. NOT JetBrains/IntelliJ 2026.1 — that exact identity makes
+ *  codex-acp disable session config options (our model/effort routing channel). */
+const CLIENT_INFO = {
+  name: "agentprism-workflows",
+  title: "AgentPrism Workflows",
+  version: "0.1.0",
+} as const;
+
+const CLAUDE_RAW_MESSAGE_METHOD = "_claude/sdkMessage";
+
+/** Bound the best-effort session/close round-trip so a slow agent can't hang run()'s finally. */
+const CLOSE_SESSION_TIMEOUT_MS = 5_000;
+/** Bound the graceful SIGTERM shutdown before escalating to SIGKILL. */
+const DISPOSE_SIGKILL_GRACE_MS = 2_000;
+
+interface RawResultSuccess {
+  type: string;
+  subtype: string;
+  structured_output?: unknown;
+}
+
+/** Per-session accumulator: assistant text, tool history, usage, the Claude raw structured_output,
+ *  and the tool policy used to auto-answer permission requests for THIS session. */
+class SessionState {
+  readonly textChunks: string[] = [];
+  readonly history: AgentHistoryEntry[] = [];
+  readonly usage = new UsageAccumulator();
+  rawResultSuccess: RawResultSuccess | undefined;
+  private turnStartIndex = 0;
+
+  constructor(readonly policy: ToolPolicy) {}
+
+  /** Mark the start of a new turn so currentTurnText()/structured_output read only this turn. */
+  beginTurn(): void {
+    this.turnStartIndex = this.textChunks.length;
+    this.rawResultSuccess = undefined;
+  }
+
+  currentTurnText(): string {
+    return this.textChunks.slice(this.turnStartIndex).join("");
+  }
+
+  applyUpdate(update: SessionNotification["update"]): void {
+    switch (update.sessionUpdate) {
+      case "agent_message_chunk": {
+        if (update.content.type === "text") {
+          this.textChunks.push(update.content.text);
+          this.history.push({
+            role: "assistant",
+            kind: "text",
+            text: update.content.text,
+            timestamp: Date.now(),
+          });
+        }
+        break;
+      }
+      case "tool_call": {
+        this.history.push({
+          role: "tool",
+          kind: "toolCall",
+          text: update.title,
+          toolName: toolNameFromMeta(update._meta) ?? update.kind,
+          timestamp: Date.now(),
+        });
+        break;
+      }
+      case "usage_update": {
+        this.usage.recordCost(update.cost);
+        // Also feed the context token counts so AgentUsage.total is non-zero for backends
+        // that report tokens via usage_update but never via PromptResponse.usage.
+        this.usage.recordContextTokens(update.used, update.size);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  applyRawMessage(message: RawResultSuccess | undefined): void {
+    if (message && message.type === "result" && message.subtype === "success") {
+      this.rawResultSuccess = message;
+    }
+  }
+}
+
+/** The single ACP Client handler for one pooled connection. It ROUTES every notification and
+ *  permission request to the per-session SessionState by `sessionId`, so one process can serve
+ *  many concurrent sessions without their streams crossing. */
+class MultiplexClient implements Client {
+  private readonly sessions = new Map<string, SessionState>();
+
+  register(sessionId: string, state: SessionState): void {
+    this.sessions.set(sessionId, state);
+  }
+
+  unregister(sessionId: string): void {
+    this.sessions.delete(sessionId);
+  }
+
+  requestPermission(params: RequestPermissionRequest): RequestPermissionResponse {
+    const state = this.sessions.get(params.sessionId);
+    // Unknown/closed session: refuse rather than silently allow a tool we can't attribute.
+    if (!state) return { outcome: { outcome: "cancelled" } };
+    return decidePermission(params, state.policy);
+  }
+
+  sessionUpdate(params: SessionNotification): void {
+    this.sessions.get(params.sessionId)?.applyUpdate(params.update);
+  }
+
+  extNotification(method: string, params: Record<string, unknown>): void {
+    if (method !== CLAUDE_RAW_MESSAGE_METHOD) return;
+    // claude-agent-acp stamps the owning sessionId on every raw _claude/sdkMessage; route by it
+    // so structured_output lands in the right session under concurrency.
+    const sessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
+    if (!sessionId) return;
+    const message = (params as { message?: unknown }).message as RawResultSuccess | undefined;
+    this.sessions.get(sessionId)?.applyRawMessage(message);
+  }
+}
+
+/** Merge the engine runId correlation stamp into a backend's session/new `_meta`. Returns the
+ *  meta unchanged when no runId is given (so a backend that sends no `_meta` keeps sending none). */
+function stampRunId(
+  meta: Record<string, unknown> | undefined,
+  runId: string | undefined,
+): Record<string, unknown> | undefined {
+  if (!runId) return meta;
+  return { ...(meta ?? {}), [META_KEYS.runId]: runId };
+}
+
+function toolNameFromMeta(meta: unknown): string | undefined {
+  if (!meta || typeof meta !== "object") return undefined;
+  for (const value of Object.values(meta as Record<string, unknown>)) {
+    if (value && typeof value === "object") {
+      const toolName = (value as Record<string, unknown>).toolName;
+      if (typeof toolName === "string") return toolName;
+    }
+  }
+  return undefined;
+}
+
+export interface AcpSessionOptions {
+  /** Absolute working directory for the ACP session (worktree isolation). */
+  cwd: string;
+  /** The schema for this run, if any (drives the backend's session/prompt `_meta`). */
+  schema: TSchema | undefined;
+  policy: ToolPolicy;
+  signal?: AbortSignal;
+  /** Client-provided MCP servers to attach at session/new. Omitted => `[]` (the default). */
+  mcpServers?: McpServerConfig[];
+  /** Engine run id, stamped onto session/new `_meta` (META_KEYS.runId) as a correlation id.
+   *  Omitted => no runId `_meta` is stamped (the request `_meta` is whatever the backend set). */
+  runId?: string;
+}
+
+/** Notified by a PooledConnection when its process dies, so the pool can drop it. */
+export interface PooledConnectionDeps {
+  onDead(connection: PooledConnection): void;
+}
+
+/**
+ * One long-lived ACP server subprocess + its held ACP client connection. Initialized ONCE and
+ * reused across agent() calls; it multiplexes many concurrent sessions. The process is NOT killed
+ * between sessions — only dispose() (pool teardown) or a crash ends it.
+ */
+export class PooledConnection {
+  readonly backendId: BackendId;
+  /** The held ACP connection; SessionHandles drive their session/* calls through it. */
+  readonly rpc: ClientSideConnection;
+
+  private readonly backend: Backend;
+  private readonly child: ChildProcess;
+  private readonly client = new MultiplexClient();
+  private readonly onDead: (connection: PooledConnection) => void;
+  /** Resolves once `initialize` completed (or rejects if the process died first). */
+  private readonly ready: Promise<void>;
+  /** Resolves when the process dies; `race()` turns it into a thrown, descriptive error. */
+  private readonly whenDead: Promise<void>;
+  private resolveDead!: () => void;
+  private deathError: Error | undefined;
+
+  private supportsClose = false;
+  private _alive = true;
+  private _activeSessions = 0;
+  private stderrTail = "";
+
+  private constructor(backend: Backend, deps: PooledConnectionDeps) {
+    this.backend = backend;
+    this.backendId = backend.id;
+    this.onDead = deps.onDead;
+
+    const { command, args, env } = backend.spawnConfig();
+    // NOTE: deliberately NO `cwd` here. cwd is per-SESSION (session/new), so one pooled process
+    // serves runs in different worktrees without losing isolation.
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], env });
+    this.child = child;
+
+    if (!child.stdin || !child.stdout) {
+      throw new Error(`Failed to spawn ACP agent (${backend.id}): missing stdio pipes`);
+    }
+    child.stderr?.on("data", (chunk: Buffer) => {
+      this.stderrTail = (this.stderrTail + chunk.toString()).slice(-4000);
+    });
+    // Swallow stdio pipe errors (EPIPE/ECONNRESET when the child dies mid-write) so they don't
+    // bubble up as an "Unhandled 'error' event" and crash the host. Process death is handled via
+    // the 'exit'/'error' events on `child` below.
+    child.stdin.on("error", () => {});
+    child.stdout.on("error", () => {});
+
+    this.whenDead = new Promise<void>((resolve) => {
+      this.resolveDead = resolve;
+    });
+
+    const stream = ndJsonStream(
+      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
+      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
+    );
+    this.rpc = new ClientSideConnection(() => this.client, stream);
+
+    // Death detection. The connection's `signal` aborts the INSTANT the underlying stream closes
+    // (process crash or our own dispose) — in the SAME close() that rejects pending requests — so
+    // it is the earliest, DETERMINISTIC death signal: a connection is marked dead and evicted
+    // before its in-flight prompt's rejection even propagates, so a concurrent acquire can never
+    // hand out a connection whose process has already died. The child 'exit'/'error' events are a
+    // belt-and-suspenders backstop (and carry the exit code for a clearer message).
+    this.rpc.signal.addEventListener(
+      "abort",
+      () => this.die(new Error(`ACP agent (${this.backendId}) connection closed${this.stderrSuffix()}`)),
+      { once: true },
+    );
+    child.once("error", (err: Error) => this.die(err));
+    child.once("exit", (code: number | null, sig: NodeJS.Signals | null) => {
+      this.die(
+        new Error(`ACP agent (${this.backendId}) process exited (code=${code}, signal=${sig})${this.stderrSuffix()}`),
+      );
+    });
+
+    this.ready = this.initialize();
+    // The connection may be created and discarded (process dies) before anyone awaits `ready`.
+    this.ready.catch(() => {});
+  }
+
+  /** Spawn the backend and kick off the single `initialize`. Returns immediately; callers await
+   *  readiness implicitly via openSession(). */
+  static create(backend: Backend, deps: PooledConnectionDeps): PooledConnection {
+    return new PooledConnection(backend, deps);
+  }
+
+  get alive(): boolean {
+    return this._alive;
+  }
+
+  get activeSessions(): number {
+    return this._activeSessions;
+  }
+
+  /** Mark this connection dead exactly once, then ask the pool to evict it. Idempotent. */
+  private die(error: Error): void {
+    if (!this._alive) return;
+    this._alive = false;
+    this.deathError = error;
+    this.resolveDead();
+    this.onDead(this);
+  }
+
+  private stderrSuffix(): string {
+    const tail = this.stderrTail.trim();
+    return tail ? `\n${tail}` : "";
+  }
+
+  /** Race a wire call against process death so a crash surfaces a clear error instead of hanging
+   *  on a JSON-RPC response that will never come. */
+  async race<T>(op: Promise<T>): Promise<T> {
+    if (!this._alive) throw this.deathError ?? new Error(`ACP agent (${this.backendId}) connection closed`);
+    const dead = this.whenDead.then((): never => {
+      throw this.deathError ?? new Error(`ACP agent (${this.backendId}) connection closed`);
+    });
+    dead.catch(() => {});
+    return Promise.race([op, dead]);
+  }
+
+  private async initialize(): Promise<void> {
+    const response = await this.race(
+      this.rpc.initialize({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {},
+        clientInfo: { ...CLIENT_INFO },
+      }),
+    );
+    this.supportsClose = Boolean(response.agentCapabilities?.sessionCapabilities?.close);
+  }
+
+  /**
+   * Open a new per-agent session on this pooled connection: session/new { cwd }, register its
+   * accumulator for routing, and return a SessionHandle. `activeSessions` is reserved
+   * synchronously (before the first await) so the pool's load accounting is race-free.
+   */
+  async openSession(opts: AcpSessionOptions): Promise<SessionHandle> {
+    this._activeSessions += 1;
+    try {
+      await this.ready;
+      const state = new SessionState(opts.policy);
+      // The backend's vendor `_meta` (Claude schema channel; undefined for Codex) plus the
+      // optional engine runId correlation stamp. When neither is present, no `_meta` is sent.
+      const meta = stampRunId(this.backend.sessionMeta(opts.schema), opts.runId);
+      const request: NewSessionRequest = {
+        cwd: opts.cwd,
+        // Client-provided MCP servers (additive run input), else the default empty list.
+        mcpServers: opts.mcpServers ?? [],
+        ...(meta ? { _meta: meta } : {}),
+      };
+      const response = await this.race(this.rpc.newSession(request));
+      this.client.register(response.sessionId, state);
+      return new SessionHandle(this, response.sessionId, state, response.configOptions ?? [], opts);
+    } catch (error) {
+      this._activeSessions -= 1;
+      throw error;
+    }
+  }
+
+  /** Best-effort ACP cancel for one session (wired to opts.signal). The PROCESS stays pooled. */
+  async cancelSession(sessionId: string): Promise<void> {
+    if (!this._alive) return;
+    try {
+      await this.rpc.cancel({ sessionId });
+    } catch {
+      // best-effort: the session settles as "cancelled" regardless.
+    }
+  }
+
+  /**
+   * Release a session: stop routing it, free the load slot, and best-effort session/close on the
+   * wire (capability-gated, bounded, never fatal). The PROCESS is NOT killed — it returns to the
+   * pool for the next agent() call.
+   */
+  async releaseSession(sessionId: string): Promise<void> {
+    this.client.unregister(sessionId);
+    if (this._activeSessions > 0) this._activeSessions -= 1;
+    if (!this.supportsClose || !this._alive) return;
+    try {
+      await this.race(withTimeout(this.rpc.closeSession({ sessionId }), CLOSE_SESSION_TIMEOUT_MS));
+    } catch {
+      // best-effort: the session is already untracked; the process stays pooled.
+    }
+  }
+
+  /** Synchronous best-effort kill for a process-exit hook (no time to await a graceful close). */
+  killNow(): void {
+    if (!this._alive) return;
+    try {
+      this.child.kill("SIGKILL");
+    } catch {
+      // ignore
+    }
+  }
+
+  /** Close the process (pool teardown): end stdin, SIGTERM, escalate to SIGKILL, await exit. */
+  async dispose(): Promise<void> {
+    if (!this._alive) return;
+    const exited = new Promise<void>((resolve) => {
+      this.child.once("exit", () => resolve());
+    });
+    try {
+      this.child.stdin?.end();
+    } catch {
+      // ignore
+    }
+    try {
+      this.child.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+    const sigkill = setTimeout(() => {
+      try {
+        this.child.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+    }, DISPOSE_SIGKILL_GRACE_MS);
+    sigkill.unref?.();
+    try {
+      await exited;
+    } finally {
+      clearTimeout(sigkill);
+    }
+  }
+}
+
+type ModelSelectOption = Extract<SessionConfigOption, { type: "select" }>;
+
+/**
+ * One agent() run's ACP session on a pooled connection. Owns the per-session cwd/schema/policy,
+ * the model-selection state, and the abort wiring. On release() it lets go of the session
+ * WITHOUT killing the pooled process. Implements StructuredSource for the backend's native read.
+ */
+export class SessionHandle implements StructuredSource {
+  private configOptions: SessionConfigOption[];
+  private removeAbort: (() => void) | undefined;
+  private released = false;
+
+  constructor(
+    private readonly pooled: PooledConnection,
+    private readonly sessionId: string,
+    private readonly state: SessionState,
+    configOptions: SessionConfigOption[],
+    private readonly opts: AcpSessionOptions,
+  ) {
+    this.configOptions = configOptions;
+    if (opts.signal) {
+      const signal = opts.signal;
+      const onAbort = () => {
+        void this.cancel();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.removeAbort = () => signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /** Per-session usage accumulator (read by the runner on BOTH success and error paths). */
+  get usage(): UsageAccumulator {
+    return this.state.usage;
+  }
+
+  /** Diagnostic message/tool history accumulated across this session's run. */
+  get history(): AgentHistoryEntry[] {
+    return this.state.history;
+  }
+
+  /**
+   * Select the model for this session from the agent-advertised config options (§5.4).
+   * Returns `matched:false` (the caller fires onModelFallback) when the catalog has no value
+   * matching the spec, leaving the session default in place.
+   *
+   * Beyond the `model` select, this also drives the sibling config options the catalog may
+   * advertise (codex-acp), decoded from the `model[effort]` spec encoding:
+   *   - `reasoning_effort` (id "reasoning_effort" / category "thought_level"): set to the
+   *     bracketed effort token, e.g. `gpt-5.1-codex[high]` -> "high".
+   *   - Fast mode (id "fast-mode" / category "fast-mode"): turned on when the bracket carries
+   *     a `fast` token.
+   * Each is best-effort and advertise-gated: when the catalog does not expose the option, or
+   * the requested value is not among its choices, the modifier is NOT applied — but, unlike
+   * before, that silent no-op is now SURFACED. `modifierFallbacks` lists a descriptor for every
+   * requested effort/Fast value that could not be applied, so the caller can fire the same
+   * onModelFallback channel model selection uses (incorrect tiering becomes observable). It
+   * stays best-effort: an unmet modifier is reported, never thrown.
+   */
+  async selectModel(
+    spec: string,
+  ): Promise<{ matched: boolean; resolved?: string; modifierFallbacks?: string[] }> {
+    const option = this.configOptions.find(isModelSelectOption);
+    if (!option) return { matched: false };
+
+    const values = flattenSelectOptions(option.options);
+    const target = matchModelValue(values, spec);
+    if (!target) return { matched: false };
+
+    if (option.currentValue !== target.value) {
+      await this.applyConfigOption(option.id, target.value);
+    }
+
+    const modifierFallbacks = await this.applyModelModifiers(spec, target.value);
+    return { matched: true, resolved: target.value, modifierFallbacks };
+  }
+
+  /**
+   * Drive reasoning_effort + Fast-mode from the `model[effort]` spec bracket, when advertised.
+   * Returns a descriptor for each requested modifier that could NOT be applied because the
+   * catalog does not advertise the option or the requested value — the symmetric signal to
+   * model fallback, so the no-op is observable rather than silent. When the resolved model id
+   * already ENCODES the bracket (e.g. a `gpt-5-codex[high]` catalog value), the effort is
+   * carried by the model select itself, so it is treated as satisfied (no fallback).
+   */
+  private async applyModelModifiers(spec: string, modelValue: string): Promise<string[]> {
+    const fallbacks: string[] = [];
+    const tokens = bracketTokens(spec);
+    if (tokens.length === 0) return fallbacks;
+
+    // The model id already carries the bracket (e.g. "gpt-5-codex[high]") -> effort is applied
+    // via the model select; the separate effort/Fast options are not the channel here.
+    const effortAbsorbedByModel = modelValue.includes("[");
+    const fastRequested = tokens.some((t) => t.toLowerCase() === "fast");
+    const effortTokens = tokens.filter((t) => t.toLowerCase() !== "fast");
+
+    // reasoning_effort: set to the bracket token that matches one of its advertised values.
+    if (effortTokens.length > 0 && !effortAbsorbedByModel) {
+      const effortOption = this.configOptions.find(isReasoningEffortOption);
+      const match = effortOption
+        ? matchToken(flattenSelectOptions(effortOption.options), effortTokens)
+        : undefined;
+      if (effortOption && match) {
+        if (effortOption.currentValue !== match.value) {
+          await this.applyConfigOption(effortOption.id, match.value);
+        }
+      } else {
+        // No reasoning_effort option, or none of its choices match the requested effort.
+        fallbacks.push(`${spec}: reasoning_effort "${effortTokens.join(",")}" not advertised`);
+      }
+    }
+
+    // Fast mode: a `fast` token turns the advertised toggle on.
+    if (fastRequested && !effortAbsorbedByModel) {
+      const fastOption = this.configOptions.find(isFastModeOption);
+      const onValue = fastOption ? fastModeOnValue(flattenSelectOptions(fastOption.options)) : undefined;
+      if (fastOption && onValue) {
+        if (fastOption.currentValue !== onValue) {
+          await this.applyConfigOption(fastOption.id, onValue);
+        }
+      } else {
+        // No Fast-mode option, or it advertises no "on" value.
+        fallbacks.push(`${spec}: Fast mode not advertised`);
+      }
+    }
+
+    return fallbacks;
+  }
+
+  /** Set one session config option via the wire method and adopt the echoed catalog. */
+  private async applyConfigOption(configId: string, value: string): Promise<void> {
+    const response = await this.pooled.race(
+      this.pooled.rpc.setSessionConfigOption({ sessionId: this.sessionId, configId, value }),
+    );
+    this.configOptions = response.configOptions;
+  }
+
+  /** Send a prompt turn and drain it; returns the final PromptResponse. */
+  async prompt(text: string, promptMeta?: Record<string, unknown>): Promise<PromptResponse> {
+    this.opts.signal?.throwIfAborted();
+    this.state.beginTurn();
+    const prompt: ContentBlock[] = [{ type: "text", text }];
+    const request: PromptRequest = {
+      sessionId: this.sessionId,
+      prompt,
+      ...(promptMeta ? { _meta: promptMeta } : {}),
+    };
+    const response = await this.pooled.race(this.pooled.rpc.prompt(request));
+    this.state.usage.recordPromptUsage(response.usage);
+    return response;
+  }
+
+  /** StructuredSource — the latest turn's assistant text. */
+  currentTurnText(): string {
+    return this.state.currentTurnText();
+  }
+
+  /** StructuredSource — Claude's raw structured_output for the latest turn, if any. */
+  rawStructuredOutput(): unknown {
+    return this.state.rawResultSuccess?.structured_output;
+  }
+
+  /** Best-effort ACP cancel (wired to opts.signal). The agent settles the turn as "cancelled". */
+  async cancel(): Promise<void> {
+    await this.pooled.cancelSession(this.sessionId);
+  }
+
+  /** Let go of this session WITHOUT killing the pooled process; idempotent. */
+  async release(): Promise<void> {
+    if (this.released) return;
+    this.released = true;
+    this.removeAbort?.();
+    this.removeAbort = undefined;
+    await this.pooled.releaseSession(this.sessionId);
+  }
+}
+
+/** Resolve `op`, but reject after `ms` so a stuck best-effort wire call can't hang a caller. */
+function withTimeout<T>(op: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`ACP request timed out after ${ms}ms`)), ms);
+    timer.unref?.();
+    op.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function isModelSelectOption(option: SessionConfigOption): option is ModelSelectOption {
+  return option.type === "select" && (option.category === "model" || option.id === "model");
+}
+
+function isReasoningEffortOption(option: SessionConfigOption): option is ModelSelectOption {
+  return option.type === "select" && (option.id === "reasoning_effort" || option.category === "thought_level");
+}
+
+function isFastModeOption(option: SessionConfigOption): option is ModelSelectOption {
+  return option.type === "select" && (option.id === "fast-mode" || option.category === "fast-mode");
+}
+
+/** Split the trailing `[...]` of a `model[effort]` spec into its comma/space/plus-separated
+ *  tokens (e.g. `gpt-5.1-codex[high]` -> ["high"], `gpt-5-codex[high fast]` -> ["high","fast"]). */
+function bracketTokens(spec: string): string[] {
+  const match = spec.match(/\[([^\]]+)\]\s*$/);
+  if (!match) return [];
+  return match[1]
+    .split(/[\s,+]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+/** First advertised value whose id matches any of the given tokens (case-insensitive). */
+function matchToken(
+  values: SessionConfigSelectOption[],
+  tokens: string[],
+): SessionConfigSelectOption | undefined {
+  const wanted = new Set(tokens.map((token) => token.toLowerCase()));
+  return values.find((value) => wanted.has(value.value.toLowerCase()));
+}
+
+/** The "on" value of a Fast-mode select (codex-acp advertises value "on"; tolerate name too). */
+function fastModeOnValue(values: SessionConfigSelectOption[]): string | undefined {
+  const on = values.find(
+    (value) => value.value.toLowerCase() === "on" || value.name.toLowerCase() === "on",
+  );
+  return on?.value;
+}
+
+function flattenSelectOptions(options: SessionConfigSelectOptions): SessionConfigSelectOption[] {
+  const out: SessionConfigSelectOption[] = [];
+  for (const entry of options) {
+    if ("options" in entry) out.push(...entry.options);
+    else out.push(entry);
+  }
+  return out;
+}
+
+/**
+ * Best-effort match of a model spec (`provider/modelId`, a bare `modelId`, or a tier word)
+ * against the agent's catalog. Tries, in priority order: exact spec, exact id-after-slash,
+ * the bare base id (with the `[effort]` bracket stripped, so `gpt-5.1-codex[high]` matches a
+ * bare `gpt-5.1-codex` model value while the bracket separately drives reasoning_effort), the
+ * Codex `base[effort]` encoding, exact option name, then substring fallbacks. The effort
+ * bracket itself is applied via applyModelModifiers, not folded into the model select.
+ */
+function matchModelValue(
+  values: SessionConfigSelectOption[],
+  spec: string,
+): SessionConfigSelectOption | undefined {
+  const afterSlash = spec.includes("/") ? spec.slice(spec.indexOf("/") + 1) : spec;
+  const fullLower = spec.toLowerCase();
+  const idLower = afterSlash.toLowerCase();
+  const baseLower = stripEffortBracket(afterSlash).toLowerCase();
+  const tests: Array<(value: SessionConfigSelectOption) => boolean> = [
+    (value) => value.value.toLowerCase() === fullLower,
+    (value) => value.value.toLowerCase() === idLower,
+    (value) => value.value.toLowerCase() === baseLower,
+    (value) => value.value.toLowerCase().startsWith(`${baseLower}[`),
+    (value) => value.name.toLowerCase() === idLower,
+    (value) => value.name.toLowerCase() === baseLower,
+    (value) => value.value.toLowerCase().includes(baseLower),
+    (value) => value.name.toLowerCase().includes(baseLower),
+  ];
+  for (const test of tests) {
+    const found = values.find(test);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** Drop a trailing `[effort]` bracket from a model id, leaving the base model id. */
+function stripEffortBracket(spec: string): string {
+  const open = spec.indexOf("[");
+  return open >= 0 ? spec.slice(0, open) : spec;
+}

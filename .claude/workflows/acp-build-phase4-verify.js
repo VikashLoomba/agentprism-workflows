@@ -15,6 +15,7 @@ const README = `${REPO}/README.md`
 const P3 = `${ORCH}/phase3-integration.json`
 const CAS = `${ORCH}/sdks/anthropic-ai-claude-agent-sdk-0.3.195/package`
 const VOTERS = 3 // refuters per crux
+const BASE_BRANCH = 'build/acp-mcp' // the integrated build branch this phase verifies
 
 const VERDICT_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -76,7 +77,7 @@ log(`Phase 4 cruxes: ${cruxStatus.map(s => `${s.crux}=${s.survived ? 'OK' : 'FAI
 
 phase('Smoke')
 const smoke = await agent(
-  `Live end-to-end smoke test of the integrated orchestrator at ${REPO} (read ${P3} for the integration commit). Build if needed, then start the mcp-server and call its "workflow" tool with a TRIVIAL one-agent script that uses a small schema, e.g. meta + \`const r = await agent("Return the repo name and file count as JSON", {schema: SMALL})\`. Run it once routed to a REAL claude-agent-acp (Claude path) and once routed to the PATCHED codex-acp (Codex path). Assert each returns a schema-VALIDATED structured object (not text) and that notifications/progress fired. Report claudePass, codexPass, details, and any errors. If a backend cannot authenticate in this environment, report that explicitly rather than marking pass.`,
+  `Live end-to-end smoke test of the integrated orchestrator at ${REPO}. Ensure the repo is on ${BASE_BRANCH} (the integrated build branch); build if needed, then drive the REAL built mcp-server over stdio. For EACH backend — a REAL claude-agent-acp (Claude path) and the PATCHED codex-acp (Codex path) — call the "workflow" tool with a MULTI-agent script (a parallel() of THREE schema'd agents, e.g. each \`agent("Return {repo, fileCount} as JSON", {schema: SMALL})\`) and pass concurrency:3 so they run concurrently. ASSERT, per backend: (a) all three results are schema-VALIDATED structured objects (typebox Check), not text; (b) notifications/progress fired; AND (c) POOLING REUSE — while the run executes, poll \`ps\` and confirm EXACTLY ONE long-lived backend ACP subprocess served all three agent() calls (one spawn + one initialize reused across the 3 sessions, NOT three spawns), and that it is NOT killed between the calls. This is the live proof that the pooling refactor reuses one process per backend. Report claudePass, codexPass, the observed per-backend process count, details, and any errors. If a backend cannot authenticate here, report that explicitly rather than marking pass.`,
   { label: 'smoke', phase: 'Smoke', schema: SMOKE_SCHEMA }
 )
 
