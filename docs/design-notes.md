@@ -90,7 +90,7 @@ is usable on its own — in particular, the ACP agent logic and the workflow eng
 the `AgentRunner` interface (`run(prompt, opts) → result`), injected at composition time. The
 engine never names a concrete backend; the agents module never knows it's inside a workflow.
 
-### `acp-agents` — *its own module, independent of the MCP server and the engine*
+### `acp-agents` — *the internal ACP backend (an `AgentRunner`), not the public SDK*
 
 All the logic for actually using the ACP agents: opening and holding ACP client connections to
 `claude-agent-acp` / `codex-acp`, the `ClaudeBackend` / `CodexBackend`, model selection (§5.4),
@@ -103,11 +103,15 @@ patched via pnpm's native `patchedDependencies` (`patches/@agentclientprotocol__
 to forward the turn-level `outputSchema` (§6.3). The patch is applied at `pnpm install`, so Codex
 ships on a clean `git clone && pnpm install && pnpm build` — no vendored tree, no opt-in build step.
 
-Usable standalone, with no workflow and no MCP server:
+It is its own module (it imports neither the engine nor the MCP server), but it is an **internal**
+building block — **not** the importable public SDK. The canonical, importable SDK is
+`@automatalabs/workflows`, which re-exports `createAcpRunner` (and the rest of this backend's public
+surface), so callers never depend on `@automatalabs/acp-agents` directly. Run a single agent with no
+workflow and no MCP server through that facade:
 
 ```ts
-import { createAcpRunner } from "@automatalabs/acp-agents";
-const runner = createAcpRunner();                       // AgentRunner backed by the ACP pool
+import { createAcpRunner } from "@automatalabs/workflows";   // the canonical SDK entry point
+const runner = createAcpRunner();                            // AgentRunner backed by the ACP pool
 const result = await runner.run("Summarize repo X", { schema: MY_SCHEMA, cwd, model: "opus" });
 await runner.dispose();
 ```

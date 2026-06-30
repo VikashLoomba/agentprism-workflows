@@ -5,7 +5,7 @@ Run **dynamic, multi-agent workflow scripts** — `agent()`, `parallel()`, `pipe
 You author a small JavaScript *script* (`export const meta`, then call `agent()` / `parallel()` / `pipeline()`); the engine runs it in a sandboxed realm, fanning each `agent()` call out to an [Agent Client Protocol](https://agentclientprotocol.com) (ACP) backend. It's available two ways:
 
 - **As a TypeScript SDK** — `@automatalabs/workflows` — embed the runner in your own program.
-- **As a stdio MCP server** — `@automatalabs/mcp-server` — expose a `workflow` tool to any MCP host (Claude Code, Zed, …).
+- **As a stdio MCP server** — `@automatalabs/mcp-server`, built on the SDK — expose a `workflow` tool to any MCP host (Claude Code, Zed, …).
 
 > **Status: pre-release.** The packages are versioned `0.1.0` under the `@automatalabs` scope and are being prepared for npm. Until they're published, install from source (see [Install](#install)). The `npm i …` lines below are how it will work once published.
 
@@ -39,7 +39,7 @@ The deterministic engine (sandboxed `vm` realm, `parallel`/`pipeline`, journal/r
 - **Node.js ≥ 22** and **pnpm ≥ 10** (see `.nvmrc` / `packageManager`).
 - A backend agent CLI, authenticated on your machine:
   - **Claude** — via the bundled `@agentclientprotocol/claude-agent-acp`; auth from `~/.claude/.credentials.json` or `ANTHROPIC_API_KEY` (the orchestrator inherits your environment).
-  - **Codex** — via `@agentclientprotocol/codex-acp` (+ the `@openai/codex` binary, installed as a dependency); auth from `~/.codex/auth.json`.
+  - **Codex** — via `@automatalabs/codex-acp` (+ the `@openai/codex` binary, installed as a dependency); auth from `~/.codex/auth.json`.
 
 You only need auth for the backend(s) you actually call.
 
@@ -68,15 +68,22 @@ pnpm add @automatalabs/mcp-server
 
 ## Packages
 
+Two packages are **user-facing** — start with one of these:
+
 | Package | What it is |
 |---|---|
-| **`@automatalabs/workflows`** | The importable **SDK** — a thin facade to run workflow scripts programmatically with the default ACP backend. Start here. |
-| **`@automatalabs/mcp-server`** | The stdio **MCP server** exposing the `workflow` tool (bin: `agentprism-workflow`). |
-| **`@automatalabs/acp-agents`** | The ACP client + `Claude`/`Codex` backends (the `AgentRunner` implementation, connection pooling, structured output, permissions, usage). |
-| **`@automatalabs/workflow-engine`** | The deterministic engine: the script realm, `parallel`/`pipeline`, journal/resume, budgets, worktree isolation. |
-| **`@automatalabs/shared-types`** | The `AgentRunner` seam + shared types the others compose against. |
+| **`@automatalabs/workflows`** | The canonical public **SDK** — a thin facade that runs workflow scripts programmatically over the default ACP backend, and re-exports the engine + backend surface. Start here. |
+| **`@automatalabs/mcp-server`** | The stdio **MCP server** (bin: `agentprism-workflow`) exposing the `workflow` tool — built on `@automatalabs/workflows`. |
 
-Dependency direction: `mcp-server` and `workflows` both compose `acp-agents` + `workflow-engine`, which meet only at the `AgentRunner` seam in `shared-types`. The engine never names a backend; the agents never know they're inside a workflow.
+The other three are **internal building blocks**, composed by the SDK. You don't depend on them directly: `@automatalabs/workflows` is the public entry point for everything they export.
+
+| Package | What it is |
+|---|---|
+| **`@automatalabs/acp-agents`** | The ACP client + `Claude`/`Codex` backends (the `AgentRunner` implementation, connection pooling, structured output, permissions, usage). Internal — public entry is `@automatalabs/workflows`. |
+| **`@automatalabs/workflow-engine`** | The deterministic engine: the script realm, `parallel`/`pipeline`, journal/resume, budgets, worktree isolation. Internal — public entry is `@automatalabs/workflows`. |
+| **`@automatalabs/shared-types`** | The `AgentRunner` seam + shared types the others compose against. Internal — public entry is `@automatalabs/workflows`. |
+
+Dependency direction: `mcp-server` → `workflows` → `{ workflow-engine, acp-agents, shared-types }`. The SDK (`workflows`) is the single facade that composes the deterministic engine and the ACP backend, which meet only at the `AgentRunner` seam in `shared-types`. The engine never names a backend; the agents never know they're inside a workflow.
 
 ---
 
