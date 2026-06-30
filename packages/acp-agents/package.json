@@ -15,6 +15,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test \"test/**/*.test.ts\"",
     "build:codex-vendor": "cd vendor/codex-acp && npm install && npm run build"
   },
   "dependencies": {

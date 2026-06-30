@@ -14,7 +14,8 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test \"test/**/*.test.ts\""
   },
   "dependencies": {
     "@agentprism/shared-types": "workspace:*",
