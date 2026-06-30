@@ -90,3 +90,47 @@ test("matching is case-insensitive and bidirectional substring", () => {
   // candidate longer than the pattern matches (n.includes(p))
   assert.equal(selectedId(decidePermission(req({ title: "ReadFileTool" }), { allow: ["read"] })), "allow-1");
 });
+
+// ---- precedence ladder: EXACT (toolName-first) before the substring fallback ----------
+
+test("exact name wins: an exact allow on the tool id beats a loose substring deny", () => {
+  // The operator allows EXACTLY the `thread-reader` tool and denies the `read` tool. Under
+  // the old bidirectional substring, deny `read` ⊂ `thread-reader` would (wrongly) REJECT
+  // the very tool the allow-list named. With the ladder, the exact allow pins the tool, so
+  // the loose `read` deny is suppressed and the tool is ALLOWED.
+  const policy: ToolPolicy = { allow: ["thread-reader"], deny: ["read"] };
+  assert.equal(selectedId(decidePermission(req({ title: "thread-reader" }), policy)), "allow-1");
+  // ...and the genuinely-`read` tool the deny meant is still rejected (it is not exactly
+  // allow-listed, and `read` exactly matches the deny entry).
+  assert.equal(selectedId(decidePermission(req({ title: "read" }), policy)), "reject-1");
+});
+
+test("'read' no longer matches 'thread-reader' once an exact entry pins the tool", () => {
+  // deny `read`, but the tool is exactly allow-listed as `thread-reader` (so it is precisely
+  // identified). The substring `read` ⊂ `thread-reader` is suppressed -> ALLOWED, not denied.
+  const pinned: ToolPolicy = { allow: ["thread-reader"], deny: ["read"] };
+  assert.equal(selectedId(decidePermission(req({ title: "thread-reader" }), pinned)), "allow-1");
+  // RESIDUAL AMBIGUITY (documented in permissions.ts): with NO exact entry to pin the tool,
+  // the loose substring fallback still treats `read` as matching `thread-reader`.
+  assert.equal(selectedId(decidePermission(req({ title: "thread-reader" }), { deny: ["read"] })), "reject-1");
+});
+
+test("the authoritative _meta.toolName drives the EXACT match over the human title", () => {
+  // Human title is prose; the real tool id is stamped in _meta. An exact deny on the tool id
+  // rejects even though the title would not exactly match anything.
+  const policy: ToolPolicy = { deny: ["bash"] };
+  assert.equal(
+    selectedId(decidePermission(req({ title: "Run shell command", meta: { claude: { toolName: "Bash" } } }), policy)),
+    "reject-1",
+  );
+  // An exactly allow-listed tool id is allowed; a sibling tool id that is NOT listed is denied.
+  const allowPolicy: ToolPolicy = { allow: ["Read"] };
+  assert.equal(
+    selectedId(decidePermission(req({ title: "x", meta: { claude: { toolName: "read" } } }), allowPolicy)),
+    "allow-1",
+  );
+  assert.equal(
+    selectedId(decidePermission(req({ title: "x", meta: { claude: { toolName: "Write" } } }), allowPolicy)),
+    "reject-1",
+  );
+});

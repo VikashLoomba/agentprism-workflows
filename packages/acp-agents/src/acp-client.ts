@@ -39,7 +39,7 @@ import {
   type SessionNotification,
 } from "@agentclientprotocol/sdk";
 import type { TSchema } from "typebox";
-import type { AgentHistoryEntry, McpServerConfig } from "@agentprism/shared-types";
+import { META_KEYS, type AgentHistoryEntry, type McpServerConfig } from "@agentprism/shared-types";
 import type { Backend, BackendId, StructuredSource } from "./backend.js";
 import { decidePermission, type ToolPolicy } from "./permissions.js";
 import { UsageAccumulator } from "./usage.js";
@@ -165,6 +165,16 @@ class MultiplexClient implements Client {
   }
 }
 
+/** Merge the engine runId correlation stamp into a backend's session/new `_meta`. Returns the
+ *  meta unchanged when no runId is given (so a backend that sends no `_meta` keeps sending none). */
+function stampRunId(
+  meta: Record<string, unknown> | undefined,
+  runId: string | undefined,
+): Record<string, unknown> | undefined {
+  if (!runId) return meta;
+  return { ...(meta ?? {}), [META_KEYS.runId]: runId };
+}
+
 function toolNameFromMeta(meta: unknown): string | undefined {
   if (!meta || typeof meta !== "object") return undefined;
   for (const value of Object.values(meta as Record<string, unknown>)) {
@@ -185,6 +195,9 @@ export interface AcpSessionOptions {
   signal?: AbortSignal;
   /** Client-provided MCP servers to attach at session/new. Omitted => `[]` (the default). */
   mcpServers?: McpServerConfig[];
+  /** Engine run id, stamped onto session/new `_meta` (META_KEYS.runId) as a correlation id.
+   *  Omitted => no runId `_meta` is stamped (the request `_meta` is whatever the backend set). */
+  runId?: string;
 }
 
 /** Notified by a PooledConnection when its process dies, so the pool can drop it. */
@@ -334,7 +347,9 @@ export class PooledConnection {
     try {
       await this.ready;
       const state = new SessionState(opts.policy);
-      const meta = this.backend.sessionMeta(opts.schema);
+      // The backend's vendor `_meta` (Claude schema channel; undefined for Codex) plus the
+      // optional engine runId correlation stamp. When neither is present, no `_meta` is sent.
+      const meta = stampRunId(this.backend.sessionMeta(opts.schema), opts.runId);
       const request: NewSessionRequest = {
         cwd: opts.cwd,
         // Client-provided MCP servers (additive run input), else the default empty list.
@@ -470,9 +485,15 @@ export class SessionHandle implements StructuredSource {
    *   - Fast mode (id "fast-mode" / category "fast-mode"): turned on when the bracket carries
    *     a `fast` token.
    * Each is best-effort and advertise-gated: when the catalog does not expose the option, or
-   * the requested value is not among its choices, it is silently skipped.
+   * the requested value is not among its choices, the modifier is NOT applied — but, unlike
+   * before, that silent no-op is now SURFACED. `modifierFallbacks` lists a descriptor for every
+   * requested effort/Fast value that could not be applied, so the caller can fire the same
+   * onModelFallback channel model selection uses (incorrect tiering becomes observable). It
+   * stays best-effort: an unmet modifier is reported, never thrown.
    */
-  async selectModel(spec: string): Promise<{ matched: boolean; resolved?: string }> {
+  async selectModel(
+    spec: string,
+  ): Promise<{ matched: boolean; resolved?: string; modifierFallbacks?: string[] }> {
     const option = this.configOptions.find(isModelSelectOption);
     if (!option) return { matched: false };
 
@@ -484,33 +505,60 @@ export class SessionHandle implements StructuredSource {
       await this.applyConfigOption(option.id, target.value);
     }
 
-    await this.applyModelModifiers(spec);
-    return { matched: true, resolved: target.value };
+    const modifierFallbacks = await this.applyModelModifiers(spec, target.value);
+    return { matched: true, resolved: target.value, modifierFallbacks };
   }
 
-  /** Drive reasoning_effort + Fast-mode from the `model[effort]` spec bracket, when advertised. */
-  private async applyModelModifiers(spec: string): Promise<void> {
+  /**
+   * Drive reasoning_effort + Fast-mode from the `model[effort]` spec bracket, when advertised.
+   * Returns a descriptor for each requested modifier that could NOT be applied because the
+   * catalog does not advertise the option or the requested value — the symmetric signal to
+   * model fallback, so the no-op is observable rather than silent. When the resolved model id
+   * already ENCODES the bracket (e.g. a `gpt-5-codex[high]` catalog value), the effort is
+   * carried by the model select itself, so it is treated as satisfied (no fallback).
+   */
+  private async applyModelModifiers(spec: string, modelValue: string): Promise<string[]> {
+    const fallbacks: string[] = [];
     const tokens = bracketTokens(spec);
-    if (tokens.length === 0) return;
+    if (tokens.length === 0) return fallbacks;
+
+    // The model id already carries the bracket (e.g. "gpt-5-codex[high]") -> effort is applied
+    // via the model select; the separate effort/Fast options are not the channel here.
+    const effortAbsorbedByModel = modelValue.includes("[");
+    const fastRequested = tokens.some((t) => t.toLowerCase() === "fast");
+    const effortTokens = tokens.filter((t) => t.toLowerCase() !== "fast");
 
     // reasoning_effort: set to the bracket token that matches one of its advertised values.
-    const effortOption = this.configOptions.find(isReasoningEffortOption);
-    if (effortOption) {
-      const effortValues = flattenSelectOptions(effortOption.options);
-      const match = matchToken(effortValues, tokens);
-      if (match && effortOption.currentValue !== match.value) {
-        await this.applyConfigOption(effortOption.id, match.value);
+    if (effortTokens.length > 0 && !effortAbsorbedByModel) {
+      const effortOption = this.configOptions.find(isReasoningEffortOption);
+      const match = effortOption
+        ? matchToken(flattenSelectOptions(effortOption.options), effortTokens)
+        : undefined;
+      if (effortOption && match) {
+        if (effortOption.currentValue !== match.value) {
+          await this.applyConfigOption(effortOption.id, match.value);
+        }
+      } else {
+        // No reasoning_effort option, or none of its choices match the requested effort.
+        fallbacks.push(`${spec}: reasoning_effort "${effortTokens.join(",")}" not advertised`);
       }
     }
 
     // Fast mode: a `fast` token turns the advertised toggle on.
-    const fastOption = this.configOptions.find(isFastModeOption);
-    if (fastOption && tokens.some((t) => t.toLowerCase() === "fast")) {
-      const onValue = fastModeOnValue(flattenSelectOptions(fastOption.options));
-      if (onValue && fastOption.currentValue !== onValue) {
-        await this.applyConfigOption(fastOption.id, onValue);
+    if (fastRequested && !effortAbsorbedByModel) {
+      const fastOption = this.configOptions.find(isFastModeOption);
+      const onValue = fastOption ? fastModeOnValue(flattenSelectOptions(fastOption.options)) : undefined;
+      if (fastOption && onValue) {
+        if (fastOption.currentValue !== onValue) {
+          await this.applyConfigOption(fastOption.id, onValue);
+        }
+      } else {
+        // No Fast-mode option, or it advertises no "on" value.
+        fallbacks.push(`${spec}: Fast mode not advertised`);
       }
     }
+
+    return fallbacks;
   }
 
   /** Set one session config option via the wire method and adopt the echoed catalog. */

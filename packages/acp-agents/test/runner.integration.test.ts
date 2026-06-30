@@ -539,6 +539,134 @@ test("(#3) a plain effort spec does NOT touch a Fast-mode option that is adverti
   assert.equal(fastSet, undefined, "no `fast` token => Fast-mode is left untouched");
 });
 
+// ---- (#4) effort/Fast fallback signal: an unadvertised modifier is SURFACED -----------
+
+test("(#4) a model[high] whose 'high' effort is NOT advertised fires onModelFallback exactly once", async () => {
+  const { cwd, readLog } = configure({
+    configOptions: [
+      {
+        id: "model",
+        type: "select",
+        name: "Model",
+        category: "model",
+        currentValue: "gpt-5.1-codex",
+        options: [{ value: "gpt-5.1-codex", name: "GPT-5.1 Codex" }],
+      },
+      {
+        id: "reasoning_effort",
+        type: "select",
+        name: "Reasoning effort",
+        category: "thought_level",
+        currentValue: "medium",
+        // Deliberately MISSING "high".
+        options: [
+          { value: "low", name: "low" },
+          { value: "medium", name: "medium" },
+        ],
+      },
+    ],
+    turns: [{ text: "ok" }],
+  });
+  const resolved: string[] = [];
+  const fallbacks: string[] = [];
+  const out = await makeRunner().run("hi", {
+    model: "openai/gpt-5.1-codex[high]",
+    cwd,
+    onModelResolved: (m) => resolved.push(m),
+    onModelFallback: (s) => fallbacks.push(s),
+  });
+  assert.equal(out, "ok");
+  // The MODEL still resolved (the bare base id matched); only the effort tier could not apply.
+  assert.deepEqual(resolved, ["gpt-5.1-codex"]);
+  // The unmet effort is surfaced on the same channel model fallback uses — exactly once.
+  assert.equal(fallbacks.length, 1, "the unadvertised 'high' effort fires onModelFallback once");
+  assert.match(fallbacks[0], /reasoning_effort/i);
+  assert.match(fallbacks[0], /high/);
+  // It is a no-op, not a throw: reasoning_effort was never set on the wire.
+  assert.equal(
+    readLog().find((e) => e.method === "setSessionConfigOption" && e.params?.configId === "reasoning_effort"),
+    undefined,
+  );
+});
+
+test("(#4) an ADVERTISED effort applies cleanly and does NOT fire onModelFallback", async () => {
+  const { cwd, readLog } = configure({
+    configOptions: [
+      {
+        id: "model",
+        type: "select",
+        name: "Model",
+        category: "model",
+        currentValue: "gpt-5.1-codex",
+        options: [{ value: "gpt-5.1-codex", name: "GPT-5.1 Codex" }],
+      },
+      {
+        id: "reasoning_effort",
+        type: "select",
+        name: "Reasoning effort",
+        category: "thought_level",
+        currentValue: "medium",
+        options: [
+          { value: "low", name: "low" },
+          { value: "medium", name: "medium" },
+          { value: "high", name: "high" },
+        ],
+      },
+    ],
+    turns: [{ text: "ok" }],
+  });
+  const fallbacks: string[] = [];
+  await makeRunner().run("hi", {
+    model: "openai/gpt-5.1-codex[high]",
+    cwd,
+    onModelFallback: (s) => fallbacks.push(s),
+  });
+  // The effort applied -> no fallback signal.
+  assert.deepEqual(fallbacks, []);
+  const effortSet = readLog().find(
+    (e) => e.method === "setSessionConfigOption" && e.params?.configId === "reasoning_effort",
+  );
+  assert.equal(effortSet?.params?.value, "high");
+});
+
+test("(#4) an unadvertised Fast mode also surfaces on the fallback channel", async () => {
+  const { cwd } = configure({
+    configOptions: [
+      {
+        id: "model",
+        type: "select",
+        name: "Model",
+        category: "model",
+        currentValue: "gpt-5.1-codex",
+        options: [{ value: "gpt-5.1-codex", name: "GPT-5.1 Codex" }],
+      },
+      {
+        id: "reasoning_effort",
+        type: "select",
+        name: "Reasoning effort",
+        category: "thought_level",
+        currentValue: "medium",
+        options: [
+          { value: "low", name: "low" },
+          { value: "medium", name: "medium" },
+          { value: "high", name: "high" },
+        ],
+      },
+      // No fast-mode option advertised.
+    ],
+    turns: [{ text: "ok" }],
+  });
+  const fallbacks: string[] = [];
+  await makeRunner().run("hi", {
+    model: "openai/gpt-5.1-codex[high fast]",
+    cwd,
+    onModelFallback: (s) => fallbacks.push(s),
+  });
+  // `high` applied (advertised); `fast` could not (no Fast-mode option) -> one fallback.
+  assert.equal(fallbacks.length, 1);
+  assert.match(fallbacks[0], /fast/i);
+});
+
 // ---- (#5) client-provided mcpServers reach session/new -------------------------------
 
 test("(#5) RunOptions.mcpServers reach session/new mcpServers (stdio + http)", async () => {
@@ -564,4 +692,53 @@ test("(#5) mcpServers defaults to [] at session/new when none is provided", asyn
   await makeRunner().run("hi", { model: "claude", cwd });
   const newSession = readLog().find((e) => e.method === "newSession");
   assert.deepEqual(newSession?.params?.mcpServers, []);
+});
+
+// ---- (#5b) engine runId rides the session/new _meta as a correlation id ---------------
+
+test("(#5b) RunOptions.runId is stamped onto session/new _meta[agentprism/runId]", async () => {
+  const { cwd, readLog } = configure({ turns: [{ text: "ok" }] });
+  await makeRunner().run("hi", { model: "claude", cwd, runId: "run-abc123" });
+
+  const entries = readLog();
+  const newSession = entries.find((e) => e.method === "newSession");
+  // No schema on this run, so the ONLY _meta is the correlation stamp.
+  assert.deepEqual(newSession?.params?._meta, { "agentprism/runId": "run-abc123" });
+  // It rides session/new, NOT the prompt turn.
+  assert.equal(entries.find((e) => e.method === "prompt")?.params?._meta ?? undefined, undefined);
+});
+
+test("(#5b) runId coexists with the Claude schema _meta at session/new", async () => {
+  const { cwd, readLog } = configure({
+    turns: [{ text: "x", structuredOutput: { city: "LA", hot: false } }],
+  });
+  await makeRunner().run("weather?", {
+    model: "anthropic/claude-opus-4-1",
+    schema: SCHEMA,
+    cwd,
+    runId: "run-xyz",
+  });
+  const meta = readLog().find((e) => e.method === "newSession")?.params?._meta as Record<string, unknown>;
+  // Both the vendor schema channel AND the correlation stamp are present.
+  assert.equal(meta?.["agentprism/runId"], "run-xyz");
+  assert.ok(meta?.claudeCode, "the Claude schema _meta channel is preserved");
+});
+
+test("(#5b) Codex session/new carries the runId _meta even though the schema rides the turn", async () => {
+  const { cwd, readLog } = configure({
+    turns: [{ text: JSON.stringify({ city: "NYC", hot: true }) }],
+  });
+  await makeRunner().run("weather?", {
+    model: "openai/gpt-5-codex",
+    schema: SCHEMA,
+    cwd,
+    runId: "run-codex-1",
+  });
+  const entries = readLog();
+  // Codex sends NO schema at session/new, but the runId stamp still rides it.
+  assert.deepEqual(entries.find((e) => e.method === "newSession")?.params?._meta, {
+    "agentprism/runId": "run-codex-1",
+  });
+  // The schema still rides the prompt turn (runId did not displace it).
+  assert.ok(entries.find((e) => e.method === "prompt")?.params?._meta?.["agentprism/outputSchema"]);
 });
