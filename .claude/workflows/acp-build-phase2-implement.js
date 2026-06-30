@@ -20,6 +20,7 @@ const CAS = `${ORCH}/sdks/anthropic-ai-claude-agent-sdk-0.3.195/package`
 const MCP_SDK = `${ORCH}/sdks/modelcontextprotocol-sdk-1.29.0/package`
 // worktrees live OUTSIDE the repo (avoids the "worktree inside working tree" caveat); branches live in the shared .git
 const WT = '/home/vikash/agentprism-worktrees'
+const BASE_BRANCH = 'build/acp-mcp' // the branch that accumulates the TOTALITY of the build (Phase 1 scaffold + Phase 3 merges all land here)
 
 // shared rule for every implementer so the three branches merge cleanly in Phase 3
 const ISOLATION_RULES = (mod) =>
@@ -63,7 +64,7 @@ const RECORD_SCHEMA = {
 phase('Prepare')
 log('Phase 2: creating 3 worktrees off the scaffold commit (one branch per module)')
 const prep = await agent(
-  `Read ${P1} and take its scaffoldCommitSha as the base. In the main repo at ${REPO}, ensure that commit is HEAD's ancestor, then create three SELF-MANAGED git worktrees off that exact SHA, each on a fresh branch, OUTSIDE the repo under ${WT}:\n` +
+  `Read ${P1} and take its scaffoldCommitSha as the base. In the main repo at ${REPO}, FIRST verify HEAD is on branch ${BASE_BRANCH} (the integration base that will hold the TOTALITY of the build) and that scaffoldCommitSha is reachable from it — if HEAD is some other branch, STOP and report rather than building off the wrong base. Then create three SELF-MANAGED git worktrees off that exact scaffold SHA, each on a fresh branch, OUTSIDE the repo under ${WT}:\n` +
   `  mkdir -p ${WT}\n` +
   `  for m in workflow-engine acp-agents mcp-server; do\n` +
   `    git -C ${REPO} worktree remove --force ${WT}/$m 2>/dev/null || true\n` +
