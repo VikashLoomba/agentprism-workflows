@@ -27,6 +27,13 @@ import type { StopReason } from "@agentclientprotocol/sdk";
 import type { TSchema } from "typebox";
 import type { SessionHandle } from "./acp-client.js";
 import { AcpAgentPool, type AcpPoolOptions } from "./pool.js";
+import {
+  TypedEventEmitter,
+  type AcpEventListener,
+  type AcpEventName,
+  type AcpEventSink,
+  type AcpRunnerEventMap,
+} from "./events.js";
 import type { Backend } from "./backend.js";
 import { ClaudeBackend } from "./backends/claude.js";
 import { CodexBackend } from "./backends/codex.js";
@@ -38,9 +45,43 @@ type AnyRunOptions = RunOptions<TSchema | undefined>;
 
 export class AcpAgentRunner implements AgentRunner {
   private readonly pool: AcpAgentPool;
+  /** Typed bus carrying every ACP event from every pooled session. Beyond the AgentRunner seam
+   *  (additive observability) — subscribing never affects a run and never enters the resume hash. */
+  private readonly events = new TypedEventEmitter<AcpRunnerEventMap>();
+  private readonly emitEvent: AcpEventSink = (name, event) => this.events.emit(name, event);
 
   constructor(options: AcpPoolOptions = {}) {
-    this.pool = new AcpAgentPool(options);
+    this.pool = new AcpAgentPool(options, { onEvent: this.emitEvent });
+  }
+
+  /**
+   * Listen in on the live ACP stream. `name` is an ACP `sessionUpdate` discriminant
+   * ("agent_message_chunk", "tool_call", "usage_update", …) or one of the cross-cutting events
+   * ("session_update" catch-all, "permission_request", "raw_message", "session_open",
+   * "session_close", "backend_error"). The listener is typed to the event. Returns an unsubscribe
+   * thunk. A pooled runner multiplexes many concurrent runs, so each event carries
+   * `{ sessionId, backendId, label?, runId? }` for filtering. Listeners are best-effort observers:
+   * a throwing listener is isolated and never affects the run.
+   */
+  on<K extends AcpEventName>(name: K, listener: AcpEventListener<K>): () => void {
+    return this.events.on(name, listener);
+  }
+
+  /** Subscribe once; the listener auto-unsubscribes after its first delivery. */
+  once<K extends AcpEventName>(name: K, listener: AcpEventListener<K>): () => void {
+    return this.events.once(name, listener);
+  }
+
+  off<K extends AcpEventName>(name: K, listener: AcpEventListener<K>): void {
+    this.events.off(name, listener);
+  }
+
+  removeAllListeners(name?: AcpEventName): void {
+    this.events.removeAllListeners(name);
+  }
+
+  listenerCount(name: AcpEventName): number {
+    return this.events.listenerCount(name);
   }
 
   async run<S extends TSchema | undefined = undefined>(
@@ -61,6 +102,8 @@ export class AcpAgentRunner implements AgentRunner {
       mcpServers: opts.mcpServers,
       // Engine correlation id -> session/new _meta (META_KEYS.runId). Additive; never hashed.
       runId: opts.runId,
+      // Stamped onto emitted ACP events as context (never sent on the wire).
+      label: opts.label,
     });
     try {
       opts.signal?.throwIfAborted();
@@ -131,6 +174,7 @@ export class AcpAgentRunner implements AgentRunner {
    *  runner is disposed. Beyond the AgentRunner seam (additive) — never enters the resume hash. */
   async dispose(): Promise<void> {
     await this.pool.dispose();
+    this.events.removeAllListeners();
   }
 }
 

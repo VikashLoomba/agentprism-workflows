@@ -47,6 +47,23 @@ export {
 } from "@automatalabs/acp-agents";
 export type { AcpPoolOptions } from "@automatalabs/acp-agents";
 
+// ── Live ACP events: `createAcpRunner().on("tool_call", evt => …)` to listen in on the
+//    stream of a run. The event map keys are ACP `sessionUpdate` discriminants plus a few
+//    cross-cutting events; each payload carries a `{ sessionId, backendId, label?, runId? }`
+//    context envelope so a pooled runner's concurrent runs are disambiguable. ──
+export { TypedEventEmitter } from "@automatalabs/acp-agents";
+export type {
+  AcpRunnerEventMap,
+  AcpEventName,
+  AcpEventListener,
+  AcpEventContext,
+  AcpSessionUpdate,
+  AcpUpdateKind,
+  AcpPermissionEvent,
+  AcpRawMessageEvent,
+  AcpBackendErrorEvent,
+} from "@automatalabs/acp-agents";
+
 // ── Shared seam types: the AgentRunner contract and its opts/result/usage shapes,
 //    so callers can implement or type a custom runner without reaching past the SDK. ──
 export type { AgentRunner, RunOptions, AgentResult, AgentUsage } from "@automatalabs/shared-types";

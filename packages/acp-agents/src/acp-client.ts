@@ -41,6 +41,7 @@ import {
 import type { TSchema } from "typebox";
 import { META_KEYS, type AgentHistoryEntry, type McpServerConfig } from "@automatalabs/shared-types";
 import type { Backend, BackendId, StructuredSource } from "./backend.js";
+import { emitSessionUpdate, type AcpEventContext, type AcpEventSink } from "./events.js";
 import { decidePermission, type ToolPolicy } from "./permissions.js";
 import { UsageAccumulator } from "./usage.js";
 
@@ -74,7 +75,13 @@ class SessionState {
   rawResultSuccess: RawResultSuccess | undefined;
   private turnStartIndex = 0;
 
-  constructor(readonly policy: ToolPolicy) {}
+  /** `label`/`runId` are carried here ONLY so the MultiplexClient can stamp them onto emitted
+   *  events as context — they never affect routing or the wire request. */
+  constructor(
+    readonly policy: ToolPolicy,
+    readonly label?: string,
+    readonly runId?: string,
+  ) {}
 
   /** Mark the start of a new turn so currentTurnText()/structured_output read only this turn. */
   beginTurn(): void {
@@ -135,23 +142,48 @@ class SessionState {
 class MultiplexClient implements Client {
   private readonly sessions = new Map<string, SessionState>();
 
+  /** `backendId` stamps event context; `onEvent` (optional) bubbles every notification, permission
+   *  request and session lifecycle change up to the runner's typed bus. */
+  constructor(
+    private readonly backendId: BackendId,
+    private readonly onEvent?: AcpEventSink,
+  ) {}
+
+  private contextFor(sessionId: string, state: SessionState | undefined): AcpEventContext {
+    return { sessionId, backendId: this.backendId, label: state?.label, runId: state?.runId };
+  }
+
   register(sessionId: string, state: SessionState): void {
     this.sessions.set(sessionId, state);
+    this.onEvent?.("session_open", this.contextFor(sessionId, state));
   }
 
   unregister(sessionId: string): void {
+    const state = this.sessions.get(sessionId);
     this.sessions.delete(sessionId);
+    if (state) this.onEvent?.("session_close", this.contextFor(sessionId, state));
   }
 
   requestPermission(params: RequestPermissionRequest): RequestPermissionResponse {
     const state = this.sessions.get(params.sessionId);
     // Unknown/closed session: refuse rather than silently allow a tool we can't attribute.
     if (!state) return { outcome: { outcome: "cancelled" } };
-    return decidePermission(params, state.policy);
+    const outcome = decidePermission(params, state.policy);
+    this.onEvent?.("permission_request", {
+      ...this.contextFor(params.sessionId, state),
+      request: params,
+      outcome,
+    });
+    return outcome;
   }
 
   sessionUpdate(params: SessionNotification): void {
-    this.sessions.get(params.sessionId)?.applyUpdate(params.update);
+    const state = this.sessions.get(params.sessionId);
+    // Fold into the accumulator FIRST (the drain contract), THEN bubble the event up unchanged.
+    state?.applyUpdate(params.update);
+    if (this.onEvent) {
+      emitSessionUpdate(this.onEvent, params.update, this.contextFor(params.sessionId, state));
+    }
   }
 
   extNotification(method: string, params: Record<string, unknown>): void {
@@ -160,8 +192,14 @@ class MultiplexClient implements Client {
     // so structured_output lands in the right session under concurrency.
     const sessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
     if (!sessionId) return;
-    const message = (params as { message?: unknown }).message as RawResultSuccess | undefined;
-    this.sessions.get(sessionId)?.applyRawMessage(message);
+    const rawMessage = (params as { message?: unknown }).message;
+    const state = this.sessions.get(sessionId);
+    state?.applyRawMessage(rawMessage as RawResultSuccess | undefined);
+    this.onEvent?.("raw_message", {
+      ...this.contextFor(sessionId, state),
+      method,
+      message: rawMessage,
+    });
   }
 }
 
@@ -198,11 +236,17 @@ export interface AcpSessionOptions {
   /** Engine run id, stamped onto session/new `_meta` (META_KEYS.runId) as a correlation id.
    *  Omitted => no runId `_meta` is stamped (the request `_meta` is whatever the backend set). */
   runId?: string;
+  /** `RunOptions.label`, propagated onto emitted events as context. NOT sent on the wire. */
+  label?: string;
 }
 
 /** Notified by a PooledConnection when its process dies, so the pool can drop it. */
 export interface PooledConnectionDeps {
   onDead(connection: PooledConnection): void;
+  /** Optional typed event sink. When present, every ACP notification / permission request /
+   *  session lifecycle change on this connection is bubbled up through it (additive observability;
+   *  it is invoked AFTER the drain accumulation and never affects the run). */
+  onEvent?: AcpEventSink;
 }
 
 /**
@@ -217,8 +261,11 @@ export class PooledConnection {
 
   private readonly backend: Backend;
   private readonly child: ChildProcess;
-  private readonly client = new MultiplexClient();
+  private readonly client: MultiplexClient;
   private readonly onDead: (connection: PooledConnection) => void;
+  private readonly onEvent: AcpEventSink | undefined;
+  /** Set true at the start of dispose() so the graceful-shutdown death is NOT reported as a crash. */
+  private disposing = false;
   /** Resolves once `initialize` completed (or rejects if the process died first). */
   private readonly ready: Promise<void>;
   /** Resolves when the process dies; `race()` turns it into a thrown, descriptive error. */
@@ -235,6 +282,8 @@ export class PooledConnection {
     this.backend = backend;
     this.backendId = backend.id;
     this.onDead = deps.onDead;
+    this.onEvent = deps.onEvent;
+    this.client = new MultiplexClient(this.backendId, this.onEvent);
 
     const { command, args, env } = backend.spawnConfig();
     // NOTE: deliberately NO `cwd` here. cwd is per-SESSION (session/new), so one pooled process
@@ -307,6 +356,11 @@ export class PooledConnection {
     this._alive = false;
     this.deathError = error;
     this.resolveDead();
+    // A crash (not a graceful dispose) is worth surfacing for observability; the engine still
+    // handles it by retrying the run on a fresh process. Best-effort, after death is recorded.
+    if (this.onEvent && !this.disposing) {
+      this.onEvent("backend_error", { backendId: this.backendId, error });
+    }
     this.onDead(this);
   }
 
@@ -346,7 +400,7 @@ export class PooledConnection {
     this._activeSessions += 1;
     try {
       await this.ready;
-      const state = new SessionState(opts.policy);
+      const state = new SessionState(opts.policy, opts.label, opts.runId);
       // The backend's vendor `_meta` (Claude schema channel; undefined for Codex) plus the
       // optional engine runId correlation stamp. When neither is present, no `_meta` is sent.
       const meta = stampRunId(this.backend.sessionMeta(opts.schema), opts.runId);
@@ -404,6 +458,8 @@ export class PooledConnection {
   /** Close the process (pool teardown): end stdin, SIGTERM, escalate to SIGKILL, await exit. */
   async dispose(): Promise<void> {
     if (!this._alive) return;
+    // Mark graceful shutdown so the imminent process-exit `die()` does not emit `backend_error`.
+    this.disposing = true;
     const exited = new Promise<void>((resolve) => {
       this.child.once("exit", () => resolve());
     });

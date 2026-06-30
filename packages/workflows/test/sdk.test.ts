@@ -34,7 +34,7 @@ import {
   WorkflowError,
   toJsonSchema,
 } from "../src/index.js";
-import type { AgentRunner, RunOptions } from "../src/index.js";
+import type { AgentRunner, RunOptions, AcpRunnerEventMap, AcpEventContext } from "../src/index.js";
 
 /**
  * Build an AgentRunner test double from a plain implementation. The seam's run() is
@@ -66,6 +66,38 @@ test("facade re-exports the public surface", () => {
   assert.equal(typeof runDynamicWorkflow, "function");
   assert.equal(typeof WorkflowError, "function");
   assert.equal(typeof toJsonSchema, "function");
+});
+
+test("createAcpRunner exposes a typed ACP event bus (on/once/off/listenerCount) via the barrel", async () => {
+  const runner = createAcpRunner();
+  try {
+    const seen: string[] = [];
+    // Typed listener: `e` is the agent_message_chunk variant + context — compile-gated through
+    // the SDK barrel. The payload is assignable to AcpEventContext, proving the envelope is carried.
+    const off = runner.on("agent_message_chunk", (e: AcpRunnerEventMap["agent_message_chunk"]) => {
+      if (e.content.type === "text") seen.push(e.content.text);
+      const ctx: AcpEventContext = e;
+      void ctx;
+    });
+    assert.equal(typeof off, "function", "on() returns an unsubscribe thunk");
+    assert.equal(runner.listenerCount("agent_message_chunk"), 1);
+
+    const toolListener = (e: AcpRunnerEventMap["tool_call"]) => void e.title;
+    runner.on("tool_call", toolListener);
+    assert.equal(runner.listenerCount("tool_call"), 1);
+
+    off();
+    assert.equal(runner.listenerCount("agent_message_chunk"), 0, "disposer unsubscribed");
+    runner.off("tool_call", toolListener);
+    assert.equal(runner.listenerCount("tool_call"), 0);
+
+    runner.once("session_update", () => {});
+    assert.equal(runner.listenerCount("session_update"), 1);
+    runner.removeAllListeners();
+    assert.equal(runner.listenerCount("session_update"), 0);
+  } finally {
+    await runner.dispose();
+  }
 });
 
 test("runDynamicWorkflow runs a 1-agent script through a stub runner", async () => {

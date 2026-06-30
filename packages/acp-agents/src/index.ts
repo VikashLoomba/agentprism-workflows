@@ -9,7 +9,22 @@ export { AcpAgentRunner, createAcpRunner, selectBackend } from "./runner.js";
 export { PooledConnection, SessionHandle } from "./acp-client.js";
 export type { AcpSessionOptions, PooledConnectionDeps } from "./acp-client.js";
 export { AcpAgentPool, resolvePoolSize } from "./pool.js";
-export type { AcpPoolOptions } from "./pool.js";
+export type { AcpPoolOptions, AcpPoolDeps } from "./pool.js";
+
+// The typed ACP event bus surfaced on AcpAgentRunner (`runner.on(name, evt => …)`).
+export { TypedEventEmitter, emitSessionUpdate } from "./events.js";
+export type {
+  AcpRunnerEventMap,
+  AcpEventName,
+  AcpEventListener,
+  AcpEventContext,
+  AcpEventSink,
+  AcpSessionUpdate,
+  AcpUpdateKind,
+  AcpPermissionEvent,
+  AcpRawMessageEvent,
+  AcpBackendErrorEvent,
+} from "./events.js";
 
 export type { Backend, BackendId, SpawnConfig, StructuredSource } from "./backend.js";
 export { ClaudeBackend } from "./backends/claude.js";

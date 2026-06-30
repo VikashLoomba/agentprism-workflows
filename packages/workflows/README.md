@@ -208,6 +208,60 @@ testable without a live agent — pass a stub runner.
 
 ---
 
+## Listening in on the live ACP stream (events)
+
+`createAcpRunner()` returns an `AcpAgentRunner` with a **typed event bus**. Subscribe with
+`runner.on(name, listener)` to observe the live ACP stream of every run on that runner — streaming
+assistant text, tool calls, usage, permissions — without touching the `run()` return value or the
+`AgentRunner` seam.
+
+```ts
+import { createAcpRunner } from "@automatalabs/workflows";
+
+const runner = createAcpRunner();
+
+// ACP `sessionUpdate` discriminants are the event names; the listener payload is typed to each.
+runner.on("agent_message_chunk", (e) => {
+  if (e.content.type === "text") process.stdout.write(e.content.text); // stream tokens as they land
+});
+runner.on("tool_call", (e) => console.error(`[${e.label}] tool: ${e.title}`));
+runner.on("usage_update", (e) => console.error(`ctx ${e.used}/${e.size} tokens`));
+
+// One catch-all for "everything": fires for EVERY session/update, carrying the raw update.
+const off = runner.on("session_update", (e) => console.error(e.update.sessionUpdate));
+
+await runner.run("Refactor this module and run the tests.", { label: "refactor", cwd });
+off(); // on()/once() return an unsubscribe thunk; off(name, listener) and removeAllListeners() also exist
+await runner.dispose();
+```
+
+**Event names.** The ACP `sessionUpdate` discriminants verbatim — `user_message_chunk`,
+`agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update`, `plan`,
+`plan_update`, `plan_removed`, `available_commands_update`, `current_mode_update`,
+`config_option_update`, `session_info_update`, `usage_update` — plus a few cross-cutting events:
+
+| event | payload |
+|-------|---------|
+| `session_update` | `{ update }` — catch-all for **every** update, regardless of kind |
+| `permission_request` | `{ request, outcome }` — a tool permission the runner auto-answered |
+| `raw_message` | `{ method, message }` — a vendor extension notification (e.g. Claude `_claude/sdkMessage`) |
+| `session_open` / `session_close` | a session opened / was released on a pooled connection |
+| `backend_error` | `{ backendId, error }` — a pooled backend process crashed |
+
+**Context envelope.** A pooled runner multiplexes many concurrent runs over one process, so every
+event (except `backend_error`) carries `{ sessionId, backendId, label?, runId? }` — filter by
+`label`/`runId` (from the run's `RunOptions`) to attribute an event to a specific run.
+
+**Best-effort.** Listeners are observers: a throwing listener is isolated and never breaks the run,
+the update drain, or sibling listeners.
+
+**With `runDynamicWorkflow` / `WorkflowManager`.** Construct the runner yourself, subscribe, then
+inject it: `runDynamicWorkflow(script, { runner })` or `new WorkflowManager({ agent: runner })`.
+Every `agent()` call in the script then streams through your listeners (filter by `label` to tell
+agents apart).
+
+---
+
 ## The in-script DSL
 
 The orchestration primitives are **not importable symbols**. They are **globals injected into the
@@ -310,11 +364,12 @@ parseWorkflowScript,          // parse a script's meta + body
 WorkflowManager,              // stateful / resumable run manager
 
 // ── ACP backend ──
-createAcpRunner,              // () => AcpAgentRunner (the default AgentRunner)
+createAcpRunner,              // () => AcpAgentRunner (the default AgentRunner; has .on(...) events)
 AcpAgentRunner,               // class — implements AgentRunner over ACP
 selectBackend,                // pick Claude vs Codex from a model/tier spec
 ClaudeBackend, CodexBackend,  // the concrete backends
 toJsonSchema, toStrictJsonSchema,
+TypedEventEmitter,            // the tiny typed emitter backing runner.on(...)
 
 // ── Errors ──
 WorkflowError, WorkflowErrorCode, isWorkflowError, isProviderUsageLimit,
@@ -323,6 +378,9 @@ WorkflowError, WorkflowErrorCode, isWorkflowError, isProviderUsageLimit,
 RunDynamicWorkflowOptions, WorkflowRunOptions, AgentOptions, ExecOptions,
 WorkflowManagerOptions, CheckpointOptions, WorkflowRunResult, WorkflowSnapshot,
 AcpPoolOptions, AgentRunner, RunOptions, AgentResult, AgentUsage, JournalEntry,
+// ACP events: the runner.on(...) surface
+AcpRunnerEventMap, AcpEventName, AcpEventListener, AcpEventContext,
+AcpSessionUpdate, AcpUpdateKind, AcpPermissionEvent, AcpRawMessageEvent, AcpBackendErrorEvent,
 ```
 
 (The DSL globals — `agent`, `parallel`, `pipeline`, … — are **not** exported; they are realm
