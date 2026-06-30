@@ -2,6 +2,11 @@
   "name": "@automatalabs/workflows",
   "version": "0.1.1",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VikashLoomba/agentprism-workflows.git",
+    "directory": "packages/workflows"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./src/index.ts",
