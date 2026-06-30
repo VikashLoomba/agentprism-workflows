@@ -1,0 +1,128 @@
+// AcpAgentPool — POOL-manages the ACP server PROCESS lifecycle so it is decoupled from the
+// per-agent SESSION lifecycle. Per backend (claude / codex) it holds a small set of long-lived
+// PooledConnections (default 1, configurable via option/env). Each connection is initialized ONCE
+// and multiplexes many concurrent sessions; the engine limiter already caps concurrency, so the
+// pinned servers run prompts on different sessions concurrently.
+//
+// acquire() picks a connection and opens a session on it:
+//   - reuse an idle live connection if one exists (sequential calls reuse ONE process);
+//   - else grow up to `size` (spread concurrent load across processes);
+//   - else pile onto the least-loaded live connection (multiplex past `size`).
+// A crashed process is evicted (drop) and the next acquire spawns a fresh one. dispose() closes
+// every process. A process-exit safety net kills children if the host exits without disposing.
+import type { Backend, BackendId } from "./backend.js";
+import { PooledConnection, SessionHandle, type AcpSessionOptions } from "./acp-client.js";
+
+const DEFAULT_POOL_SIZE = 1;
+const POOL_SIZE_ENV = "AGENTPRISM_ACP_POOL_SIZE";
+
+export interface AcpPoolOptions {
+  /** Long-lived processes to keep PER backend. Default 1; falls back to AGENTPRISM_ACP_POOL_SIZE. */
+  size?: number;
+}
+
+/** Resolve the per-backend pool size: explicit option wins, else env, else 1. Clamped to >= 1. */
+export function resolvePoolSize(option?: number): number {
+  if (typeof option === "number" && Number.isFinite(option) && option >= 1) {
+    return Math.floor(option);
+  }
+  const env = process.env[POOL_SIZE_ENV];
+  if (env !== undefined) {
+    const parsed = Number.parseInt(env, 10);
+    if (Number.isFinite(parsed) && parsed >= 1) return parsed;
+  }
+  return DEFAULT_POOL_SIZE;
+}
+
+export class AcpAgentPool {
+  private readonly size: number;
+  private readonly byBackend = new Map<BackendId, PooledConnection[]>();
+  private readonly onProcessExit = () => this.killAllSync();
+  private exitHookInstalled = false;
+  private disposed = false;
+
+  constructor(options: AcpPoolOptions = {}) {
+    this.size = resolvePoolSize(options.size);
+  }
+
+  /** Acquire a session for one agent() run: get/grow a pooled connection and open a session. */
+  async acquire(backend: Backend, opts: AcpSessionOptions): Promise<SessionHandle> {
+    if (this.disposed) throw new Error("ACP agent pool is disposed");
+    const connection = this.selectConnection(backend);
+    return connection.openSession(opts);
+  }
+
+  /**
+   * Pick the connection to host the next session. Runs SYNCHRONOUSLY (no await) through to the
+   * synchronous load-reservation in openSession(), so concurrent acquires never over-spawn or
+   * double-book a connection.
+   */
+  private selectConnection(backend: Backend): PooledConnection {
+    const connections = this.connectionsFor(backend.id);
+    const live = connections.filter((c) => c.alive);
+
+    const idle = live.find((c) => c.activeSessions === 0);
+    if (idle) return idle;
+
+    if (live.length < this.size) {
+      this.installExitHook();
+      const connection = PooledConnection.create(backend, {
+        onDead: (dead) => this.drop(backend.id, dead),
+      });
+      connections.push(connection);
+      return connection;
+    }
+
+    // At capacity with every connection busy: multiplex onto the least-loaded one.
+    return live.reduce((least, c) => (c.activeSessions < least.activeSessions ? c : least));
+  }
+
+  private connectionsFor(id: BackendId): PooledConnection[] {
+    let arr = this.byBackend.get(id);
+    if (!arr) {
+      arr = [];
+      this.byBackend.set(id, arr);
+    }
+    return arr;
+  }
+
+  /** Evict a dead connection so it is never handed out again. */
+  private drop(id: BackendId, connection: PooledConnection): void {
+    const arr = this.byBackend.get(id);
+    if (!arr) return;
+    const index = arr.indexOf(connection);
+    if (index >= 0) arr.splice(index, 1);
+  }
+
+  /** Close every pooled process and clear the pool. Idempotent. */
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.removeExitHook();
+    const all = this.allConnections();
+    this.byBackend.clear();
+    await Promise.all(all.map((c) => c.dispose()));
+  }
+
+  private allConnections(): PooledConnection[] {
+    const all: PooledConnection[] = [];
+    for (const arr of this.byBackend.values()) all.push(...arr);
+    return all;
+  }
+
+  private installExitHook(): void {
+    if (this.exitHookInstalled) return;
+    this.exitHookInstalled = true;
+    process.once("exit", this.onProcessExit);
+  }
+
+  private removeExitHook(): void {
+    if (!this.exitHookInstalled) return;
+    this.exitHookInstalled = false;
+    process.removeListener("exit", this.onProcessExit);
+  }
+
+  /** Synchronous best-effort child kill for the process-exit hook (no async work is possible). */
+  private killAllSync(): void {
+    for (const connection of this.allConnections()) connection.killNow();
+  }
+}

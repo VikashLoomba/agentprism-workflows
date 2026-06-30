@@ -8,6 +8,7 @@ import type {
   AgentRunner,
   AgentUsage,
   JournalEntry,
+  McpServerConfig,
   WorkflowMeta,
   WorkflowMetaPhase,
   WorkflowRunResult,
@@ -174,6 +175,12 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
   timeoutMs?: number | null;
   /** Retry attempts after a recoverable failure for this specific agent. */
   retries?: number;
+  /**
+   * Client-provided MCP servers attached to this agent's session (threaded into the runner,
+   * which sends them at ACP `session/new { mcpServers }`). ADDITIVE: it wires tools, not the
+   * logical call, so it is intentionally NOT part of the resume identity hash (hashAgentCall).
+   */
+  mcpServers?: McpServerConfig[];
 }
 
 /** Options for a human checkpoint() — a deterministic, journaled, replayable gate. */
@@ -486,6 +493,8 @@ export async function runWorkflow<T = unknown>(
                 toolNames: agentDef?.tools,
                 disallowedToolNames: agentDef?.disallowedTools,
                 cwd: runCwd,
+                // Additive run input: wires tools, NOT part of the resume identity (hashAgentCall).
+                mcpServers: agentOptions.mcpServers,
                 onModelResolved: (id: string) => {
                   displayModel = id;
                 },

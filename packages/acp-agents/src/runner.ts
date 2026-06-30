@@ -1,14 +1,18 @@
 // AcpAgentRunner — the AgentRunner seam implementation (the LEAF the engine injects against).
 // One method, two backend strategies behind it. Per run():
 //   1. pick the backend by model/tier (cross-provider routing = which ACP server to spawn)
-//   2. session/new { cwd } on a fresh subprocess (worktree isolation)
+//   2. ACQUIRE a pooled connection + session/new { cwd } (per-session cwd = worktree isolation;
+//      the PROCESS is pool-managed and REUSED across runs — never spawned/killed per run)
 //   3. select the model via session/set_config_option (onModelResolved / onModelFallback)
 //   4. apply the schema per backend (Claude: at session/new; Codex: per-turn _meta)
 //   5. prompt + drain; enforce the tool allow/deny policy via permission auto-responses
 //   6. schema  -> native -> validate -> re-prompt ladder -> SCHEMA_NONCOMPLIANCE
 //      no schema -> final assistant text (empty -> AGENT_EMPTY_OUTPUT, recoverable)
 //      provider wall (thrown) -> PROVIDER_USAGE_LIMIT (non-recoverable, resetHint)
+//      pooled process crash (thrown) -> recoverable AGENT_EXECUTION_ERROR (engine retries on a
+//        fresh process; the dead connection is evicted from the pool)
 //   7. usage -> onUsage on BOTH the success and error paths; honor opts.signal (-> session/cancel)
+//   8. RELEASE the session (session/close) WITHOUT killing the process; return it to the pool
 //
 // Timeout and abort are the ENGINE's job: we honor opts.signal (wired to ACP session/cancel)
 // and re-throw on abort, but never implement our own timeout.
@@ -19,8 +23,10 @@ import {
   type AgentRunner,
   type RunOptions,
 } from "@agentprism/shared-types";
+import type { StopReason } from "@agentclientprotocol/sdk";
 import type { TSchema } from "typebox";
-import { AcpAgentSession } from "./acp-client.js";
+import type { SessionHandle } from "./acp-client.js";
+import { AcpAgentPool, type AcpPoolOptions } from "./pool.js";
 import type { Backend } from "./backend.js";
 import { ClaudeBackend } from "./backends/claude.js";
 import { CodexBackend } from "./backends/codex.js";
@@ -31,6 +37,12 @@ import { resolveStructuredOutput, type StructuredSession } from "./structured-ou
 type AnyRunOptions = RunOptions<TSchema | undefined>;
 
 export class AcpAgentRunner implements AgentRunner {
+  private readonly pool: AcpAgentPool;
+
+  constructor(options: AcpPoolOptions = {}) {
+    this.pool = new AcpAgentPool(options);
+  }
+
   async run<S extends TSchema | undefined = undefined>(
     prompt: string,
     options: RunOptions<S> = {},
@@ -41,20 +53,33 @@ export class AcpAgentRunner implements AgentRunner {
     const policy: ToolPolicy = { allow: opts.toolNames, deny: opts.disallowedToolNames };
     const cwd = opts.cwd ?? process.cwd();
 
-    const session = await AcpAgentSession.start(backend, { cwd, schema, policy, signal: opts.signal });
+    const session: SessionHandle = await this.pool.acquire(backend, {
+      cwd,
+      schema,
+      policy,
+      signal: opts.signal,
+      mcpServers: opts.mcpServers,
+    });
     try {
       opts.signal?.throwIfAborted();
       await applyModelSelection(session, opts);
 
       const text = buildPrompt(prompt, opts, Boolean(schema));
       const promptMeta = backend.promptMeta(schema);
-      await session.prompt(text, promptMeta);
+      const response = await session.prompt(text, promptMeta);
       opts.signal?.throwIfAborted();
+      // Inspect the turn's stop reason BEFORE the text/schema path: a refusal or truncation
+      // must surface distinctly here, never be misread as empty output or burned through the
+      // schema-repair ladder into SCHEMA_NONCOMPLIANCE.
+      assertNormalStopReason(response.stopReason, opts.label);
 
       if (schema) {
         const structuredSession: StructuredSession = {
           prompt: async (repromptText: string) => {
-            await session.prompt(repromptText, promptMeta);
+            const repromptResponse = await session.prompt(repromptText, promptMeta);
+            // A repair turn that refuses / truncates / cancels must also surface distinctly
+            // instead of silently continuing the ladder.
+            assertNormalStopReason(repromptResponse.stopReason, opts.label);
           },
           lastText: () => session.currentTurnText(),
           tryNative: () => backend.nativeStructured(session),
@@ -91,17 +116,65 @@ export class AcpAgentRunner implements AgentRunner {
       } catch {
         // history is diagnostic only.
       }
-      session.dispose();
+      // Release the SESSION (best-effort session/close) WITHOUT killing the pooled process.
+      try {
+        await session.release();
+      } catch {
+        // release is best-effort (session already untracked); never mask the real result/error.
+      }
     }
+  }
+
+  /** Tear down the whole pool (close every long-lived process). Call when the run ends / the
+   *  runner is disposed. Beyond the AgentRunner seam (additive) — never enters the resume hash. */
+  async dispose(): Promise<void> {
+    await this.pool.dispose();
   }
 }
 
-/** Factory the mcp-server composition root calls to inject the runner into the engine. */
-export function createAcpRunner(): AgentRunner {
-  return new AcpAgentRunner();
+/** Factory the mcp-server composition root calls to inject the runner into the engine. The pool
+ *  size is a runner-level option (default 1, else AGENTPRISM_ACP_POOL_SIZE) — NOT a RunOptions
+ *  field, so it never enters hashAgentCall / the resume identity. */
+export function createAcpRunner(options?: AcpPoolOptions): AgentRunner {
+  return new AcpAgentRunner(options);
 }
 
-async function applyModelSelection(session: AcpAgentSession, opts: AnyRunOptions): Promise<void> {
+/**
+ * Map a PromptResponse.stopReason onto the seam's error contract. `end_turn` (and any
+ * unknown future reason) is a normal completion — fall through to the text/schema path.
+ * The abnormal reasons each get a DISTINCT, non-recoverable failure so the engine never
+ * retries a refused/truncated prompt (burning the retry budget) and never mistakes it for
+ * recoverable empty output:
+ *   - refusal             -> AGENT_EXECUTION_ERROR "model refused to respond"
+ *   - max_tokens / max_turn_requests -> AGENT_EXECUTION_ERROR "output truncated"
+ *   - cancelled           -> WORKFLOW_ABORTED
+ */
+function assertNormalStopReason(stopReason: StopReason, label?: string): void {
+  switch (stopReason) {
+    case "refusal":
+      throw new WorkflowError("model refused to respond", WorkflowErrorCode.AGENT_EXECUTION_ERROR, {
+        recoverable: false,
+        agentLabel: label,
+      });
+    case "max_tokens":
+    case "max_turn_requests":
+      throw new WorkflowError(
+        `output truncated (stop reason: ${stopReason})`,
+        WorkflowErrorCode.AGENT_EXECUTION_ERROR,
+        { recoverable: false, agentLabel: label },
+      );
+    case "cancelled":
+      throw new WorkflowError("workflow aborted", WorkflowErrorCode.WORKFLOW_ABORTED, {
+        recoverable: false,
+        agentLabel: label,
+      });
+    default:
+      // "end_turn" and any unrecognized future reason: normal completion.
+      return;
+  }
+}
+
+async function applyModelSelection(session: SessionHandle, opts: AnyRunOptions): Promise<void> {
   // `model` wins; `tier` is consulted only when `model` is unset (frozen contract).
   const spec = opts.model ?? opts.tier;
   if (!spec) return;

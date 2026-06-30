@@ -138,3 +138,103 @@ test("toStrictJsonSchema: returned copy is independent — mutating it cannot re
   (strict.properties as Record<string, unknown>).injected = { type: "string" };
   assert.equal("injected" in schema.properties, false);
 });
+
+// ---- (6) originally-OPTIONAL props become NULLABLE under all-required strict mode --------
+
+test("toStrictJsonSchema: optional prop -> required AND nullable (type unioned with null)", () => {
+  const schema = buildSchema();
+  const strict = toStrictJsonSchema(schema);
+  const props = strict.properties as Record<string, JsonNode>;
+
+  // `age` was optional; strict forces it into `required`, so it must also accept null.
+  assert.deepEqual(props.age.type, ["integer", "null"]);
+  assert.ok((strict.required as string[]).includes("age"));
+
+  // The nested optional `zip` is likewise required + nullable.
+  const address = props.address.properties as Record<string, JsonNode>;
+  assert.deepEqual(address.zip.type, ["string", "null"]);
+  assert.deepEqual(props.address.required, ["city", "zip"]);
+
+  // A REQUIRED prop is NOT made nullable (its type stays a bare string).
+  assert.equal(props.name.type, "string");
+  // A required array prop also stays non-nullable.
+  assert.equal(props.tags.type, "array");
+});
+
+test("toStrictJsonSchema: optional nested OBJECT prop becomes nullable via its object type", () => {
+  const schema = Type.Object({
+    inner: Type.Optional(Type.Object({ c: Type.String() })),
+    keep: Type.String(),
+  });
+  const strict = toStrictJsonSchema(schema);
+  const props = strict.properties as Record<string, JsonNode>;
+  // optional object -> required + type widened to ["object","null"]
+  assert.deepEqual(props.inner.type, ["object", "null"]);
+  assert.deepEqual(strict.required, ["inner", "keep"]);
+  // the (now-nullable) nested object still got strict treatment internally
+  assert.equal(props.inner.additionalProperties, false);
+  assert.deepEqual(props.inner.required, ["c"]);
+});
+
+test("toStrictJsonSchema: optional $ref prop (no inline type) is wrapped in a nullable anyOf", () => {
+  const schema = Type.Object(
+    { a: Type.Optional(Type.Ref("Foo")), b: Type.String() },
+    { $defs: { Foo: Type.Object({ z: Type.String() }) } },
+  );
+  const strict = toStrictJsonSchema(schema);
+  const props = strict.properties as Record<string, JsonNode>;
+  // No inline `type` to widen -> wrap the $ref in anyOf:[ {$ref}, {type:null} ].
+  const anyOf = props.a.anyOf as JsonNode[];
+  assert.ok(Array.isArray(anyOf));
+  assert.equal(anyOf.length, 2);
+  assert.equal((anyOf[0] as { $ref?: string }).$ref, "Foo");
+  assert.deepEqual(anyOf[1], { type: "null" });
+  assert.deepEqual(strict.required, ["a", "b"]);
+});
+
+// ---- (6) strict-UNSUPPORTED composition: allOf flattened or rejected; oneOf -> anyOf -----
+
+test("toStrictJsonSchema: trivial allOf (Intersect of objects) is flattened into one object", () => {
+  // Type.Intersect renders `{ allOf: [ {obj}, {obj} ] }` with no top-level type.
+  const schema = Type.Intersect([
+    Type.Object({ a: Type.String() }), // `a` required in its part
+    Type.Object({ b: Type.Optional(Type.Number()) }), // `b` optional in its part
+  ]);
+  const strict = toStrictJsonSchema(schema);
+
+  assert.equal("allOf" in strict, false, "allOf must be gone (OpenAI strict rejects it)");
+  assert.equal(strict.type, "object");
+  assert.equal(strict.additionalProperties, false);
+  const props = strict.properties as Record<string, JsonNode>;
+  // merged props; both forced required; the originally-optional `b` becomes nullable.
+  assert.deepEqual(Object.keys(props), ["a", "b"]);
+  assert.deepEqual(strict.required, ["a", "b"]);
+  assert.equal(props.a.type, "string");
+  assert.deepEqual(props.b.type, ["number", "null"]);
+});
+
+test("toStrictJsonSchema: a NON-object allOf member throws a clear schema error", () => {
+  // allOf combining scalar constraints cannot be trivially flattened to one object schema.
+  const schema = Type.Object({
+    x: Type.Unsafe({ allOf: [{ type: "string" }, { type: "number" }] }),
+  });
+  assert.throws(() => toStrictJsonSchema(schema), /allOf/i);
+});
+
+test("toStrictJsonSchema: oneOf is rewritten to anyOf (OpenAI strict accepts anyOf only)", () => {
+  const schema = Type.Object({
+    choice: Type.Unsafe({ oneOf: [{ type: "string" }, { type: "number" }] }),
+  });
+  const strict = toStrictJsonSchema(schema);
+  const props = strict.properties as Record<string, JsonNode>;
+  assert.equal("oneOf" in props.choice, false);
+  assert.deepEqual(props.choice.anyOf, [{ type: "string" }, { type: "number" }]);
+});
+
+test("toStrictJsonSchema: allOf/oneOf normalization does NOT mutate the hash-feeding original", () => {
+  const schema = Type.Intersect([Type.Object({ a: Type.String() }), Type.Object({ b: Type.Optional(Type.Number()) })]);
+  const before = JSON.stringify(schema);
+  toStrictJsonSchema(schema);
+  assert.equal(JSON.stringify(schema), before, "the exact bytes the resume hash consumes are unchanged");
+  assert.ok(Array.isArray((view(schema) as JsonNode).allOf), "original still carries its allOf");
+});

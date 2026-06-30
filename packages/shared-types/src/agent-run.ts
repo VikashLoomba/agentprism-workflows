@@ -1,6 +1,7 @@
 // ===== packages/shared-types/src/agent-run.ts =====
 import type { Static, TSchema } from "typebox";
 import type { AgentHistoryEntry } from "./agent-history.js";
+import type { McpServerConfig } from "./mcp-config.js";
 
 /** Real token/cost usage for ONE subagent run. Delivered OUT-OF-BAND via
  *  RunOptions.onUsage — NEVER via run()'s return value. Fires on BOTH the success
@@ -80,6 +81,10 @@ export interface RunOptions<S extends TSchema | undefined = undefined> {
   onModelFallback?: (requestedSpec: string) => void;
   /** A compact snapshot of this subagent's message/tool history (diagnostic only). */
   onHistory?: (history: AgentHistoryEntry[]) => void;
+  /** Client-provided MCP servers to attach to this run (ACP `session/new { mcpServers }`).
+   *  ADDITIVE and NOT part of the resume identity hash (hashAgentCall) — it wires tools,
+   *  not the logical call. Omitted/empty => the runner sends `mcpServers: []` (the default). */
+  mcpServers?: McpServerConfig[];
 }
 
 /** The result side of the seam: schema => the validated object, no schema => text.
