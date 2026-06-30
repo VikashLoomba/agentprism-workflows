@@ -95,6 +95,11 @@ permission allow/deny (§5.5), usage extraction (§5.6), cancellation (§5.7), a
 structured-output vendor wiring (§6). It exposes one method — `run(prompt, opts): Promise<result>`
 — satisfying the `AgentRunner` interface. Depends only on `@agentclientprotocol/sdk`.
 
+The Codex backend drives the **installed npm dependency** `@agentclientprotocol/codex-acp@1.0.2`,
+patched via pnpm's native `patchedDependencies` (`patches/@agentclientprotocol__codex-acp@1.0.2.patch`)
+to forward the turn-level `outputSchema` (§6.3). The patch is applied at `pnpm install`, so Codex
+ships on a clean `git clone && pnpm install && pnpm build` — no vendored tree, no opt-in build step.
+
 Usable standalone, with no workflow and no MCP server:
 
 ```ts
@@ -485,6 +490,13 @@ never sets `outputSchema`. Forward it from the prompt's `_meta` (the adapter alr
 `runTurn → turnStart → sendRequest({ method: "turn/start", params })` passes it through verbatim;
 `TurnStartParams.outputSchema` already exists, so it's type-clean.
 
+**Delivery.** The patch ships as a pnpm-native patch over the pinned npm dep — `pnpm.patchedDependencies`
+in the root `package.json` points at `patches/@agentclientprotocol__codex-acp@1.0.2.patch` (anchored to
+the published `1.0.2` bundle's `runTurn({…})` call). pnpm re-applies it on every `pnpm install`, so the
+patched adapter is present on a clean checkout with no vendoring and no postinstall hook. `CodexBackend`
+spawns the resolved package main (`require.resolve("@agentclientprotocol/codex-acp")`) under the current
+node.
+
 **Output needs no patch.** `outputSchema` constrains the FINAL assistant message, which already
 flows back over the normal `session/update` agent-message stream — `CodexBackend` reads the final
 text and `JSON.parse`s it. (Cleaner than Claude, which needs `emitRawSDKMessages`.)
@@ -534,7 +546,8 @@ tool.
 ## 7. The leaf interface: `ACPAgent.run(prompt, opts)`
 
 This lives in the **`acp-agents`** module (§2) and is usable on its own — no `workflow-engine`,
-no `mcp-server`. It implements the `AgentRunner` seam the engine injects against (today
+no `mcp-server`. It drives `claude-agent-acp` and the pnpm-patched `@agentclientprotocol/codex-acp`
+npm dep (§2, §6.3) as ACP server subprocesses. It implements the `AgentRunner` seam the engine injects against (today
 `Pick<WorkflowAgent, "run">`, [`src/workflow.ts:59`](https://github.com/QuintinShaw/pi-dynamic-workflows/blob/1b0291ab58c91037ea7b067875960530d52bedce/src/workflow.ts#L59)). One method, two backend strategies behind it:
 
 ```
@@ -574,8 +587,11 @@ the unchanged engine.
   per distinct schema). The engine already does one session per call.
 - **Codex structured output needs a codex-acp patch:** the shipped binary (`@openai/codex@0.142.4`,
   verified at `rust-v0.142.4`) honors `turn/start.outputSchema`, but the stock adapter never forwards
-  it — add the ~1-line `_meta` → `runTurn` forward (§6.3) and normalize schemas to OpenAI **strict**
-  rules. Output rides the normal message stream (no `emitRawSDKMessages` needed).
+  it — the ~1-line `_meta` → `runTurn` forward (§6.3) ships as a **pnpm-native patch over the pinned
+  `@agentclientprotocol/codex-acp@1.0.2` npm dep** (`pnpm.patchedDependencies` →
+  `patches/@agentclientprotocol__codex-acp@1.0.2.patch`), re-applied on every `pnpm install` (no
+  vendored tree). `CodexBackend` also normalizes schemas to OpenAI **strict** rules. Output rides the
+  normal message stream (no `emitRawSDKMessages` needed).
 - **MCP turn semantics:** no "deliver result into a later turn" — run the `workflow` tool
   synchronously with progress notifications; expose `resumeFromRunId` for continuation.
 - **Cross-provider routing = choose the server.** Per-call model tiering works *within* a
