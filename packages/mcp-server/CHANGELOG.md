@@ -1,5 +1,17 @@
 # @automatalabs/mcp-server
 
+## 0.1.6
+
+### Patch Changes
+
+- 087e566: Docs-only: refresh package READMEs so npmjs.org reflects the current state — drop stale
+  "pre-release / install from source" framing (the packages are published), and complete the
+  `RunOptions` field lists (`baseInstructions` / `developerInstructions` on shared-types, `runId`
+  on acp-agents). No code or API changes.
+- Updated dependencies [087e566]
+  - @automatalabs/shared-types@0.3.1
+  - @automatalabs/workflows@0.4.1
+
 ## 0.1.5
 
 ### Patch Changes
