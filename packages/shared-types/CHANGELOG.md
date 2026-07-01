@@ -1,5 +1,14 @@
 # @automatalabs/shared-types
 
+## 0.3.1
+
+### Patch Changes
+
+- 087e566: Docs-only: refresh package READMEs so npmjs.org reflects the current state — drop stale
+  "pre-release / install from source" framing (the packages are published), and complete the
+  `RunOptions` field lists (`baseInstructions` / `developerInstructions` on shared-types, `runId`
+  on acp-agents). No code or API changes.
+
 ## 0.3.0
 
 ### Minor Changes
