@@ -5,21 +5,22 @@ This is a **pnpm workspace** (monorepo) of five packages under the `@automatalab
 ## Prerequisites
 
 - **Node.js ≥ 22** (`.nvmrc` pins `22`).
-- **pnpm 10** (`packageManager: pnpm@10.0.0`; `corepack enable` or install pnpm directly).
+- **pnpm 10** (`packageManager: pnpm@10.34.4`; `corepack enable` or install pnpm directly).
 
 ## Setup
 
 ```bash
-pnpm install        # installs deps, applies the codex-acp patch, fetches backend binaries
+pnpm install        # installs deps, fetches backend binaries
 pnpm build          # tsc -b across all packages (topological)
 pnpm test           # pnpm build && pnpm -r test
 pnpm typecheck      # pnpm -r exec tsc --noEmit
 ```
 
-`pnpm install` does two non-obvious things:
+`pnpm install` does one non-obvious thing:
 
-1. **Applies the Codex patch.** The Codex backend needs a one-line forward of the turn-level `outputSchema` into `@agentclientprotocol/codex-acp`. It ships as a pnpm-native patch — `pnpm.patchedDependencies` in the root `package.json` → `patches/@agentclientprotocol__codex-acp@1.0.2.patch` — re-applied on every install, with no vendored source tree. See [`docs/design-notes.md` §6.3](docs/design-notes.md).
-2. **Fetches native binaries.** Both backends pull an os/cpu-gated native binary (`@openai/codex`, `@anthropic-ai/claude-agent-sdk`). Stay on a glibc x64 runner in CI and do **not** pass `--no-optional`.
+1. **Fetches native binaries.** Both backends pull an os/cpu-gated native binary (`@openai/codex`, `@anthropic-ai/claude-agent-sdk`). Stay on a glibc x64 runner in CI and do **not** pass `--no-optional`.
+
+> The Codex backend's turn-level `outputSchema` forward is baked into the published `@automatalabs/codex-acp` fork (exact-pinned by `acp-agents`), so there is nothing to patch locally. See [`docs/design-notes.md` §6.3](docs/design-notes.md).
 
 ## Package layout
 
@@ -31,13 +32,13 @@ pnpm typecheck      # pnpm -r exec tsc --noEmit
 | `packages/mcp-server` | The stdio MCP server / composition root (bin `agentprism-workflow`). |
 | `packages/workflows` | The importable SDK facade. |
 
-`workflow-engine` and `acp-agents` are **siblings** — neither imports the other; they meet only at the `AgentRunner` seam in `shared-types`. `mcp-server` and `workflows` are the two composition roots that wire them together.
+`workflow-engine` and `acp-agents` are **siblings** — neither imports the other; they meet only at the `AgentRunner` seam in `shared-types`. `workflows` is the single facade that composes them; `mcp-server` builds on `workflows`. So the dependency direction is `mcp-server → workflows → { workflow-engine, acp-agents, shared-types }`.
 
 ### Conventions
 
 - TypeScript source resolution in-repo: each package's `exports.types` points at `./src/index.ts` for the dev build; the published manifest is overridden to `./dist` via `publishConfig` (see below). Don't repoint the top-level fields to `dist`.
 - Tests use `node:test` via `tsx` (`tsx --test`). Keep the default suite deterministic and credential-free.
-- The `agentprism/*` protocol `_meta` keys, the `AGENTPRISM_*` env vars, the `.agentprism/` runtime dirs, and the `agentprism-workflow` bin are a **wire/CLI contract** — they are intentionally *not* renamed with the npm scope.
+- The `AGENTPRISM_*` env vars, the `.agentprism/` runtime dirs, and the `agentprism-workflow` bin are a **wire/CLI contract** — they are intentionally *not* renamed with the npm scope. The ACP `_meta` extension keys are **bare** (un-namespaced): `outputSchema`, `runId`, `baseInstructions`, `developerInstructions` — exported as `META_KEYS` / `CODEX_META_KEYS` from `shared-types`.
 
 ## Testing
 
@@ -61,11 +62,12 @@ pnpm version          # changeset version — applies bumps + changelogs (usuall
 pnpm release          # pnpm build && changeset publish (CI only)
 ```
 
-Publishing is wired in `.github/workflows/release.yml`, but it is **dormant** (manual `workflow_dispatch` only) until two prerequisites are met:
+Publishing runs from [`.github/workflows/release.yml`](.github/workflows/release.yml) on push to `main`, via **OIDC trusted publishing** (no long-lived npm token; SLSA provenance):
 
-1. **npm auth** — OIDC trusted publishing is configured for the `@automatalabs` org (no long-lived token needed).
-2. **The `@automatalabs/codex-acp` fork is published** — the pnpm patch above does **not** travel to npm consumers, so until a patched Codex package is published and `acp-agents` depends on it, a published build's Codex structured output would silently degrade.
+1. Add a changeset (`pnpm changeset`) in your PR describing the change + bump levels, and merge it to `main`.
+2. Changesets opens a **"Version Packages"** PR that applies the bumps + changelogs.
+3. Merging that PR triggers `changeset publish`, which publishes the bumped packages.
 
-Until then, merging to `main` never auto-publishes. A `LICENSE` file is also required before the first publish.
+The Codex `outputSchema` forward lives in the published `@automatalabs/codex-acp` fork (exact-pinned by `acp-agents`), so a change to that wire key is a **coordinated release**: publish the fork first, then bump the pinned dep. The repo is licensed Apache-2.0 (`LICENSE`).
 
 CI (`.github/workflows/ci.yml`) runs on every PR and push: frozen install → `tsc -b` → `tsc --noEmit` → `pnpm -r test` on Node 22 / pnpm 10.

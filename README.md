@@ -7,7 +7,7 @@ You author a small JavaScript *script* (`export const meta`, then call `agent()`
 - **As a TypeScript SDK** — `@automatalabs/workflows` — embed the runner in your own program.
 - **As a stdio MCP server** — `@automatalabs/mcp-server`, built on the SDK — expose a `workflow` tool to any MCP host (Claude Code, Zed, …).
 
-> **Status: pre-release.** The packages are versioned `0.1.0` under the `@automatalabs` scope and are being prepared for npm. Until they're published, install from source (see [Install](#install)). The `npm i …` lines below are how it will work once published.
+> The `@automatalabs/*` packages are **published on npm** — see [Install](#install). Two are user-facing: the `@automatalabs/workflows` SDK and the `@automatalabs/mcp-server` stdio server.
 
 ---
 
@@ -47,21 +47,21 @@ You only need auth for the backend(s) you actually call.
 
 ## Install
 
-### From source (current)
-
-```bash
-git clone <this-repo> agentprism-workflows
-cd agentprism-workflows
-pnpm install      # applies the codex-acp patch + fetches backend binaries
-pnpm build        # tsc -b across all packages
-```
-
-### From npm (once published)
+### From npm
 
 ```bash
 pnpm add @automatalabs/workflows        # the SDK
 # or, to run the MCP server:
 pnpm add @automatalabs/mcp-server
+```
+
+### From source (for development)
+
+```bash
+git clone <this-repo> agentprism-workflows
+cd agentprism-workflows
+pnpm install      # installs deps + fetches backend binaries
+pnpm build        # tsc -b across all packages
 ```
 
 ---
@@ -162,7 +162,7 @@ Register the stdio server in your MCP host's config:
 }
 ```
 
-From source (before publishing), point at the built entry instead:
+From a source checkout, point at the built entry instead:
 
 ```json
 {
@@ -239,9 +239,9 @@ One long-lived ACP process per backend is **pooled** and reused across `agent()`
 ## Documentation
 
 - [`docs/design-notes.md`](docs/design-notes.md) — the deep protocol-level design: ACP lifecycle, the structured-output crux, model/permission/usage/cancellation mechanics, and the engine lineage.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — local development, testing (including the gated live-backend e2e), the Codex patch, and releasing.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — local development, testing (including the gated live-backend e2e), and releasing.
 - [Agent Client Protocol](https://agentclientprotocol.com) · [Model Context Protocol](https://modelcontextprotocol.io)
 
 ## License
 
-Not yet set — a `LICENSE` file is a prerequisite before the first npm publish. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Apache-2.0 — see [`LICENSE`](LICENSE).

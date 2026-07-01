@@ -29,10 +29,11 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      # --frozen-lockfile re-applies the @agentclientprotocol/codex-acp pnpm
-      # patch via the lockfile patch_hash AND fetches the linux-x64 codex/claude
-      # native binaries. Keep this on an ubuntu (glibc) x64 runner and do NOT
-      # pass --no-optional, or those platform binaries would be skipped.
+      # --frozen-lockfile restores the exact dependency tree (incl. the
+      # @automatalabs/codex-acp fork, which bakes the outputSchema forward into
+      # its dist) AND fetches the linux-x64 codex/claude native binaries. Keep
+      # this on an ubuntu (glibc) x64 runner and do NOT pass --no-optional, or
+      # those platform binaries would be skipped.
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

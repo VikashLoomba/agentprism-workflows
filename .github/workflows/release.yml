@@ -58,8 +58,9 @@ jobs:
       - name: Upgrade npm for OIDC trusted publishing
         run: npm install -g npm@latest
 
-      # Same frozen install as CI: re-applies the codex-acp pnpm patch and
-      # fetches the linux-x64 native binaries (ubuntu glibc x64, no --no-optional).
+      # Same frozen install as CI: restores the exact dependency tree (incl. the
+      # @automatalabs/codex-acp fork) and fetches the linux-x64 native binaries
+      # (ubuntu glibc x64, no --no-optional).
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

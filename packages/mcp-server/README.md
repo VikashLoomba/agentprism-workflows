@@ -6,7 +6,7 @@ This package is a **thin MCP adapter**. All of the real work — parsing the wor
 
 > **Embedding in your own program?** Don't reach for this package — use **[`@automatalabs/workflows`](../workflows)** directly (`runDynamicWorkflow(script, …)`). This server exists to put that same engine behind the MCP protocol. See [Programmatic use](#programmatic-use) below.
 
-> **Status: pre-release.** Versioned `0.1.x` under the `@automatalabs` scope and being prepared for npm. Until it's published, install from source (see [Install](#install)); the `npm i …` lines below are how it will work once published.
+> **Published on npm** as `@automatalabs/mcp-server` (bin: `agentprism-workflow`) — see [Install](#install).
 
 ---
 

@@ -73,7 +73,8 @@ From [`src/index.ts`](./src/index.ts):
 - `AgentRunner` — the `run(prompt, options) => result` interface above.
 - `RunOptions<S>` — the options bag: `label`, `schema`, `instructions`, `signal`, `model`,
   `tier`, `cwd`, `toolNames`, `disallowedToolNames`, `maxSchemaRetries`, `mcpServers`, `runId`,
-  and the out-of-band callbacks `onUsage`, `onModelResolved`, `onModelFallback`, `onHistory`.
+  the Codex-only `baseInstructions` / `developerInstructions`, and the out-of-band callbacks
+  `onUsage`, `onModelResolved`, `onModelFallback`, `onHistory`.
 - `AgentResult<S>` — `S extends TSchema ? Static<S> : string`.
 - `AgentUsage` — per-run token/cost: `input`, `output`, `cacheRead`, `cacheWrite`, `total`, `cost`.
 - `AgentRunOptions` / `AgentRunResult` — lift-compat aliases for `RunOptions` / `AgentResult`.
