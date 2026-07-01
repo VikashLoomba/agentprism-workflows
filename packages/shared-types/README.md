@@ -93,7 +93,7 @@ From [`src/index.ts`](./src/index.ts):
 
 **History & meta**
 - `AgentHistoryEntry`, `AgentHistoryRole`, `AgentHistoryKind` (diagnostic, via `onHistory`).
-- `META_NS`, `META_KEYS`, `ClaudeCodeSessionMeta`, `ClaudeJsonSchemaOutputFormat`.
+- `META_KEYS`, `CODEX_META_KEYS`, `ClaudeCodeSessionMeta`, `ClaudeJsonSchemaOutputFormat`.
 
 ## License
 

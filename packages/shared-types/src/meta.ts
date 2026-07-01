@@ -1,25 +1,21 @@
 // ===== packages/shared-types/src/meta.ts =====
-// RESERVED `_meta` namespaces. One source of truth so the Codex patch key and any
-// engine correlation stamps never drift across packages.
+// RESERVED `_meta` keys. One source of truth so the Codex patch key and any engine
+// correlation stamps never drift across packages. All keys are BARE (un-namespaced),
+// mirroring the target Codex param / upstream codex-acp convention (e.g. `additionalRoots`).
 
-/** OURS: the reserved ACP/MCP `_meta` namespace for every agentprism vendor extension. */
-export const META_NS = "agentprism" as const;
-
-/** Canonical `agentprism/*` keys the engine/runner read & write. */
+/** Canonical bare `_meta` keys the engine/runner read & write. */
 export const META_KEYS = {
   /** Codex turn-level schema forward: the PATCHED codex-acp adapter reads
-   *  request._meta["agentprism/outputSchema"] and threads it into turn/start.outputSchema. */
-  outputSchema: `${META_NS}/outputSchema`,
+   *  request._meta["outputSchema"] and threads it into turn/start.outputSchema. */
+  outputSchema: "outputSchema",
   /** Run correlation passthrough on ACP requests, for tracing/telemetry. */
-  runId: `${META_NS}/runId`,
+  runId: "runId",
 } as const;
 
-/** VENDOR (codex-acp) — NOT ours and NOT namespaced: bare `session/new` `_meta` keys the
- *  @automatalabs/codex-acp adapter reads and threads into the Codex `thread/start` /
- *  `thread/resume` / `thread/fork` params of the same name. Kept here (beside META_KEYS) so the
- *  writer (CodexBackend) and its tests never drift from the wire contract the fork reads. These
- *  deliberately live OUTSIDE META_NS — they mirror upstream codex-acp's bare-key convention
- *  (e.g. `additionalRoots`), not the reserved `agentprism/*` namespace. */
+/** VENDOR (codex-acp) bare `session/new` `_meta` keys the @automatalabs/codex-acp adapter reads
+ *  and threads into the Codex `thread/start` / `thread/resume` / `thread/fork` params of the same
+ *  name. Kept here (beside META_KEYS) so the writer (CodexBackend) and its tests never drift from
+ *  the wire contract the fork reads. */
 export const CODEX_META_KEYS = {
   /** Replaces Codex's built-in base system prompt for the thread. */
   baseInstructions: "baseInstructions",

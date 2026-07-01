@@ -1,6 +1,6 @@
 // CodexBackend — drives the installed npm dep @automatalabs/codex-acp, a published fork of
 // @agentclientprotocol/codex-acp that bakes in the outputSchema patch. The patch forwards
-// request._meta["agentprism/outputSchema"] into the Codex App Server's turn/start.outputSchema,
+// request._meta["outputSchema"] into the Codex App Server's turn/start.outputSchema,
 // which the shipped @openai/codex binary honors end-to-end as an OpenAI Responses-API STRICT
 // constraint on the final assistant message. So the schema rides per-PROMPT `_meta` (not
 // session/new), normalized to OpenAI strict rules first. Output needs no special channel: the

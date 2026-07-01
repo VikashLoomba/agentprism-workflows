@@ -44,12 +44,13 @@ test("CodexBackend.spawnConfig: the resolved bin carries the outputSchema patch 
   withEnv({}, () => {
     const bin = new CodexBackend().spawnConfig().args[0];
     // The @automatalabs/codex-acp fork bakes in the forward of
-    // request._meta["agentprism/outputSchema"] -> turn/start.outputSchema. Its presence in the
-    // installed file is the end-to-end proof that the published fork ships the patch.
+    // request._meta["outputSchema"] -> turn/start.outputSchema. The bracket-read of the bare
+    // key off `_meta` is unique to the patch (native Codex code never brackets outputSchema off
+    // _meta), so its presence in the installed file is the end-to-end proof the fork ships it.
     const contents = readFileSync(bin, "utf8");
     assert.ok(
-      contents.includes("agentprism/outputSchema"),
-      "installed codex-acp dist/index.js must contain the agentprism/outputSchema patch",
+      contents.includes('_meta?.["outputSchema"]'),
+      'installed codex-acp dist/index.js must contain the _meta["outputSchema"] forward patch',
     );
   });
 });

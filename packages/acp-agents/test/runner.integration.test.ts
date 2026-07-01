@@ -187,7 +187,7 @@ test("(4) schema never satisfied after the ladder => SCHEMA_NONCOMPLIANCE (non-r
 
 // ---- (2b) Codex schema forwarding via _meta -----------------------------------------
 
-test("(2b) Codex forwards the strict schema via _meta[agentprism/outputSchema] into the turn", async () => {
+test("(2b) Codex forwards the strict schema via _meta[outputSchema] into the turn", async () => {
   const { cwd, readLog } = configure({
     turns: [{ text: JSON.stringify({ city: "NYC", hot: true }) }],
   });
@@ -200,7 +200,7 @@ test("(2b) Codex forwards the strict schema via _meta[agentprism/outputSchema] i
 
   const entries = readLog();
   const prompt = entries.find((e) => e.method === "prompt");
-  const forwarded = prompt?.params?._meta?.["agentprism/outputSchema"];
+  const forwarded = prompt?.params?._meta?.["outputSchema"];
   // strict-normalized: every prop required + additionalProperties:false
   assert.deepEqual(forwarded, {
     type: "object",
@@ -696,14 +696,14 @@ test("(#5) mcpServers defaults to [] at session/new when none is provided", asyn
 
 // ---- (#5b) engine runId rides the session/new _meta as a correlation id ---------------
 
-test("(#5b) RunOptions.runId is stamped onto session/new _meta[agentprism/runId]", async () => {
+test("(#5b) RunOptions.runId is stamped onto session/new _meta[runId]", async () => {
   const { cwd, readLog } = configure({ turns: [{ text: "ok" }] });
   await makeRunner().run("hi", { model: "claude", cwd, runId: "run-abc123" });
 
   const entries = readLog();
   const newSession = entries.find((e) => e.method === "newSession");
   // No schema on this run, so the ONLY _meta is the correlation stamp.
-  assert.deepEqual(newSession?.params?._meta, { "agentprism/runId": "run-abc123" });
+  assert.deepEqual(newSession?.params?._meta, { runId: "run-abc123" });
   // It rides session/new, NOT the prompt turn.
   assert.equal(entries.find((e) => e.method === "prompt")?.params?._meta ?? undefined, undefined);
 });
@@ -720,7 +720,7 @@ test("(#5b) runId coexists with the Claude schema _meta at session/new", async (
   });
   const meta = readLog().find((e) => e.method === "newSession")?.params?._meta as Record<string, unknown>;
   // Both the vendor schema channel AND the correlation stamp are present.
-  assert.equal(meta?.["agentprism/runId"], "run-xyz");
+  assert.equal(meta?.["runId"], "run-xyz");
   assert.ok(meta?.claudeCode, "the Claude schema _meta channel is preserved");
 });
 
@@ -737,10 +737,10 @@ test("(#5b) Codex session/new carries the runId _meta even though the schema rid
   const entries = readLog();
   // Codex sends NO schema at session/new, but the runId stamp still rides it.
   assert.deepEqual(entries.find((e) => e.method === "newSession")?.params?._meta, {
-    "agentprism/runId": "run-codex-1",
+    runId: "run-codex-1",
   });
   // The schema still rides the prompt turn (runId did not displace it).
-  assert.ok(entries.find((e) => e.method === "prompt")?.params?._meta?.["agentprism/outputSchema"]);
+  assert.ok(entries.find((e) => e.method === "prompt")?.params?._meta?.["outputSchema"]);
 });
 
 // ---- (#instr) Codex base/developer instructions ride session/new _meta as bare keys ---
@@ -754,7 +754,7 @@ test("(#instr) RunOptions base/developerInstructions reach Codex session/new _me
     developerInstructions: "Prefer iterators.",
   });
   const newSession = readLog().find((e) => e.method === "newSession");
-  // Bare keys (the codex-acp fork's contract), NOT the agentprism/* namespace.
+  // Bare keys (the codex-acp fork's contract).
   assert.deepEqual(newSession?.params?._meta, {
     baseInstructions: "You only write Rust.",
     developerInstructions: "Prefer iterators.",
@@ -773,7 +773,7 @@ test("(#instr) instructions coexist with the runId stamp at Codex session/new", 
   });
   assert.deepEqual(readLog().find((e) => e.method === "newSession")?.params?._meta, {
     baseInstructions: "BASE",
-    "agentprism/runId": "run-xyz",
+    runId: "run-xyz",
   });
 });
 

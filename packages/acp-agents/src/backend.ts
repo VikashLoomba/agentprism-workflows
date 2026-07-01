@@ -4,7 +4,7 @@
 //   1. how to spawn the ACP server subprocess,
 //   2. the vendor `_meta` that carries the schema IN (Claude: session/new
 //      _meta.claudeCode.options.outputFormat + emitRawSDKMessages; Codex: per-turn
-//      _meta["agentprism/outputSchema"], strict-normalized),
+//      _meta["outputSchema"], strict-normalized),
 //   3. how to read the native structured result OUT (Claude: structured_output off the raw
 //      _claude/sdkMessage; Codex: JSON.parse the final assistant message off the stream).
 import type { TSchema } from "typebox";

@@ -1,5 +1,5 @@
 // Areas (2a)/(3a): the Backend strategy seam — how each backend carries the schema IN
-// (Claude: session/new _meta.claudeCode; Codex: per-turn _meta["agentprism/outputSchema"])
+// (Claude: session/new _meta.claudeCode; Codex: per-turn _meta["outputSchema"])
 // and reads the native structured result OUT — plus selectBackend cross-provider routing.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -50,12 +50,12 @@ test("ClaudeBackend.nativeStructured reads structured_output off the raw SDK res
 
 // ---- Codex backend ------------------------------------------------------------------
 
-test("CodexBackend.promptMeta forwards the STRICT schema under agentprism/outputSchema", () => {
+test("CodexBackend.promptMeta forwards the STRICT schema under the bare outputSchema key", () => {
   const backend = new CodexBackend();
   const meta = backend.promptMeta(SCHEMA) as Record<string, unknown>;
   assert.deepEqual(meta, { [META_KEYS.outputSchema]: toStrictJsonSchema(SCHEMA) });
-  // sanity: META key is the reserved namespace, and the schema really is strict-normalized
-  assert.equal(META_KEYS.outputSchema, "agentprism/outputSchema");
+  // sanity: the key is bare (un-namespaced), and the schema really is strict-normalized
+  assert.equal(META_KEYS.outputSchema, "outputSchema");
   const strict = meta[META_KEYS.outputSchema] as Record<string, unknown>;
   assert.equal(strict.additionalProperties, false);
   assert.deepEqual(strict.required, ["city", "hot"]);
@@ -74,7 +74,7 @@ test("CodexBackend.sessionMeta emits base/developer instructions as BARE session
   // No inputs (or empty inputs) => nothing at session/new; the schema still rides the turn.
   assert.equal(backend.sessionMeta(SCHEMA), undefined);
   assert.equal(backend.sessionMeta(undefined, {}), undefined);
-  // Both present => bare keys the codex-acp fork reads (NOT the agentprism/* namespace).
+  // Both present => bare keys the codex-acp fork reads.
   assert.deepEqual(backend.sessionMeta(SCHEMA, { baseInstructions: "BASE", developerInstructions: "DEV" }), {
     baseInstructions: "BASE",
     developerInstructions: "DEV",

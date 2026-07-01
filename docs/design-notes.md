@@ -494,7 +494,7 @@ never sets `outputSchema`. Forward it from the prompt's `_meta` (the adapter alr
 `request._meta` nearby) — a ~1-line patch in [`src/CodexAcpClient.ts`](https://github.com/agentclientprotocol/codex-acp/blob/5506fbae85878013c6eb40ae540ea21a607d9334/src/CodexAcpClient.ts):
 
     // inside sendPrompt() → the runTurn({ ... }) call
-    outputSchema: (request._meta as any)?.["agentprism/outputSchema"] ?? null,
+    outputSchema: (request._meta as any)?.["outputSchema"] ?? null,
 
 `runTurn → turnStart → sendRequest({ method: "turn/start", params })` passes it through verbatim;
 `TurnStartParams.outputSchema` already exists, so it's type-clean.
