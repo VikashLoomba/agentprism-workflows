@@ -1,5 +1,12 @@
 # @automatalabs/workflow-engine
 
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies [93e4906]
+  - @automatalabs/shared-types@0.2.0
+
 ## 0.1.2
 
 ### Patch Changes
