@@ -69,6 +69,32 @@ test("CodexBackend: no schema => no prompt _meta; never carries schema at sessio
   assert.equal(backend.id, "codex");
 });
 
+test("CodexBackend.sessionMeta emits base/developer instructions as BARE session/new _meta keys", () => {
+  const backend: Backend = new CodexBackend();
+  // No inputs (or empty inputs) => nothing at session/new; the schema still rides the turn.
+  assert.equal(backend.sessionMeta(SCHEMA), undefined);
+  assert.equal(backend.sessionMeta(undefined, {}), undefined);
+  // Both present => bare keys the codex-acp fork reads (NOT the agentprism/* namespace).
+  assert.deepEqual(backend.sessionMeta(SCHEMA, { baseInstructions: "BASE", developerInstructions: "DEV" }), {
+    baseInstructions: "BASE",
+    developerInstructions: "DEV",
+  });
+  // Only the provided key is emitted (each is independently optional).
+  assert.deepEqual(backend.sessionMeta(undefined, { baseInstructions: "BASE" }), { baseInstructions: "BASE" });
+  assert.deepEqual(backend.sessionMeta(undefined, { developerInstructions: "DEV" }), { developerInstructions: "DEV" });
+});
+
+test("ClaudeBackend.sessionMeta ignores Codex session instruction inputs", () => {
+  const backend: Backend = new ClaudeBackend();
+  // Instructions are Codex-only: with no schema Claude sends no _meta despite the inputs...
+  assert.equal(backend.sessionMeta(undefined, { baseInstructions: "BASE", developerInstructions: "DEV" }), undefined);
+  // ...and with a schema, the claudeCode channel is untouched — no instruction keys leak in.
+  const meta = backend.sessionMeta(SCHEMA, { baseInstructions: "BASE" }) as Record<string, unknown>;
+  assert.ok(meta.claudeCode, "schema channel preserved");
+  assert.equal("baseInstructions" in meta, false);
+  assert.equal("developerInstructions" in meta, false);
+});
+
 test("CodexBackend.nativeStructured parses the constrained final message (pure JSON, then block)", () => {
   const backend = new CodexBackend();
   // pure JSON final message

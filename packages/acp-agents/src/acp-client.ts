@@ -238,6 +238,10 @@ export interface AcpSessionOptions {
   runId?: string;
   /** `RunOptions.label`, propagated onto emitted events as context. NOT sent on the wire. */
   label?: string;
+  /** CODEX-ONLY session instruction overrides. The backend folds these into session/new `_meta`
+   *  (bare keys) for the codex-acp adapter; the Claude backend ignores them. Omitted => unset. */
+  baseInstructions?: string;
+  developerInstructions?: string;
 }
 
 /** Notified by a PooledConnection when its process dies, so the pool can drop it. */
@@ -401,9 +405,15 @@ export class PooledConnection {
     try {
       await this.ready;
       const state = new SessionState(opts.policy, opts.label, opts.runId);
-      // The backend's vendor `_meta` (Claude schema channel; undefined for Codex) plus the
-      // optional engine runId correlation stamp. When neither is present, no `_meta` is sent.
-      const meta = stampRunId(this.backend.sessionMeta(opts.schema), opts.runId);
+      // The backend's vendor `_meta` (Claude schema channel; Codex base/developer instructions)
+      // plus the optional engine runId correlation stamp. When none is present, no `_meta` is sent.
+      const meta = stampRunId(
+        this.backend.sessionMeta(opts.schema, {
+          baseInstructions: opts.baseInstructions,
+          developerInstructions: opts.developerInstructions,
+        }),
+        opts.runId,
+      );
       const request: NewSessionRequest = {
         cwd: opts.cwd,
         // Client-provided MCP servers (additive run input), else the default empty list.

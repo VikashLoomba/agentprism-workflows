@@ -742,3 +742,49 @@ test("(#5b) Codex session/new carries the runId _meta even though the schema rid
   // The schema still rides the prompt turn (runId did not displace it).
   assert.ok(entries.find((e) => e.method === "prompt")?.params?._meta?.["agentprism/outputSchema"]);
 });
+
+// ---- (#instr) Codex base/developer instructions ride session/new _meta as bare keys ---
+
+test("(#instr) RunOptions base/developerInstructions reach Codex session/new _meta (bare keys)", async () => {
+  const { cwd, readLog } = configure({ turns: [{ text: "ok" }] });
+  await makeRunner().run("hi", {
+    model: "openai/gpt-5-codex",
+    cwd,
+    baseInstructions: "You only write Rust.",
+    developerInstructions: "Prefer iterators.",
+  });
+  const newSession = readLog().find((e) => e.method === "newSession");
+  // Bare keys (the codex-acp fork's contract), NOT the agentprism/* namespace.
+  assert.deepEqual(newSession?.params?._meta, {
+    baseInstructions: "You only write Rust.",
+    developerInstructions: "Prefer iterators.",
+  });
+  // They ride session/new, NOT the prompt turn (no schema on this run => no prompt _meta).
+  assert.equal(readLog().find((e) => e.method === "prompt")?.params?._meta ?? undefined, undefined);
+});
+
+test("(#instr) instructions coexist with the runId stamp at Codex session/new", async () => {
+  const { cwd, readLog } = configure({ turns: [{ text: "ok" }] });
+  await makeRunner().run("hi", {
+    model: "openai/gpt-5-codex",
+    cwd,
+    runId: "run-xyz",
+    baseInstructions: "BASE",
+  });
+  assert.deepEqual(readLog().find((e) => e.method === "newSession")?.params?._meta, {
+    baseInstructions: "BASE",
+    "agentprism/runId": "run-xyz",
+  });
+});
+
+test("(#instr) Claude ignores base/developer instructions (no such _meta at session/new)", async () => {
+  const { cwd, readLog } = configure({ turns: [{ text: "ok" }] });
+  await makeRunner().run("hi", {
+    model: "anthropic/claude-opus-4-1",
+    cwd,
+    baseInstructions: "BASE",
+    developerInstructions: "DEV",
+  });
+  // No schema, no runId, and Claude has no instruction channel => no _meta at all.
+  assert.equal(readLog().find((e) => e.method === "newSession")?.params?._meta ?? undefined, undefined);
+});

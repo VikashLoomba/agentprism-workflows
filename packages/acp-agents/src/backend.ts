@@ -25,12 +25,23 @@ export interface StructuredSource {
   rawStructuredOutput(): unknown;
 }
 
+/** Per-session inputs a backend may fold into its `session/new` `_meta`, beyond the schema.
+ *  Additive/optional; a backend that doesn't understand a field ignores it. */
+export interface SessionMetaInputs {
+  /** CODEX-ONLY: replaces Codex's base system prompt (`thread/start.baseInstructions`). */
+  baseInstructions?: string;
+  /** CODEX-ONLY: developer-role instructions (`thread/start.developerInstructions`). */
+  developerInstructions?: string;
+}
+
 export interface Backend {
   readonly id: BackendId;
   /** How to launch this backend's ACP server over stdio. */
   spawnConfig(): SpawnConfig;
-  /** `_meta` for session/new (undefined when this backend carries the schema elsewhere). */
-  sessionMeta(schema: TSchema | undefined): Record<string, unknown> | undefined;
+  /** `_meta` for session/new (undefined when this backend carries nothing there). `inputs`
+   *  carries optional per-session extras (e.g. Codex base/developer instructions); a backend
+   *  that has no use for them ignores it. */
+  sessionMeta(schema: TSchema | undefined, inputs?: SessionMetaInputs): Record<string, unknown> | undefined;
   /** `_meta` for session/prompt (undefined when this backend carries the schema at session/new). */
   promptMeta(schema: TSchema | undefined): Record<string, unknown> | undefined;
   /** Read this backend's native structured result for the latest turn (unvalidated), or undefined. */

@@ -45,7 +45,25 @@ try {
 }
 ```
 
-`run()` accepts the full `RunOptions` seam: `schema`, `model`, `tier`, `cwd`, `instructions`, `label`, `signal` (cancellation), `toolNames` / `disallowedToolNames`, `mcpServers`, `onUsage`, `onModelResolved`, `onModelFallback`, and `onHistory`. See `@automatalabs/shared-types` for the field-by-field contract.
+`run()` accepts the full `RunOptions` seam: `schema`, `model`, `tier`, `cwd`, `instructions`, `label`, `signal` (cancellation), `toolNames` / `disallowedToolNames`, `mcpServers`, `baseInstructions` / `developerInstructions` (Codex-only, see below), `onUsage`, `onModelResolved`, `onModelFallback`, and `onHistory`. See `@automatalabs/shared-types` for the field-by-field contract.
+
+### Codex session instructions (`baseInstructions` / `developerInstructions`)
+
+When the run routes to the Codex backend, two optional fields let you override Codex's thread-level instructions for the session:
+
+- **`baseInstructions`** — replaces Codex's built-in base system prompt.
+- **`developerInstructions`** — injects developer-role instructions (added on top of the base prompt).
+
+They ride ACP `session/new` `_meta` as bare keys and are threaded into the Codex `thread/start.{baseInstructions,developerInstructions}` params by the [`@automatalabs/codex-acp`](https://www.npmjs.com/package/@automatalabs/codex-acp) adapter. Both are additive (never part of the resume identity) and are **ignored by the Claude backend** — Claude has no analog. Note this is distinct from `instructions`, which is folded into the prompt text for either backend.
+
+```ts
+await runner.run("Cut the release.", {
+  model: "openai/gpt-5-codex",
+  cwd: "/abs/path/to/worktree",
+  baseInstructions: "You are a release bot. Only touch CHANGELOG.md.",
+  developerInstructions: "Prefer conventional-commit summaries.",
+});
+```
 
 ## Listening in: live ACP events
 

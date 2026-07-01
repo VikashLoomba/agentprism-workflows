@@ -137,10 +137,24 @@ try {
 ```
 
 `run(prompt, options?)` accepts the seam's `RunOptions`: `schema`, `model`, `tier`, `cwd`,
-`instructions`, `label`, `toolNames` / `disallowedToolNames`, `signal`, `mcpServers`, and the
-out-of-band telemetry callbacks `onUsage` / `onModelResolved` / `onModelFallback` / `onHistory`.
-Token/cost usage is delivered via `onUsage` (it may never fire — ACP usage is experimental), never
-via the return value.
+`instructions`, `label`, `toolNames` / `disallowedToolNames`, `signal`, `mcpServers`,
+`baseInstructions` / `developerInstructions` (Codex-only), and the out-of-band telemetry callbacks
+`onUsage` / `onModelResolved` / `onModelFallback` / `onHistory`. Token/cost usage is delivered via
+`onUsage` (it may never fire — ACP usage is experimental), never via the return value.
+
+> **Codex session instructions.** When the run routes to the Codex backend, `baseInstructions`
+> **replaces** Codex's built-in base system prompt and `developerInstructions` adds developer-role
+> instructions for the session. They ride ACP `session/new` `_meta` into Codex `thread/start` and
+> are **ignored by the Claude backend** (which has no analog) — unlike `instructions`, which is
+> folded into the prompt text for either backend.
+>
+> ```ts
+> await runner.run("Cut the release.", {
+>   model: "gpt-5-codex",
+>   baseInstructions: "You are a release bot. Only touch CHANGELOG.md.",
+>   developerInstructions: "Prefer conventional-commit summaries.",
+> });
+> ```
 
 > The ACP server **process** is pooled and reused across `run()` calls; each `run()` opens and
 > closes one **session** on it. Call `dispose()` once at shutdown to tear the pool down. Pool size

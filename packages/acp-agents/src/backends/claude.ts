@@ -32,6 +32,8 @@ export class ClaudeBackend implements Backend {
   }
 
   sessionMeta(schema: TSchema | undefined): Record<string, unknown> | undefined {
+    // Claude has no analog to Codex's base/developer instruction overrides, so it ignores the
+    // optional SessionMetaInputs (the seam still accepts them via the Backend interface).
     if (!schema) return undefined;
     return {
       claudeCode: {

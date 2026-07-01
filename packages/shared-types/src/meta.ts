@@ -14,6 +14,19 @@ export const META_KEYS = {
   runId: `${META_NS}/runId`,
 } as const;
 
+/** VENDOR (codex-acp) — NOT ours and NOT namespaced: bare `session/new` `_meta` keys the
+ *  @automatalabs/codex-acp adapter reads and threads into the Codex `thread/start` /
+ *  `thread/resume` / `thread/fork` params of the same name. Kept here (beside META_KEYS) so the
+ *  writer (CodexBackend) and its tests never drift from the wire contract the fork reads. These
+ *  deliberately live OUTSIDE META_NS — they mirror upstream codex-acp's bare-key convention
+ *  (e.g. `additionalRoots`), not the reserved `agentprism/*` namespace. */
+export const CODEX_META_KEYS = {
+  /** Replaces Codex's built-in base system prompt for the thread. */
+  baseInstructions: "baseInstructions",
+  /** Injects developer-role instructions for the thread (added on top of the base prompt). */
+  developerInstructions: "developerInstructions",
+} as const;
+
 /** VENDOR (claude-agent-acp) — NOT ours; the SDK's. Set at session/new for the Claude
  *  structured-output path: _meta.claudeCode.options.outputFormat = { type:"json_schema", schema }
  *  AND _meta.claudeCode.emitRawSDKMessages = true (MANDATORY — the parsed object lands on

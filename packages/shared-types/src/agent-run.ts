@@ -38,8 +38,9 @@ export interface AgentUsage {
  * (workflow.ts:488), so a renamed field would NOT raise a compile error — it would
  * mis-bind at runtime. Engine-passed core fields (13): label, schema, signal, instructions,
  * model, tier, toolNames, disallowedToolNames, cwd, onModelResolved, onModelFallback,
- * onUsage, onHistory. Plus two ADDITIVE run inputs that wire infrastructure, NOT the logical
- * call, so neither enters the resume identity hash (hashAgentCall): `mcpServers` and `runId`.
+ * onUsage, onHistory. Plus ADDITIVE run inputs that wire infrastructure / shape the backend,
+ * NOT the logical call, so none enters the resume identity hash (hashAgentCall): `mcpServers`,
+ * `runId`, and the Codex-only `baseInstructions` / `developerInstructions`.
  * `maxSchemaRetries` is runner-internal (the engine never passes it). Pi's
  * `tools?: ToolDefinition[]` is DROPPED — a pi-coding-agent type with no ACP analog (ACP
  * injects tools via session/new mcpServers, not this field) and never passed by the engine.
@@ -91,6 +92,16 @@ export interface RunOptions<S extends TSchema | undefined = undefined> {
    *  part of the resume identity hash (hashAgentCall) — it correlates, it does not identify the
    *  logical call. Omitted => no runId `_meta` is stamped. */
   runId?: string;
+  /** CODEX-ONLY. Replaces Codex's built-in base system prompt for the session. The runner forwards
+   *  it on ACP `session/new` `_meta.baseInstructions`, which the @automatalabs/codex-acp adapter
+   *  threads into `thread/start.baseInstructions`. ADDITIVE and NOT hashed (it shapes the agent,
+   *  not the logical call identity). Ignored by the Claude backend. Omitted => Codex default. */
+  baseInstructions?: string;
+  /** CODEX-ONLY. Injects developer-role instructions for the session (added ON TOP of the base
+   *  prompt, unlike `baseInstructions` which replaces it). Forwarded on ACP `session/new`
+   *  `_meta.developerInstructions` -> `thread/start.developerInstructions`. ADDITIVE and NOT
+   *  hashed. Ignored by the Claude backend. Omitted => Codex default. */
+  developerInstructions?: string;
 }
 
 /** The result side of the seam: schema => the validated object, no schema => text.

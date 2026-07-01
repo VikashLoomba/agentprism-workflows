@@ -104,6 +104,10 @@ export class AcpAgentRunner implements AgentRunner {
       runId: opts.runId,
       // Stamped onto emitted ACP events as context (never sent on the wire).
       label: opts.label,
+      // CODEX-ONLY session instruction overrides -> session/new _meta bare keys. Additive; never
+      // hashed. The Claude backend ignores them.
+      baseInstructions: opts.baseInstructions,
+      developerInstructions: opts.developerInstructions,
     });
     try {
       opts.signal?.throwIfAborted();

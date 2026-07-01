@@ -8,8 +8,8 @@
 // reads the final text and JSON.parses it.
 import { createRequire } from "node:module";
 import type { TSchema } from "typebox";
-import { META_KEYS } from "@automatalabs/shared-types";
-import type { Backend, SpawnConfig, StructuredSource } from "../backend.js";
+import { CODEX_META_KEYS, META_KEYS } from "@automatalabs/shared-types";
+import type { Backend, SessionMetaInputs, SpawnConfig, StructuredSource } from "../backend.js";
 import { splitArgs } from "../backend.js";
 import { toStrictJsonSchema } from "../schema-strict.js";
 import { findJsonBlock } from "../structured-output.js";
@@ -34,9 +34,16 @@ export class CodexBackend implements Backend {
     return { command: process.execPath, args: [bin], env };
   }
 
-  sessionMeta(): Record<string, unknown> | undefined {
-    // Codex carries the schema on the turn, not session/new.
-    return undefined;
+  sessionMeta(_schema: TSchema | undefined, inputs?: SessionMetaInputs): Record<string, unknown> | undefined {
+    // Codex carries the SCHEMA on the turn (see promptMeta), so nothing schema-related rides
+    // session/new. But the optional base/developer instruction overrides ARE session-scoped: the
+    // @automatalabs/codex-acp fork reads these bare `_meta` keys and threads them into
+    // thread/start.{baseInstructions,developerInstructions}. Emit them only when set so an
+    // unconfigured run sends no `_meta` at all (preserving the "Codex default" path).
+    const meta: Record<string, unknown> = {};
+    if (inputs?.baseInstructions !== undefined) meta[CODEX_META_KEYS.baseInstructions] = inputs.baseInstructions;
+    if (inputs?.developerInstructions !== undefined) meta[CODEX_META_KEYS.developerInstructions] = inputs.developerInstructions;
+    return Object.keys(meta).length > 0 ? meta : undefined;
   }
 
   promptMeta(schema: TSchema | undefined): Record<string, unknown> | undefined {

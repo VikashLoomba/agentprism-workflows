@@ -26,7 +26,7 @@ export type {
   AcpBackendErrorEvent,
 } from "./events.js";
 
-export type { Backend, BackendId, SpawnConfig, StructuredSource } from "./backend.js";
+export type { Backend, BackendId, SessionMetaInputs, SpawnConfig, StructuredSource } from "./backend.js";
 export { ClaudeBackend } from "./backends/claude.js";
 export { CodexBackend } from "./backends/codex.js";
 
