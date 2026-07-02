@@ -181,6 +181,21 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
    * logical call, so it is intentionally NOT part of the resume identity hash (hashAgentCall).
    */
   mcpServers?: McpServerConfig[];
+  /**
+   * Generic ACP `_meta` passthrough, SESSION-scoped: merged into the outgoing ACP
+   * `session/new` `_meta`, so a script can drive any ACP agent's custom extension surface
+   * (pair with a registered custom backend via `model: "<backend-name>"`). User keys merge
+   * over a custom backend's static `sessionMeta` defaults; the runner's protocol-critical
+   * keys (schema channel, runId stamp) win over both. ADDITIVE: NOT part of the resume
+   * identity hash (hashAgentCall) — it shapes the agent, not the logical call.
+   */
+  meta?: Record<string, unknown>;
+  /**
+   * Generic ACP `_meta` passthrough, TURN-scoped: merged into the outgoing ACP
+   * `session/prompt` `_meta`. Backend-computed keys (e.g. the `outputSchema` forward when a
+   * schema is set) win on conflict. ADDITIVE: NOT part of the resume identity hash.
+   */
+  promptMeta?: Record<string, unknown>;
 }
 
 /** Options for a human checkpoint() — a deterministic, journaled, replayable gate. */
@@ -495,6 +510,10 @@ export async function runWorkflow<T = unknown>(
                 cwd: runCwd,
                 // Additive run input: wires tools, NOT part of the resume identity (hashAgentCall).
                 mcpServers: agentOptions.mcpServers,
+                // Generic ACP _meta passthroughs (session/new + session/prompt). Additive,
+                // NOT part of the resume identity (hashAgentCall).
+                meta: agentOptions.meta,
+                promptMeta: agentOptions.promptMeta,
                 // Engine run id as an end-to-end correlation stamp on the ACP session/new _meta.
                 // Additive telemetry, NOT part of the resume identity (hashAgentCall).
                 runId,

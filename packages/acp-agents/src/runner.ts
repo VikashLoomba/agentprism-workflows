@@ -37,21 +37,34 @@ import {
 import type { Backend } from "./backend.js";
 import { ClaudeBackend } from "./backends/claude.js";
 import { CodexBackend } from "./backends/codex.js";
+import { CustomAcpBackend } from "./backends/custom.js";
+import { resolveBackendRegistry, type BackendRegistry, type CustomBackendConfig } from "./registry.js";
 import { mapThrownError } from "./errors-map.js";
 import type { ToolPolicy } from "./permissions.js";
 import { resolveStructuredOutput, type StructuredSession } from "./structured-output.js";
 
 type AnyRunOptions = RunOptions<TSchema | undefined>;
 
+/** Constructor options for the runner: pool sizing PLUS the custom-backend registry.
+ *  `backends` merges over (and wins against) env-declared AGENTPRISM_BACKENDS entries. */
+export interface AcpRunnerOptions extends AcpPoolOptions {
+  /** Custom ACP backends, keyed by registered name (see registry.ts for the config shape
+   *  and the routing rules). Names are case-insensitive; "claude"/"codex" are reserved. */
+  backends?: Record<string, CustomBackendConfig>;
+}
+
 export class AcpAgentRunner implements AgentRunner {
   private readonly pool: AcpAgentPool;
+  /** The resolved custom-backend registry (env + option, validated at construction). */
+  private readonly backends: BackendRegistry;
   /** Typed bus carrying every ACP event from every pooled session. Beyond the AgentRunner seam
    *  (additive observability) — subscribing never affects a run and never enters the resume hash. */
   private readonly events = new TypedEventEmitter<AcpRunnerEventMap>();
   private readonly emitEvent: AcpEventSink = (name, event) => this.events.emit(name, event);
 
-  constructor(options: AcpPoolOptions = {}) {
+  constructor(options: AcpRunnerOptions = {}) {
     this.pool = new AcpAgentPool(options, { onEvent: this.emitEvent });
+    this.backends = resolveBackendRegistry(options.backends);
   }
 
   /**
@@ -90,7 +103,7 @@ export class AcpAgentRunner implements AgentRunner {
   ): Promise<AgentResult<S>> {
     const opts = options as AnyRunOptions;
     const schema = opts.schema;
-    const backend = selectBackend(opts);
+    const backend = selectBackend(opts, this.backends);
     const policy: ToolPolicy = { allow: opts.toolNames, deny: opts.disallowedToolNames };
     const cwd = opts.cwd ?? process.cwd();
 
@@ -100,6 +113,9 @@ export class AcpAgentRunner implements AgentRunner {
       policy,
       signal: opts.signal,
       mcpServers: opts.mcpServers,
+      // Generic session-scoped _meta passthrough (RunOptions.meta) — merged UNDER the
+      // backend-computed keys and the runId stamp in openSession. Additive; never hashed.
+      meta: opts.meta,
       // Engine correlation id -> session/new _meta (META_KEYS.runId). Additive; never hashed.
       runId: opts.runId,
       // Stamped onto emitted ACP events as context (never sent on the wire).
@@ -111,10 +127,15 @@ export class AcpAgentRunner implements AgentRunner {
     });
     try {
       opts.signal?.throwIfAborted();
-      await applyModelSelection(session, opts);
+      // For a CUSTOM backend chosen by its registered name, the name itself is routing, not a
+      // model id: "browser" selects nothing; "browser/foo" selects "foo". Built-ins get the
+      // full spec unchanged (their catalogs match provider-prefixed and bare ids).
+      await applyModelSelection(session, innerModelSpec(opts.model ?? opts.tier, backend), opts);
 
       const text = buildPrompt(prompt, opts, Boolean(schema));
-      const promptMeta = backend.promptMeta(schema);
+      // Generic turn-scoped _meta passthrough merged UNDER the backend-computed keys (e.g. the
+      // outputSchema forward when a schema is set) — user meta never clobbers the schema channel.
+      const promptMeta = mergeTurnMeta(opts.promptMeta, backend.promptMeta(schema));
       const response = await session.prompt(text, promptMeta);
       opts.signal?.throwIfAborted();
       // Inspect the turn's stop reason BEFORE the text/schema path: a refusal or truncation
@@ -183,9 +204,10 @@ export class AcpAgentRunner implements AgentRunner {
 }
 
 /** Factory the mcp-server composition root calls to inject the runner into the engine. The pool
- *  size is a runner-level option (default 1, else AGENTPRISM_ACP_POOL_SIZE) — NOT a RunOptions
- *  field, so it never enters hashAgentCall / the resume identity. */
-export function createAcpRunner(options?: AcpPoolOptions): AcpAgentRunner {
+ *  size and the custom-backend registry are runner-level options — NOT RunOptions fields, so they
+ *  never enter hashAgentCall / the resume identity. Env fallbacks: AGENTPRISM_ACP_POOL_SIZE for
+ *  size, AGENTPRISM_BACKENDS (JSON) for backends. */
+export function createAcpRunner(options?: AcpRunnerOptions): AcpAgentRunner {
   return new AcpAgentRunner(options);
 }
 
@@ -224,9 +246,13 @@ function assertNormalStopReason(stopReason: StopReason, label?: string): void {
   }
 }
 
-async function applyModelSelection(session: SessionHandle, opts: AnyRunOptions): Promise<void> {
-  // `model` wins; `tier` is consulted only when `model` is unset (frozen contract).
-  const spec = opts.model ?? opts.tier;
+async function applyModelSelection(
+  session: SessionHandle,
+  spec: string | undefined,
+  opts: AnyRunOptions,
+): Promise<void> {
+  // `spec` is opts.model ?? opts.tier (`model` wins — frozen contract), with a custom
+  // backend's routing name already stripped by innerModelSpec.
   if (!spec) return;
   const { matched, resolved, modifierFallbacks } = await session.selectModel(spec);
   if (matched) opts.onModelResolved?.(resolved ?? spec);
@@ -255,10 +281,48 @@ function buildPrompt(prompt: string, opts: AnyRunOptions, structured: boolean): 
   return parts.join("\n\n");
 }
 
-/** Pick the backend by model/tier. Cross-provider routing = which ACP server to spawn. */
-export function selectBackend(opts: { model?: string; tier?: string }): Backend {
-  const id = backendIdForSpec(opts.model) ?? backendIdForSpec(opts.tier) ?? defaultBackendId();
+/** Pick the backend by model/tier. Cross-provider routing = which ACP server to spawn.
+ *  Registered CUSTOM names resolve FIRST (exact name, or `name/<inner-model>` prefix) so a
+ *  registry entry is never shadowed by the built-in heuristics; then the claude/codex
+ *  heuristics; then the default backend (AGENTPRISM_DEFAULT_BACKEND — which may itself name
+ *  a registered custom backend). */
+export function selectBackend(opts: { model?: string; tier?: string }, registry?: BackendRegistry): Backend {
+  const custom = customBackendForSpec(opts.model, registry) ?? customBackendForSpec(opts.tier, registry);
+  if (custom) return custom;
+  const id = backendIdForSpec(opts.model) ?? backendIdForSpec(opts.tier) ?? defaultBackendId(registry);
+  if (typeof id !== "string") return id; // the default resolved to a registered custom backend
   return id === "codex" ? new CodexBackend() : new ClaudeBackend();
+}
+
+/** Match a model/tier spec against the registry: the whole spec, or its `<name>/` prefix. */
+function customBackendForSpec(spec: string | undefined, registry?: BackendRegistry): Backend | undefined {
+  if (!spec || !registry || registry.size === 0) return undefined;
+  const lower = spec.toLowerCase();
+  const slash = lower.indexOf("/");
+  const name = slash > 0 ? lower.slice(0, slash) : lower;
+  const config = registry.get(name);
+  return config ? new CustomAcpBackend(config) : undefined;
+}
+
+/** Strip a custom backend's routing name off the model/tier spec: the spec `"name"` selects no
+ *  inner model; `"name/foo"` selects `"foo"`. Built-in backends receive the spec unchanged, and
+ *  a spec that reached a custom DEFAULT backend without naming it also passes through (the
+ *  agent's own catalog may know it). */
+function innerModelSpec(spec: string | undefined, backend: Backend): string | undefined {
+  if (!spec || !(backend instanceof CustomAcpBackend)) return spec;
+  const lower = spec.toLowerCase();
+  if (lower === backend.id) return undefined;
+  if (lower.startsWith(`${backend.id}/`)) return spec.slice(backend.id.length + 1) || undefined;
+  return spec;
+}
+
+/** Merge the generic turn-scoped meta passthrough UNDER the backend-computed turn meta. */
+function mergeTurnMeta(
+  user: Record<string, unknown> | undefined,
+  backend: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!user) return backend;
+  return { ...user, ...(backend ?? {}) };
 }
 
 function backendIdForSpec(spec: string | undefined): "claude" | "codex" | undefined {
@@ -275,6 +339,13 @@ function backendIdForSpec(spec: string | undefined): "claude" | "codex" | undefi
   return undefined;
 }
 
-function defaultBackendId(): "claude" | "codex" {
-  return process.env.AGENTPRISM_DEFAULT_BACKEND?.toLowerCase() === "codex" ? "codex" : "claude";
+/** Resolve the default backend: a registered custom name wins (returned as a Backend), else
+ *  the built-in id. An unknown/unset value falls back to "claude" (the historical default). */
+function defaultBackendId(registry?: BackendRegistry): "claude" | "codex" | Backend {
+  const name = process.env.AGENTPRISM_DEFAULT_BACKEND?.toLowerCase();
+  if (name && registry) {
+    const config = registry.get(name);
+    if (config) return new CustomAcpBackend(config);
+  }
+  return name === "codex" ? "codex" : "claude";
 }

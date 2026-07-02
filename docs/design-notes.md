@@ -346,6 +346,31 @@ in ACP (the client does not hand the agent a tool object directly).
 - `codex-acp`: supports stdio + http (rejects `acp`/`sse`).
 Ref: https://agentclientprotocol.com/protocol/v1/session-setup#mcp-servers
 
+### 5.9 Custom backends & the generic `_meta` passthrough
+
+ACP is a *unified* protocol — nothing about the runner is Claude/Codex-specific except the two
+built-in `Backend` strategies. Two additive surfaces open the seam to **any** ACP agent:
+
+- **The backend registry** (`acp-agents/src/registry.ts`): named spawn configs
+  (`{ command, args?, env?, sessionMeta? }`), registered programmatically
+  (`createAcpRunner({ backends })`) or via `AGENTPRISM_BACKENDS` (JSON env). Routing matches
+  registered names FIRST (`model: "browser"` or `"browser/<inner-model>"` — the name is
+  routing; the part after the slash is selected via Session Config Options), then the
+  claude/codex heuristics. `AGENTPRISM_DEFAULT_BACKEND` may name a registry entry.
+  `"claude"`/`"codex"` are reserved. A custom backend speaks the repo's published generic
+  dialect: schema IN as turn-level `_meta.outputSchema` (plain JSON Schema, not
+  OpenAI-strict), result OUT as final-text JSON — with the client-side validate/re-prompt
+  ladder (§6) as the repair path for agents that ignore the schema channel entirely.
+- **Generic `_meta` passthrough** (`RunOptions.meta` / `RunOptions.promptMeta`, script-level
+  `agent(p, { meta, promptMeta })`): the protocol reserves `_meta` for custom extension
+  properties, so workflows can drive any agent's extension surface without a code change here.
+  Session/new `_meta` layers lowest→highest: registry `sessionMeta` defaults → per-call `meta`
+  → backend protocol-critical keys (Claude `claudeCode` schema channel, Codex
+  base/developer-instruction forwards) → the engine `runId` stamp. Turn `_meta` layers
+  per-call `promptMeta` under backend-computed keys (`outputSchema`). Both are ADDITIVE run
+  inputs — like `mcpServers`, they never enter `hashAgentCall`, so resume keys are stable
+  across meta changes.
+
 ---
 
 ## 6. Structured output (the crux)

@@ -36,6 +36,32 @@ export function findJsonBlock(text: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Parse a turn's final assistant text as JSON: direct parse first (a natively-constrained
+ * final message is pure JSON), then a balanced-block extraction when the turn also emitted
+ * leading prose. Returns undefined when no parseable JSON is present (the caller's ladder
+ * re-prompts). Shared by the Codex backend and every custom registry backend — the "read the
+ * structured result off the final message" convention is the generic ACP dialect.
+ */
+export function parseFinalJson(text: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // fall through to block extraction
+  }
+  const block = findJsonBlock(trimmed);
+  if (block !== undefined) {
+    try {
+      return JSON.parse(block);
+    } catch {
+      // give up; the runner's ladder will re-prompt / extract.
+    }
+  }
+  return undefined;
+}
+
 /** Coerce an already-parsed value toward the schema and accept it only if it then validates. */
 export function validateValue(value: unknown, schema: TSchema): unknown {
   try {

@@ -196,7 +196,7 @@ The run is synchronous (one `tools/call` = one full run). Resume after a pause/c
 
 A script is plain JavaScript whose **first statement** is the `meta` literal. Inside it, these globals are available (injected into the run's realm — they are not importable functions; `@automatalabs/workflows` ships an ambient `.d.ts` so your editor knows them):
 
-- `agent(prompt, opts?)` — run one subagent. With `opts.schema` (a JSON Schema) you get a validated object back; without it, the assistant's text. Other opts: `label`, `phase`, `model`/`tier`, `agentType`, `isolation`, `timeoutMs`, `retries`, `mcpServers`. (Working directory comes from worktree `isolation`; tool policy and instructions come from the `agentType` definition. `cwd`/`toolNames`/`instructions` are options on the lower-level `createAcpRunner().run()` API, not script-level `agent()` opts.)
+- `agent(prompt, opts?)` — run one subagent. With `opts.schema` (a JSON Schema) you get a validated object back; without it, the assistant's text. Other opts: `label`, `phase`, `model`/`tier`, `agentType`, `isolation`, `timeoutMs`, `retries`, `mcpServers`, `meta`, `promptMeta`. (`meta`/`promptMeta` are generic ACP `_meta` passthroughs merged into `session/new` / `session/prompt` — the protocol's extension surface for custom agent properties. Working directory comes from worktree `isolation`; tool policy and instructions come from the `agentType` definition. `cwd`/`toolNames`/`instructions` are options on the lower-level `createAcpRunner().run()` API, not script-level `agent()` opts.)
 - `parallel([fn, …])` — run thunks concurrently; **barrier** (awaits all).
 - `pipeline(items, stage1, stage2, …)` — stream each item through stages independently (no inter-stage barrier).
 - `phase(title)`, `log(msg)` — progress grouping + narration.
@@ -217,11 +217,36 @@ Pass a JSON Schema as `agent({ schema })` and the result is a **validated object
 
 The backend is chosen per `agent()` call from the `model`/`tier` you pass, by provider prefix:
 
+- A **registered custom backend name** (exact, or `name/<inner-model>`) → that backend — matched first, see below.
 - `opus`, `sonnet`, `haiku`, `claude…`, `anthropic/…` → **Claude** (`claude-agent-acp`).
 - `gpt…`, `codex…`, `o3`/`o4`, `openai/…` → **Codex** (`codex-acp`).
-- Otherwise the default backend (`AGENTPRISM_DEFAULT_BACKEND`, default `claude`).
+- Otherwise the default backend (`AGENTPRISM_DEFAULT_BACKEND`, default `claude` — may also name a registered custom backend).
 
 One long-lived ACP process per backend is **pooled** and reused across `agent()` calls (one spawn + one `initialize`), with a fresh session per call — so worktree isolation is preserved via each session's `cwd`.
+
+### Custom backends — run *any* ACP agent
+
+The built-in pair isn't a limit: register **any ACP agent** (your own image-gen wrapper, a browser-QA agent, …) as a named backend and route to it by name.
+
+```ts
+import { createAcpRunner, runDynamicWorkflow } from "@automatalabs/workflows";
+
+const runner = createAcpRunner({
+  backends: {
+    browser: {
+      command: "node",
+      args: ["/abs/path/to/browser-acp.js"],
+      env: { HEADLESS: "1" },                          // merged over process.env
+      sessionMeta: { allowedDomains: ["example.com"] }, // static session/new _meta defaults
+    },
+  },
+});
+await runDynamicWorkflow(script, { runner });
+```
+
+Inside a script: `agent("Verify the checkout flow…", { model: "browser", schema: VERDICT, meta: { credsRef: "vault://qa" } })`. `model: "browser/vision-large"` additionally selects `vision-large` via the agent's config-option catalog. The same registry can be declared without code via the `AGENTPRISM_BACKENDS` env var (JSON of the same shape) — which is how the MCP server picks it up. Names are case-insensitive; `claude`/`codex` are reserved.
+
+Custom backends speak a generic dialect: a `schema` is forwarded as turn-level `_meta.outputSchema` (plain JSON Schema), and the result is read by JSON-parsing the final assistant message — agents that ignore the schema channel still work via the client-side validate/re-prompt ladder. Per-call `meta` merges over the registry's `sessionMeta` defaults; protocol-critical keys (schema channels, `runId`) always win.
 
 ---
 
@@ -229,7 +254,8 @@ One long-lived ACP process per backend is **pooled** and reused across `agent()`
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `AGENTPRISM_DEFAULT_BACKEND` | `claude` | Backend when the model/tier doesn't imply one (`claude` \| `codex`). |
+| `AGENTPRISM_DEFAULT_BACKEND` | `claude` | Backend when the model/tier doesn't imply one (`claude` \| `codex` \| a registered custom name). |
+| `AGENTPRISM_BACKENDS` | (none) | Custom ACP backends as JSON: `{"<name>": {"command": "…", "args": […], "env": {…}, "sessionMeta": {…}}}`. Programmatic `createAcpRunner({ backends })` wins per name. |
 | `AGENTPRISM_ACP_POOL_SIZE` | `1` | Long-lived processes held per backend. |
 | `AGENTPRISM_CLAUDE_ACP_CMD` / `…_ARGS` | (bundled) | Override the Claude ACP server command/args. |
 | `AGENTPRISM_CODEX_ACP_CMD` / `…_ARGS` / `…_BIN` | (bundled) | Override the Codex ACP server command/args/binary. |

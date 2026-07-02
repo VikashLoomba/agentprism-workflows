@@ -12,7 +12,7 @@ import { CODEX_META_KEYS, META_KEYS } from "@automatalabs/shared-types";
 import type { Backend, SessionMetaInputs, SpawnConfig, StructuredSource } from "../backend.js";
 import { splitArgs } from "../backend.js";
 import { toStrictJsonSchema } from "../schema-strict.js";
-import { findJsonBlock } from "../structured-output.js";
+import { parseFinalJson } from "../structured-output.js";
 
 const require = createRequire(import.meta.url);
 
@@ -52,23 +52,8 @@ export class CodexBackend implements Backend {
   }
 
   nativeStructured(source: StructuredSource): unknown {
-    const text = source.currentTurnText().trim();
-    if (!text) return undefined;
-    // The constrained final message is pure JSON; parse it directly, then fall back to a
-    // balanced-block extraction if the turn also emitted leading prose.
-    try {
-      return JSON.parse(text);
-    } catch {
-      // fall through to block extraction
-    }
-    const block = findJsonBlock(text);
-    if (block !== undefined) {
-      try {
-        return JSON.parse(block);
-      } catch {
-        // give up; the runner's ladder will re-prompt / extract.
-      }
-    }
-    return undefined;
+    // The constrained final message is pure JSON; parse it directly, with a balanced-block
+    // fallback if the turn also emitted leading prose.
+    return parseFinalJson(source.currentTurnText());
   }
 }
