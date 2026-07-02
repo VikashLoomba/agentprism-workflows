@@ -40,6 +40,7 @@ import { CodexBackend } from "./backends/codex.js";
 import { CustomAcpBackend } from "./backends/custom.js";
 import { resolveBackendRegistry, type BackendRegistry, type CustomBackendConfig } from "./registry.js";
 import { mapThrownError } from "./errors-map.js";
+import { toJsonSchema } from "./schema-strict.js";
 import type { ToolPolicy } from "./permissions.js";
 import { resolveStructuredOutput, type StructuredSession } from "./structured-output.js";
 
@@ -132,7 +133,7 @@ export class AcpAgentRunner implements AgentRunner {
       // full spec unchanged (their catalogs match provider-prefixed and bare ids).
       await applyModelSelection(session, innerModelSpec(opts.model ?? opts.tier, backend), opts);
 
-      const text = buildPrompt(prompt, opts, Boolean(schema));
+      const text = buildPrompt(prompt, opts, schema, backend);
       // Generic turn-scoped _meta passthrough merged UNDER the backend-computed keys (e.g. the
       // outputSchema forward when a schema is set) — user meta never clobbers the schema channel.
       const promptMeta = mergeTurnMeta(opts.promptMeta, backend.promptMeta(schema));
@@ -263,20 +264,31 @@ async function applyModelSelection(
   for (const fallback of modifierFallbacks ?? []) opts.onModelFallback?.(fallback);
 }
 
-function buildPrompt(prompt: string, opts: AnyRunOptions, structured: boolean): string {
+function buildPrompt(
+  prompt: string,
+  opts: AnyRunOptions,
+  schema: TSchema | undefined,
+  backend: Backend,
+): string {
   const parts: string[] = [];
   if (opts.instructions) parts.push(opts.instructions);
   if (opts.label) parts.push(`Task label: ${opts.label}`);
   parts.push(prompt);
-  if (structured) {
-    parts.push(
-      [
-        "Final output contract:",
-        "- Your FINAL message MUST be a single JSON object that conforms to the required output schema.",
-        "- Output ONLY that JSON object — no prose, no explanation, and no markdown code fences.",
-        "- If you need to inspect files or run commands first, do so, then emit the JSON object as your final message.",
-      ].join("\n"),
-    );
+  if (schema) {
+    const contract = [
+      "Final output contract:",
+      "- Your FINAL message MUST be a single JSON object that conforms to the required output schema.",
+      "- Output ONLY that JSON object — no prose, no explanation, and no markdown code fences.",
+      "- If you need to inspect files or run commands first, do so, then emit the JSON object as your final message.",
+    ];
+    if (backend.embedSchemaInPrompt) {
+      // The agent behind a custom backend may ignore the `_meta.outputSchema` forward, so the
+      // schema must be STATED, not just wired — otherwise the model invents its own keys and
+      // the repair ladder can never converge. Built-ins skip this: their native constraint
+      // channel is authoritative.
+      contract.push(`- The required output schema (JSON Schema):\n${JSON.stringify(toJsonSchema(schema))}`);
+    }
+    parts.push(contract.join("\n"));
   }
   return parts.join("\n\n");
 }

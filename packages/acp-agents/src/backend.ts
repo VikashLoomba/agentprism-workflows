@@ -40,6 +40,12 @@ export interface SessionMetaInputs {
 
 export interface Backend {
   readonly id: BackendId;
+  /** When true, the runner EMBEDS the JSON Schema in the prompt text on schema runs. For the
+   *  built-ins the native constraint channel is authoritative and this stays unset; a CUSTOM
+   *  backend sets it because its agent may ignore the `_meta.outputSchema` forward entirely —
+   *  without the schema in the prompt, such an agent returns well-formed JSON with the WRONG
+   *  KEYS and the repair ladder can never converge (it can fix prose, not unseen contracts). */
+  readonly embedSchemaInPrompt?: boolean;
   /** How to launch this backend's ACP server over stdio. */
   spawnConfig(): SpawnConfig;
   /** OPTIONAL backend-level `_meta` DEFAULTS for session/new (e.g. a custom registry entry's

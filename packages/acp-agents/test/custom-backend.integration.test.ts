@@ -25,7 +25,12 @@ interface LogEntry {
     configId?: string;
     value?: string;
     cwd?: string;
+    prompt?: Array<{ type: string; text?: string }>;
   };
+}
+
+function promptTextOf(entry: LogEntry | undefined): string {
+  return (entry?.params?.prompt ?? []).map((b) => (b.type === "text" ? (b.text ?? "") : "")).join("");
 }
 
 const runners: AcpAgentRunner[] = [];
@@ -146,6 +151,44 @@ test("custom backend: 'name/inner' selects the inner model; promptMeta + outputS
   const outputSchema = promptMeta[META_KEYS.outputSchema] as Record<string, unknown>;
   assert.equal(typeof outputSchema, "object", "backend-computed outputSchema won over the user key");
   assert.ok((outputSchema.properties as Record<string, unknown>).city, "…and is the real JSON schema");
+});
+
+test("custom backend: schema runs EMBED the JSON Schema in the prompt text (agent may ignore the meta)", async () => {
+  // A custom agent that ignores _meta.outputSchema can only satisfy the contract if the
+  // schema is STATED in the prompt — the opencode e2e found exactly this failure (valid JSON,
+  // invented keys, ladder never converges). Pin the belt-and-braces behavior.
+  const { config, cwd, readLog } = fakeBackend({ turns: [{ text: '{"city":"Oslo","hot":false}' }] });
+  await makeRunner({ fake: config }).run("classify", { model: "fake", cwd, schema: SCHEMA });
+
+  const promptText = promptTextOf(readLog().find((e) => e.method === "prompt"));
+  assert.match(promptText, /required output schema \(JSON Schema\)/i, "the contract names the embedded schema");
+  assert.ok(promptText.includes('"city"') && promptText.includes('"hot"'), "the schema keys are stated in the prompt");
+});
+
+test("builtin backends: schema runs do NOT embed the schema in the prompt (native channel is authoritative)", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "acp-custom-it-"));
+  const log = path.join(dir, "log.jsonl");
+  process.env.AGENTPRISM_CLAUDE_ACP_CMD = process.execPath;
+  process.env.AGENTPRISM_CLAUDE_ACP_ARGS = FIXTURE;
+  process.env.AGENTPRISM_FAKE_LOG = log;
+  process.env.AGENTPRISM_FAKE_SCENARIO = JSON.stringify({
+    turns: [{ structuredOutput: { city: "Oslo", hot: false }, text: "done" }],
+  });
+  try {
+    await makeRunner({}).run("classify", { model: "claude", cwd: dir, schema: SCHEMA });
+    const entries = readFileSync(log, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as LogEntry);
+    const promptText = promptTextOf(entries.find((e) => e.method === "prompt"));
+    assert.match(promptText, /Final output contract/, "the generic contract text is still present");
+    assert.doesNotMatch(promptText, /required output schema \(JSON Schema\)/i, "no embedded schema for built-ins");
+  } finally {
+    delete process.env.AGENTPRISM_CLAUDE_ACP_CMD;
+    delete process.env.AGENTPRISM_CLAUDE_ACP_ARGS;
+    delete process.env.AGENTPRISM_FAKE_LOG;
+    delete process.env.AGENTPRISM_FAKE_SCENARIO;
+  }
 });
 
 test("custom backend: registers via AGENTPRISM_BACKENDS env and serves as the default backend", async () => {
