@@ -20,6 +20,10 @@ import { parseFinalJson } from "../structured-output.js";
 
 export class CustomAcpBackend implements Backend {
   readonly id: string;
+  /** The agent may ignore the `_meta.outputSchema` forward, so the runner must also state the
+   *  schema in the prompt — otherwise the model returns JSON with keys it invented and the
+   *  repair ladder can never converge on a contract the model was never shown. */
+  readonly embedSchemaInPrompt = true;
 
   constructor(private readonly config: RegisteredBackend) {
     this.id = config.name;
