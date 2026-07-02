@@ -5,6 +5,11 @@
 // @automatalabs/workflow-engine; the two siblings meet ONLY at AgentRunner, injected by the
 // @automatalabs/workflows facade (which mcp-server builds on) via createAcpRunner().
 export { AcpAgentRunner, createAcpRunner, selectBackend } from "./runner.js";
+export type { AcpRunnerOptions } from "./runner.js";
+
+// The custom-backend registry: run ANY ACP agent as an agent() target.
+export { BACKENDS_ENV, resolveBackendRegistry } from "./registry.js";
+export type { BackendRegistry, CustomBackendConfig, RegisteredBackend } from "./registry.js";
 
 export { PooledConnection, SessionHandle } from "./acp-client.js";
 export type { AcpSessionOptions, PooledConnectionDeps } from "./acp-client.js";
@@ -26,9 +31,17 @@ export type {
   AcpBackendErrorEvent,
 } from "./events.js";
 
-export type { Backend, BackendId, SessionMetaInputs, SpawnConfig, StructuredSource } from "./backend.js";
+export type {
+  Backend,
+  BackendId,
+  BuiltinBackendId,
+  SessionMetaInputs,
+  SpawnConfig,
+  StructuredSource,
+} from "./backend.js";
 export { ClaudeBackend } from "./backends/claude.js";
 export { CodexBackend } from "./backends/codex.js";
+export { CustomAcpBackend } from "./backends/custom.js";
 
 export { decidePermission } from "./permissions.js";
 export type { ToolPolicy } from "./permissions.js";
@@ -40,6 +53,7 @@ export { toJsonSchema, toStrictJsonSchema } from "./schema-strict.js";
 export {
   extractValidated,
   findJsonBlock,
+  parseFinalJson,
   resolveStructuredOutput,
   validateValue,
 } from "./structured-output.js";

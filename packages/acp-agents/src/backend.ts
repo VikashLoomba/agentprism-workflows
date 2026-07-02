@@ -9,7 +9,11 @@
 //      _claude/sdkMessage; Codex: JSON.parse the final assistant message off the stream).
 import type { TSchema } from "typebox";
 
-export type BackendId = "claude" | "codex";
+/** The two built-in backends. Custom registry backends extend the id space beyond these. */
+export type BuiltinBackendId = "claude" | "codex";
+/** A backend id: one of the built-ins, or the registered name of a custom ACP backend
+ *  (see registry.ts). The pool keys connections by this id, so ids must be stable. */
+export type BackendId = string;
 
 export interface SpawnConfig {
   command: string;
@@ -38,9 +42,14 @@ export interface Backend {
   readonly id: BackendId;
   /** How to launch this backend's ACP server over stdio. */
   spawnConfig(): SpawnConfig;
-  /** `_meta` for session/new (undefined when this backend carries nothing there). `inputs`
-   *  carries optional per-session extras (e.g. Codex base/developer instructions); a backend
-   *  that has no use for them ignores it. */
+  /** OPTIONAL backend-level `_meta` DEFAULTS for session/new (e.g. a custom registry entry's
+   *  static `sessionMeta`). Lowest precedence: per-call RunOptions.meta merges OVER these,
+   *  and sessionMeta()'s protocol-critical keys merge over both. */
+  sessionMetaDefaults?(): Record<string, unknown> | undefined;
+  /** PROTOCOL-CRITICAL `_meta` for session/new (undefined when this backend carries nothing
+   *  there) — e.g. the Claude schema channel. Highest precedence below the runId stamp: these
+   *  keys win over the generic user passthrough. `inputs` carries optional per-session extras
+   *  (e.g. Codex base/developer instructions); a backend that has no use for them ignores it. */
   sessionMeta(schema: TSchema | undefined, inputs?: SessionMetaInputs): Record<string, unknown> | undefined;
   /** `_meta` for session/prompt (undefined when this backend carries the schema at session/new). */
   promptMeta(schema: TSchema | undefined): Record<string, unknown> | undefined;

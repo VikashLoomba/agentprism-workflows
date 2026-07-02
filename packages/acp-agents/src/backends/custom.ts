@@ -1,0 +1,62 @@
+// CustomAcpBackend — drives ANY registered ACP agent (registry.ts), not just the built-in
+// Claude/Codex pair. The generic dialect it speaks is the one this repo already publishes:
+//   - schema IN:   the bare turn-level `_meta.outputSchema` (same key the @automatalabs/codex-acp
+//                  fork reads), as a plain JSON Schema. An agent that honors it constrains its
+//                  final message natively; an agent that ignores it still works — the runner's
+//                  validate/re-prompt ladder repairs off the final text.
+//   - result OUT:  JSON.parse of the final assistant message (with a balanced-block fallback),
+//                  exactly like Codex — no vendor extension notification required.
+//   - config-level `_meta`: the registry entry's static `sessionMeta` rides every session/new
+//                  (per-call RunOptions.meta merges over it in the ACP client; backend-computed
+//                  keys and the runId stamp win over both).
+// SessionMetaInputs (Codex base/developer instruction overrides) are IGNORED — they are a
+// codex-acp vendor contract; a custom agent's knobs travel through the generic meta channels.
+import type { TSchema } from "typebox";
+import { META_KEYS } from "@automatalabs/shared-types";
+import type { Backend, SpawnConfig, StructuredSource } from "../backend.js";
+import type { RegisteredBackend } from "../registry.js";
+import { toJsonSchema } from "../schema-strict.js";
+import { parseFinalJson } from "../structured-output.js";
+
+export class CustomAcpBackend implements Backend {
+  readonly id: string;
+
+  constructor(private readonly config: RegisteredBackend) {
+    this.id = config.name;
+  }
+
+  spawnConfig(): SpawnConfig {
+    return {
+      command: this.config.command,
+      args: [...(this.config.args ?? [])],
+      // Registry-declared env merges OVER the inherited environment.
+      env: { ...process.env, ...(this.config.env ?? {}) },
+    };
+  }
+
+  sessionMetaDefaults(): Record<string, unknown> | undefined {
+    // The registry entry's static `_meta` — DEFAULTS, so per-call RunOptions.meta overrides
+    // them. Return a copy so callers can merge without mutating config.
+    const staticMeta = this.config.sessionMeta;
+    if (!staticMeta || Object.keys(staticMeta).length === 0) return undefined;
+    return { ...staticMeta };
+  }
+
+  sessionMeta(_schema: TSchema | undefined): Record<string, unknown> | undefined {
+    // The schema rides the turn (see promptMeta); a custom backend has no protocol-critical
+    // session/new `_meta` of its own.
+    return undefined;
+  }
+
+  promptMeta(schema: TSchema | undefined): Record<string, unknown> | undefined {
+    if (!schema) return undefined;
+    // Plain JSON Schema (NOT OpenAI-strict-normalized — strictness is a Codex/Responses-API
+    // constraint, not part of the generic dialect). Agents that ignore it are repaired by the
+    // runner's ladder.
+    return { [META_KEYS.outputSchema]: toJsonSchema(schema) };
+  }
+
+  nativeStructured(source: StructuredSource): unknown {
+    return parseFinalJson(source.currentTurnText());
+  }
+}

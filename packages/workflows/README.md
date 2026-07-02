@@ -138,9 +138,11 @@ try {
 
 `run(prompt, options?)` accepts the seam's `RunOptions`: `schema`, `model`, `tier`, `cwd`,
 `instructions`, `label`, `toolNames` / `disallowedToolNames`, `signal`, `mcpServers`,
-`baseInstructions` / `developerInstructions` (Codex-only), and the out-of-band telemetry callbacks
-`onUsage` / `onModelResolved` / `onModelFallback` / `onHistory`. Token/cost usage is delivered via
-`onUsage` (it may never fire — ACP usage is experimental), never via the return value.
+`meta` / `promptMeta` (generic ACP `_meta` passthroughs merged into `session/new` /
+`session/prompt`), `baseInstructions` / `developerInstructions` (Codex-only), and the out-of-band
+telemetry callbacks `onUsage` / `onModelResolved` / `onModelFallback` / `onHistory`. Token/cost
+usage is delivered via `onUsage` (it may never fire — ACP usage is experimental), never via the
+return value.
 
 > **Codex session instructions.** When the run routes to the Codex backend, `baseInstructions`
 > **replaces** Codex's built-in base system prompt and `developerInstructions` adds developer-role
@@ -159,6 +161,22 @@ try {
 > The ACP server **process** is pooled and reused across `run()` calls; each `run()` opens and
 > closes one **session** on it. Call `dispose()` once at shutdown to tear the pool down. Pool size
 > is `AcpPoolOptions.size` (default 1) or `AGENTPRISM_ACP_POOL_SIZE`.
+
+> **Custom backends.** Any ACP agent can serve `run()` / `agent()` calls — register it by name and
+> route to it with `model`:
+>
+> ```ts
+> const runner = createAcpRunner({
+>   backends: { browser: { command: "node", args: ["/abs/browser-acp.js"] } },
+> });
+> await runner.run("Verify the checkout flow.", { model: "browser" });
+> ```
+>
+> `model: "browser/vision-large"` additionally selects `vision-large` from the agent's config-option
+> catalog. The same registry can be declared via `AGENTPRISM_BACKENDS` (JSON env var; the
+> programmatic option wins per name). A `schema` is forwarded to custom backends as turn-level
+> `_meta.outputSchema` and the result is JSON-parsed off the final message — agents that ignore the
+> schema channel still work via the validate/re-prompt ladder.
 
 ### c) `WorkflowManager` — stateful / resumable runs
 

@@ -203,6 +203,14 @@ class MultiplexClient implements Client {
   }
 }
 
+/** Shallow-merge `_meta` layers lowest-to-highest precedence, treating empty layers as absent
+ *  so an unconfigured session keeps sending NO `_meta` at all. */
+function layerMeta(...layers: Array<Record<string, unknown> | undefined>): Record<string, unknown> | undefined {
+  const present = layers.filter((l): l is Record<string, unknown> => Boolean(l && Object.keys(l).length > 0));
+  if (present.length === 0) return undefined;
+  return Object.assign({}, ...present);
+}
+
 /** Merge the engine runId correlation stamp into a backend's session/new `_meta`. Returns the
  *  meta unchanged when no runId is given (so a backend that sends no `_meta` keeps sending none). */
 function stampRunId(
@@ -233,6 +241,10 @@ export interface AcpSessionOptions {
   signal?: AbortSignal;
   /** Client-provided MCP servers to attach at session/new. Omitted => `[]` (the default). */
   mcpServers?: McpServerConfig[];
+  /** Generic session-scoped `_meta` passthrough (RunOptions.meta). Merged FIRST, under the
+   *  backend-computed `_meta` and the runId stamp, so user keys never clobber the schema /
+   *  correlation channels. Omitted => the request `_meta` is whatever the backend set. */
+  meta?: Record<string, unknown>;
   /** Engine run id, stamped onto session/new `_meta` (META_KEYS.runId) as a correlation id.
    *  Omitted => no runId `_meta` is stamped (the request `_meta` is whatever the backend set). */
   runId?: string;
@@ -405,13 +417,20 @@ export class PooledConnection {
     try {
       await this.ready;
       const state = new SessionState(opts.policy, opts.label, opts.runId);
-      // The backend's vendor `_meta` (Claude schema channel; Codex base/developer instructions)
-      // plus the optional engine runId correlation stamp. When none is present, no `_meta` is sent.
+      // session/new `_meta`, layered lowest-to-highest precedence: the backend's static
+      // defaults (a custom registry entry's `sessionMeta`), then the generic user passthrough
+      // (opts.meta), then the backend's protocol-critical `_meta` (Claude schema channel;
+      // Codex base/developer instructions), then the engine runId correlation stamp. When no
+      // layer is present, no `_meta` is sent.
       const meta = stampRunId(
-        this.backend.sessionMeta(opts.schema, {
-          baseInstructions: opts.baseInstructions,
-          developerInstructions: opts.developerInstructions,
-        }),
+        layerMeta(
+          this.backend.sessionMetaDefaults?.(),
+          opts.meta,
+          this.backend.sessionMeta(opts.schema, {
+            baseInstructions: opts.baseInstructions,
+            developerInstructions: opts.developerInstructions,
+          }),
+        ),
         opts.runId,
       );
       const request: NewSessionRequest = {

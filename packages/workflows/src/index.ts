@@ -35,17 +35,29 @@ export {
 } from "@automatalabs/workflow-engine";
 
 // ── ACP backend: the default AgentRunner implementation, backend selection, the
-//    concrete backends, the pool options, and the JSON-Schema helpers. ──
+//    concrete backends (built-in + custom registry), the pool/runner options, and the
+//    JSON-Schema helpers. Custom backends let ANY ACP agent serve agent() calls:
+//    `createAcpRunner({ backends: { browser: { command: "…" } } })` (or the
+//    AGENTPRISM_BACKENDS env var), then route with `agent(p, { model: "browser" })`. ──
 export {
   createAcpRunner,
   AcpAgentRunner,
   selectBackend,
   ClaudeBackend,
   CodexBackend,
+  CustomAcpBackend,
+  resolveBackendRegistry,
+  BACKENDS_ENV,
   toJsonSchema,
   toStrictJsonSchema,
 } from "@automatalabs/acp-agents";
-export type { AcpPoolOptions } from "@automatalabs/acp-agents";
+export type {
+  AcpPoolOptions,
+  AcpRunnerOptions,
+  BackendRegistry,
+  CustomBackendConfig,
+  RegisteredBackend,
+} from "@automatalabs/acp-agents";
 
 // ── Live ACP events: `createAcpRunner().on("tool_call", evt => …)` to listen in on the
 //    stream of a run. The event map keys are ACP `sessionUpdate` discriminants plus a few
