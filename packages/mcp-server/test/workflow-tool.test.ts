@@ -603,7 +603,17 @@ test("fully pinned and agent-less workflows do not trigger automatic backend dis
     assert.deepEqual(probes, ["pi"], "the explicit call receives only its normal preflight probe");
 
     probes.length = 0;
-    const deterministic = await client.callTool({ name: "workflow", arguments: { action: "run", script: NO_AGENT_SCRIPT } });
+    const deterministic = await client.callTool({
+      name: "workflow",
+      arguments: {
+        action: "run",
+        script: [
+          'export const meta = { name: "unused-agent", description: "d" };',
+          'if (false) return agent("unreachable");',
+          'return "no agents";',
+        ].join("\n"),
+      },
+    });
     assert.notEqual(deterministic.isError, true);
     assert.deepEqual(probes, []);
   } finally {
@@ -613,10 +623,11 @@ test("fully pinned and agent-less workflows do not trigger automatic backend dis
   }
 });
 
-test("conservative routing warnings distinguish spread-built explicit models from model-less calls", async () => {
+test("spread-built explicit models need only their routed probe, even without a usable default backend", async () => {
   const previousDefault = process.env.AGENTPRISM_DEFAULT_BACKEND;
   delete process.env.AGENTPRISM_DEFAULT_BACKEND;
   const liveModels: Array<string | undefined> = [];
+  const probes: Array<string | undefined> = [];
   const runner = Object.assign(
     makeRunner((_prompt, options) => {
       liveModels.push(options.model);
@@ -627,6 +638,8 @@ test("conservative routing warnings distinguish spread-built explicit models fro
       listBackends: () => ["codex", "pi"],
       listCustomBackends: () => [],
       async probeConfigOptions(spec?: string) {
+        probes.push(spec);
+        if (spec !== "pi/deepseek/deepseek-v4-flash") throw new Error("no default model configured");
         const backendId = spec?.split("/", 1)[0] ?? "codex";
         return {
           backendId,
@@ -656,10 +669,8 @@ test("conservative routing warnings distinguish spread-built explicit models fro
     });
     assert.notEqual(result.isError, true);
     assert.deepEqual(liveModels, ["pi/deepseek/deepseek-v4-flash"]);
-    assert.match(textOf(result), /Conservative routing analysis could not prove every agent call/);
-    assert.match(textOf(result), /pinned only as the fallback for otherwise model-less calls/);
-    assert.match(textOf(result), /every explicit per-call model or tier still wins/);
-    assert.doesNotMatch(textOf(result), /^Model-less agent calls/m);
+    assert.deepEqual(probes, ["pi/deepseek/deepseek-v4-flash"]);
+    assert.doesNotMatch(textOf(result), /Preflight warnings/);
   } finally {
     await dispose();
     if (previousDefault === undefined) delete process.env.AGENTPRISM_DEFAULT_BACKEND;
@@ -671,6 +682,7 @@ test("a live branch not covered by canonical preflight configuration fails close
   const previousDefault = process.env.AGENTPRISM_DEFAULT_BACKEND;
   delete process.env.AGENTPRISM_DEFAULT_BACKEND;
   const liveModels: Array<string | undefined> = [];
+  const probes: Array<string | undefined> = [];
   const runner = Object.assign(
     makeRunner((_prompt, options) => {
       liveModels.push(options.model);
@@ -681,6 +693,7 @@ test("a live branch not covered by canonical preflight configuration fails close
       listBackends: () => ["claude", "codex"],
       listCustomBackends: () => [],
       async probeConfigOptions(spec?: string) {
+        probes.push(spec);
         const backendId = spec?.split("/", 1)[0] ?? "claude";
         return {
           backendId,
@@ -712,6 +725,7 @@ test("a live branch not covered by canonical preflight configuration fails close
     assert.equal(result.isError, true);
     assert.equal(structured(result)?.status, "failed");
     assert.deepEqual(liveModels, ["claude"]);
+    assert.deepEqual(probes, ["claude"], "uncovered calls need no speculative default probe");
     assert.match(textOf(result), /occurrence 1 has no host-selected configuration/);
   } finally {
     await dispose();
