@@ -809,7 +809,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             reasoningEffort: "medium",
             serviceTier: null,
         } as any);
-        vi.spyOn(codexAppServerClient, "threadRead").mockResolvedValue({
+        vi.spyOn(codexAppServerClient, "threadReadWithHistory").mockResolvedValue({
             thread: {id: "thread-id"} as any,
         });
         vi.spyOn(codexAppServerClient, "listModels").mockResolvedValue({
