@@ -532,6 +532,7 @@ export class CodexAcpClient {
         await this.refreshSkills(request.cwd, additionalDirectories);
 
         const response = await this.codexClient.threadResume({
+            excludeTurns: true,
             config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
             cwd: request.cwd,
             modelProvider: await this.getResumeModelProvider(),
@@ -572,6 +573,7 @@ export class CodexAcpClient {
         await this.refreshSkills(request.cwd, additionalDirectories);
 
         const response = await this.codexClient.threadResume({
+            excludeTurns: true,
             config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
             cwd: request.cwd,
             modelProvider: await this.getResumeModelProvider(),
@@ -579,10 +581,16 @@ export class CodexAcpClient {
             ...readInstructionOverrides(request._meta),
         });
         onSubscribed?.();
-        const historyResponse = await this.codexClient.threadRead({
-            threadId: response.thread.id,
-            includeTurns: true,
-        });
+        // Resume cursors bound durable history; later turns arrive through live events.
+        // A null paginated cursor means there was no durable history at resume time.
+        const thread = response.thread.historyMode === "paginated"
+            ? {
+                ...response.thread,
+                turns: response.turnsBackwardsCursor === null
+                    ? []
+                    : await this.codexClient.threadReadHistory(response.thread.id, response.turnsBackwardsCursor),
+            }
+            : (await this.codexClient.threadReadWithHistory(response.thread.id)).thread;
         const codexModels = await this.fetchAvailableModels();
         const currentModelId = this.createModelId(codexModels, response.model, response.reasoningEffort).toString();
         return {
@@ -592,16 +600,13 @@ export class CodexAcpClient {
             collaborationMode: this.getCollaborationMode(response.thread.id),
             modelProvider: response.modelProvider,
             currentServiceTier: response.serviceTier as ServiceTier ?? null,
-            thread: historyResponse.thread,
+            thread,
             additionalDirectories,
         };
     }
 
     async readSessionThread(sessionId: string): Promise<Thread> {
-        return (await this.codexClient.threadRead({
-            threadId: sessionId,
-            includeTurns: true,
-        })).thread;
+        return (await this.codexClient.threadReadWithHistory(sessionId)).thread;
     }
 
     async newSession(request: acp.NewSessionRequest): Promise<SessionMetadata> {
@@ -997,6 +1002,7 @@ export class CodexAcpClient {
         let lateStopReason: "cancelled" | "timeout" | null = null;
         try {
             const forkPromise = this.codexClient.threadFork({
+                excludeTurns: true,
                 threadId: params.sessionId,
                 lastTurnId: params.turnId,
                 cwd: params.workspace.cwd,

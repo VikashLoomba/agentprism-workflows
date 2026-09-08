@@ -115,6 +115,11 @@
       "sha": "061f9a4a2e463a220d7a3ab2ae5e9732837085ef",
       "imported": "2026-09-04",
       "what": "codex-acp upstream sync: agentclientprotocol/codex-acp main (chore(main): release 1.10.0 (#472))"
+    },
+    {
+      "sha": "7c374bc9ce6808d278c5d47887fb6a7ad1e65b28",
+      "imported": "2026-09-08",
+      "what": "codex-acp upstream sync: agentclientprotocol/codex-acp main"
     }
   ]
 }
