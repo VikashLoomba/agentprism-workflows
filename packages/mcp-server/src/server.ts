@@ -45,7 +45,6 @@ import {
   redactText,
   validateWorkflowScript,
   truncateUtf8,
-  workflowMayUseDefaultModel,
   WorkflowError,
   WorkflowErrorCode,
   WorkflowManager,
@@ -2902,9 +2901,9 @@ export function createWorkflowServer(
 
         let defaultModel: string | undefined;
         let defaultBackendWarning: string | undefined;
-        const reachedModelLessCall = workflowNeedsPinnedDefault(routingDiscovery);
-        const mayReachModelLessCall = workflowMayUseDefaultModel(admittedScript);
-        if (agentConfigurations === undefined && (reachedModelLessCall || mayReachModelLessCall)) {
+        // Only observed calls need a default. Strict canonical coverage rejects any extra
+        // live occurrence before dispatch, so unvisited branches need no speculative routing.
+        if (agentConfigurations === undefined && workflowNeedsPinnedDefault(routingDiscovery)) {
           const explicitDefault = process.env[DEFAULT_BACKEND_ENV] !== undefined;
           if (explicitDefault) {
             // Preserve the explicit operator contract, including its historical unknown/empty ->
@@ -2915,13 +2914,9 @@ export function createWorkflowServer(
               try {
                 const selected = await discoverProjectDefaultBackend(context, probeRunner);
                 defaultModel = selected.backendId;
-                defaultBackendWarning = reachedModelLessCall
-                  ? `Model-less agent calls use auto-selected backend ${JSON.stringify(selected.backendId)} for this run ` +
-                    `(${selected.reason}); the run will not switch providers automatically.`
-                  : `Conservative routing analysis could not prove every agent call has an authored model or tier ` +
-                    `(for example, options assembled through a spread or a call hidden behind an unvisited branch). ` +
-                    `Backend ${JSON.stringify(selected.backendId)} is pinned only as the fallback for otherwise model-less ` +
-                    `calls (${selected.reason}); every explicit per-call model or tier still wins.`;
+                defaultBackendWarning =
+                  `Model-less agent calls use auto-selected backend ${JSON.stringify(selected.backendId)} for this run ` +
+                  `(${selected.reason}); the run will not switch providers automatically.`;
               } catch (error) {
                 if (error instanceof NoAutoDefaultBackendError) {
                   return {

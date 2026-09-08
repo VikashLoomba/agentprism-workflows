@@ -42,6 +42,10 @@ the host materializes a complete canonical effective occurrence map and enables 
 before admission. Agent-less and fully configured workflows do not elicit configuration. Decline
 or cancel returns a tool error and creates no run.
 
+Automatic default selection also follows observed effective calls. Dynamic options that resolve a
+model need only their routed validation probe, and unvisited agent calls do not trigger speculative
+default probes. Strict occurrence coverage already rejects extra live calls before dispatch.
+
 ## Form contract
 
 MCP form schemas accept flat primitive properties, not nested per-call objects. The server therefore

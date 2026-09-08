@@ -19,14 +19,21 @@ optional mode/config omissions never trigger that form. Automatic selection is t
 are true:
 
 1. the connected client does not support form elicitation;
-2. a mock routing-discovery pass reaches an unmodelled call, or conservative static analysis finds a direct model-less `agent()`/default-model helper/nested workflow hidden behind another branch;
+2. a mock routing-discovery pass reaches a call with neither an effective model nor a tier;
 3. `AGENTPRISM_DEFAULT_BACKEND` is truly absent from the daemon environment; and
 4. the injected runner exposes backend listing, default identity, and no-prompt config probing.
 
 For a non-eliciting client, an explicitly present environment value always wins, including the historical empty/unknown value
-behavior. Agent-less workflows and workflows whose direct calls are statically pinned (including a top-level
-`meta.model`) do not run automatic discovery. Dynamic model expressions and unresolved branch shapes
-fail conservatively toward discovery.
+behavior. Agent-less workflows and workflows whose observed calls already resolve their models
+(including inherited models and dynamically assembled options) do not run automatic discovery.
+
+This supersedes the earlier conservative static trigger for unvisited branches and dynamic options.
+Every MCP admission now persists a complete occurrence configuration map and requires strict coverage:
+an extra live occurrence fails before dispatch, so selecting a fallback for it serves no purpose.
+Discovery follows the mock execution's effective calls. The public SDK
+`workflowMayUseDefaultModel()` analysis helper remains available to embedding hosts; MCP no longer
+uses it to trigger default selection. Existing admission snapshots remain valid for same-ID
+continuation, with no persistence migration or change to the SDK runner's default routing.
 
 ## Readiness semantics
 
@@ -74,6 +81,7 @@ Credential-free coverage pins:
 - positive-evidence preference and unknown fallback;
 - per-project discovery caching;
 - explicit environment precedence;
-- no discovery for fully pinned/agent-less workflows;
+- no discovery for resolved models, including dynamic options, or unvisited agent calls;
+- strict rejection before dispatch for extra live occurrences without speculative default discovery;
 - persistence and call-identity inclusion of `defaultModel`; and
 - exact canonical selection inheritance on same-ID MCP continuation.
