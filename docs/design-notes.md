@@ -255,9 +255,9 @@ All versions below were re-verified from the installed workspace dependency grap
   client/connection helpers). This is what your orchestrator uses to *speak ACP as a client*.
   Ref: https://agentclientprotocol.com · https://github.com/agentclientprotocol
 
-- **`@agentclientprotocol/claude-agent-acp@0.74.0`** — ACP server wrapping Claude.
+- **`@agentclientprotocol/claude-agent-acp@0.75.1`** — ACP server wrapping Claude.
   Bin: `claude-agent-acp` (`npx @agentclientprotocol/claude-agent-acp`). Author: Zed Industries.
-  Resolves **`@anthropic-ai/claude-agent-sdk@0.3.261`** through the workspace override — the
+  Resolves **`@anthropic-ai/claude-agent-sdk@0.3.265`** through the workspace override — the
   adapter itself exact-pins `0.3.257`, so the override lifts the runtime to npm `latest`.
   Adapter 0.71–0.73 adds model-aware modes, per-model usage metadata, native subagent/task
   reporting, message-specific forks, and session titles. AgentPrism gives engine-owned Claude
@@ -270,6 +270,12 @@ All versions below were re-verified from the installed workspace dependency grap
   supplied gateway payloads; AgentPrism does not set that flag and supplies the required gateway
   URL/headers. SDK 0.3.261 adds opt-in plugin delivery over stdin and fixes disposal in older
   VM contexts; neither changes the existing integration surface.
+  Adapter 0.75.1 reports compaction through ordinary ACP tool lifecycle events and fixes
+  message-specific forks; resumed sessions restore their model from local transcript data without
+  blocking on a context-usage control request. Its new connection-scoped `authStatus` notification
+  remains an upstream capability; the runner's public auth snapshot still reflects its own
+  bookkeeping. SDK 0.3.265 expands user-message correlation and preserves an agent's shell cwd
+  across turns. Structured-output, terminal-result, and usage contracts remain compatible.
   Drop the override once the adapter catches up (CONTRIBUTING "When the dependency gate blocks").
   Ref: https://github.com/agentclientprotocol/claude-agent-acp
   > Naming note: the canonical package is **`claude-agent-acp`**, not "claude-acp".
@@ -651,20 +657,20 @@ export type PromptRequest = {
 // :213   ToolCallContent = Content | Diff | Terminal      — no structuredContent
 ```
 
-### 6.2 Claude — `@agentclientprotocol/claude-agent-acp@0.74.0` → `@anthropic-ai/claude-agent-sdk@0.3.261`
+### 6.2 Claude — `@agentclientprotocol/claude-agent-acp@0.75.1` → `@anthropic-ai/claude-agent-sdk@0.3.265`
 
 **Supported, session-scoped, via the `_meta.claudeCode` vendor extension.**
 
 **(a) Set the schema — IN.** The SDK's `Options.outputFormat` is the native lever:
 
 ```ts
-// claude-agent-sdk 0.3.261  sdk.d.ts:1820
+// claude-agent-sdk 0.3.265  sdk.d.ts:1821
 /** Output format configuration for structured responses.
  *  When specified, the agent will return structured data matching the schema. */
 outputFormat?: OutputFormat;
-// :2207  OutputFormat = JsonSchemaOutputFormat
-// :963   JsonSchemaOutputFormat = { type: 'json_schema'; schema: Record<string, unknown> }
-// :2209  OutputFormatType = 'json_schema'
+// :2290  OutputFormat = JsonSchemaOutputFormat
+// :968   JsonSchemaOutputFormat = { type: 'json_schema'; schema: Record<string, unknown> }
+// :2292  OutputFormatType = 'json_schema'
 ```
 
 The adapter **spreads the client-supplied options straight into the SDK query**, so a client
@@ -706,7 +712,7 @@ Client `session/new` payload:
 and retries; on exhaustion it ends with a terminal subtype:
 
 ```ts
-// claude-agent-sdk 0.3.261  sdk.d.ts:4957  (SDKResultError.subtype)
+// claude-agent-sdk 0.3.265  sdk.d.ts:4983  (SDKResultError.subtype)
 'error_during_execution' | 'error_max_turns' | 'error_max_budget_usd'
   | 'error_max_structured_output_retries'
 ```
@@ -717,7 +723,7 @@ error / `max_turn_requests` stop reason).
 **(c) Read the result — OUT (the one rough edge).** The parsed object lands in:
 
 ```ts
-// claude-agent-sdk 0.3.261  sdk.d.ts:5005  (SDKResultSuccess)
+// claude-agent-sdk 0.3.265  sdk.d.ts:5032  (SDKResultSuccess)
 structured_output?: unknown;
 ```
 
@@ -1090,7 +1096,7 @@ resurrect a snapshot or sidecar after the run was removed.
 **Packages (verified versions, 2026-09-02):**
 - `@modelcontextprotocol/{client,server,node}@2.0.0` (dual-era MCP shell); `@modelcontextprotocol/sdk@1.30.0` remains on separate ACP embedded-client boundaries — https://github.com/modelcontextprotocol/typescript-sdk
 - `@agentclientprotocol/sdk@1.4.0` — https://github.com/agentclientprotocol
-- `@agentclientprotocol/claude-agent-acp@0.74.0` (workspace override resolves `@anthropic-ai/claude-agent-sdk@0.3.261`; adapter pin `0.3.257`) — https://github.com/agentclientprotocol/claude-agent-acp
+- `@agentclientprotocol/claude-agent-acp@0.75.1` (workspace override resolves `@anthropic-ai/claude-agent-sdk@0.3.265`; adapter pin `0.3.257`) — https://github.com/agentclientprotocol/claude-agent-acp
 - `@automatalabs/codex-acp` (workspace fork of `@agentclientprotocol/codex-acp` at `packages/codex-acp`, patch baked into dist) — upstream: https://github.com/agentclientprotocol/codex-acp
 - `@automatalabs/pi-acp` (Pi ACP server; workspace-lockstep built-in dependency, exact version stamped at publish) — `packages/pi-acp`
 - OpenCode (`opencode acp`) — https://opencode.ai

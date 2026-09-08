@@ -1,4 +1,9 @@
-export const FIXTURE_PI_PIN = "0.85.0";
+export const FIXTURE_PI_PIN = "0.85.1";
+// 2026-09-08 bump 0.85.0 -> 0.85.1: auth-guidance.js, agent-session.js, and pi-ai
+// dist/utils/{retry,overflow,error-body,provider-retry}.js are byte-identical between
+// the installed published packages. Captured guidance and pause/retry classifications stay
+// unchanged. The local SDK no longer imports the experimental remote harness, so its old
+// pi-server packaging workaround is removed; supported session/config APIs remain unchanged.
 // 2026-09-04 bump 0.84.4 -> 0.85.0: re-verified auth-guidance.js and both agent-session
 // authentication templates against the published dists; all captured guidance is unchanged.
 // pi-ai overflow/error-body/provider-retry.js are byte-identical. retry.js only omits the
