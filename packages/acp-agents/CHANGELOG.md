@@ -1,5 +1,18 @@
 # @automatalabs/acp-agents
 
+## 1.2.0
+
+### Minor Changes
+
+- b098a93: Update Claude ACP to 0.75.1 with Claude Agent SDK 0.3.265, including faster session loading, restored message-specific forks, compaction tool lifecycle events, and persistent shell working directories across turns. Update Pi to 0.85.1 for the refreshed model catalog and prompt-cache fixes, and remove the obsolete pi-server dependency now that the local SDK excludes experimental remote harness code. Re-verify provider error fixtures and keep backend freshness metadata aligned with the shipped runtimes.
+
+### Patch Changes
+
+- Updated dependencies [b098a93]
+- Updated dependencies [b098a93]
+  - @automatalabs/codex-acp@2.4.2
+  - @automatalabs/pi-acp@0.7.0
+
 ## 1.1.3
 
 ### Patch Changes
