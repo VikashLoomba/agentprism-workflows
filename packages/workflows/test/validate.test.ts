@@ -964,7 +964,7 @@ return await agent("must wait for approval");`;
     let liveCalls = 0;
     const manager = new WorkflowManager({
       cwd: root, persistenceRoot: root,
-      agent: { async run() { liveCalls++; return "unexpected live work"; } },
+      agent: { async run() { liveCalls++; throw new Error("unexpected live work"); } },
     });
     assert.equal(manager.listRuns().length, 0);
     const live = await manager.runSync(script);
