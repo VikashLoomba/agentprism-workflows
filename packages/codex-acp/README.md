@@ -12,6 +12,7 @@ This package is a fork of [`agentclientprotocol/codex-acp`](https://github.com/a
 
 - ChatGPT, API key, and client-provided custom gateway authentication.
 - Model, reasoning effort, fast mode, approval, and sandbox mode configuration.
+- Concrete recommended model and reasoning-effort values through the opt-in [AIR recommended config values](docs/recommended-config-values-extension.md) capability.
 - Text prompts, embedded context, images, resource links, and additional workspace directories.
 - Turn-level structured output: a JSON Schema on the prompt's `_meta.outputSchema` constrains the final assistant message (fork extension, see below).
 - Per-session base and developer instruction overrides via request `_meta` (fork extension, see below).
@@ -46,6 +47,16 @@ The npm package includes a compatible `@openai/codex` dependency. Set `CODEX_PAT
 
 ```bash
 CODEX_PATH=/path/to/codex npx -y @automatalabs/codex-acp
+```
+
+To try changes that have landed on `main` but are not released yet, install from the
+`preview` channel. Pushes to `main` trigger preview publishing without waiting
+for CI or release-please; release commits are excluded, and newer pushes can
+replace queued previews. See
+[docs/RELEASES.md](docs/RELEASES.md#preview-releases).
+
+```bash
+npx -y @agentclientprotocol/codex-acp@preview
 ```
 
 ## Authentication
