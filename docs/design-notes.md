@@ -255,9 +255,9 @@ All versions below were re-verified from the installed workspace dependency grap
   client/connection helpers). This is what your orchestrator uses to *speak ACP as a client*.
   Ref: https://agentclientprotocol.com · https://github.com/agentclientprotocol
 
-- **`@agentclientprotocol/claude-agent-acp@0.75.1`** — ACP server wrapping Claude.
+- **`@agentclientprotocol/claude-agent-acp@0.76.0`** — ACP server wrapping Claude.
   Bin: `claude-agent-acp` (`npx @agentclientprotocol/claude-agent-acp`). Author: Zed Industries.
-  Resolves **`@anthropic-ai/claude-agent-sdk@0.3.266`** through the workspace override — the
+  Resolves **`@anthropic-ai/claude-agent-sdk@0.3.267`** through the workspace override — the
   adapter itself exact-pins `0.3.257`, so the override lifts the runtime to npm `latest`.
   Adapter 0.71–0.73 adds model-aware modes, per-model usage metadata, native subagent/task
   reporting, message-specific forks, and session titles. AgentPrism gives engine-owned Claude
@@ -644,7 +644,7 @@ export type PromptRequest = {
 // :213   ToolCallContent = Content | Diff | Terminal      — no structuredContent
 ```
 
-### 6.2 Claude — `@agentclientprotocol/claude-agent-acp@0.75.1` → `@anthropic-ai/claude-agent-sdk@0.3.266`
+### 6.2 Claude — `@agentclientprotocol/claude-agent-acp@0.76.0` → `@anthropic-ai/claude-agent-sdk@0.3.267`
 
 **Supported, session-scoped, via the `_meta.claudeCode` vendor extension.**
 
@@ -828,7 +828,7 @@ private capability namespace or backend-native structured hook.
 
 For both backends, a tool's `structuredContent` flows back to **the model**, not to your
 orchestrator. The SDK's in-process `tool()` helper exposes **no `outputSchema`**
-(`claude-agent-sdk@0.3.266 sdk.d.ts:8667`, `:4670`). The only client-capturable tool signal is the
+(`claude-agent-sdk@0.3.267 sdk.d.ts:8676`, `:4670`). The only client-capturable tool signal is the
 tool's **inputSchema** (the *args* the model passes when it calls a client-hosted tool). So
 schema-conformance for a subagent **result** should use the turn/session output format, not a
 tool.
@@ -1083,7 +1083,7 @@ resurrect a snapshot or sidecar after the run was removed.
 **Packages (verified versions, 2026-09-02):**
 - `@modelcontextprotocol/{client,server,node}@2.0.0` (dual-era MCP shell); `@modelcontextprotocol/sdk@1.30.0` remains on separate ACP embedded-client boundaries — https://github.com/modelcontextprotocol/typescript-sdk
 - `@agentclientprotocol/sdk@1.4.0` — https://github.com/agentclientprotocol
-- `@agentclientprotocol/claude-agent-acp@0.75.1` (workspace override resolves `@anthropic-ai/claude-agent-sdk@0.3.266`; adapter pin `0.3.257`) — https://github.com/agentclientprotocol/claude-agent-acp
+- `@agentclientprotocol/claude-agent-acp@0.76.0` (workspace override resolves `@anthropic-ai/claude-agent-sdk@0.3.267`; adapter pin `0.3.257`) — https://github.com/agentclientprotocol/claude-agent-acp
 - `@automatalabs/codex-acp` (workspace fork of `@agentclientprotocol/codex-acp` at `packages/codex-acp`, patch baked into dist) — upstream: https://github.com/agentclientprotocol/codex-acp
 - `@automatalabs/pi-acp` (Pi ACP server; workspace-lockstep built-in dependency, exact version stamped at publish) — `packages/pi-acp`
 - OpenCode (`opencode acp`) — https://opencode.ai
