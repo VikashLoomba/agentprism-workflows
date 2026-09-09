@@ -1,5 +1,11 @@
 # @automatalabs/pi-acp
 
+## 0.8.0
+
+### Minor Changes
+
+- 954d1be: Advertise discovery preferences from merged Pi enabledModels settings using Pi's native pattern resolver, including ordered available model IDs and unmatched patterns. Preserve the complete supported model catalog and refresh preference metadata when configuration changes.
+
 ## 0.7.0
 
 ### Minor Changes
