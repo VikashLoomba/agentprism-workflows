@@ -71,6 +71,9 @@ test(
         retryDelay: 50,
       });
     });
+    // A cold Chrome on a loaded CI runner can take well over 15 s before it prints its
+    // DevTools line (it failed on main with empty stderr); allow 60 s of the test's 120 s
+    // budget, and fail fast if the browser exits before exposing CDP.
     const port = await new Promise<number>((accept, reject) => {
       let output = "";
       const timeout = setTimeout(
@@ -78,8 +81,12 @@ test(
           reject(
             new Error(`Chrome did not expose CDP: ${output.slice(-1000)}`),
           ),
-        15_000,
+        60_000,
       );
+      browser.once("exit", (code, signal) => {
+        clearTimeout(timeout);
+        reject(new Error(`Chrome exited (${code ?? signal}) before exposing CDP: ${output.slice(-1000)}`));
+      });
       browser.stderr!.on("data", (chunk) => {
         output += String(chunk);
         const match = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)/.exec(
