@@ -2,8 +2,8 @@
 
 **Status:** replay substrate implemented · scoring/report UX next · **Updated:** 2026-07-15
 
-The isolation substrate contract (reviewed baseline) lives in
-[`docs/specs/evals-isolation-spec.md`](../specs/evals-isolation-spec.md). Propagation mode is
+The original isolation-substrate design record is archived at
+[`docs/archive/specs/evals-isolation-spec.md`](../archive/specs/evals-isolation-spec.md). Propagation mode is
 available today through journal resume, and isolation mode is implemented through `runIsolation`,
 `createReplayRunner`, the per-call manifest, and `ReplayReport`. The next roadmap stage is the evals
 harness itself: scoring, repetition/model matrices, vitest-evals integration, and report UX that

@@ -34,7 +34,7 @@ implementation). If you work only in agentprism-workflows, here is the minimum c
 - The harness is an **orchestration-only conversational agent**: its root LLM has exactly one
   tool — evaluating JavaScript in a persistent, sandboxed QuickJS-in-WASM VM. Worker agents
   (with filesystem/shell tools) do all real-world execution; the root only orchestrates them
-  through promise-returning primitives in the VM. The concept is specified in three frozen
+  through promise-returning primitives in the VM. The concept was specified in three
   design documents:
   - [`orchestration-only-repl-harness.md`](/home/vikash/agentprism-harness/orchestration-only-repl-harness.md)
     — the platform-independent concept (the primary read; ~400 lines).
@@ -98,7 +98,7 @@ over nearly wholesale, re-based onto this monorepo's artifacts:
 | typescript-host.md says | REPL orchestrator uses |
 |---|---|
 | [quickjs-wasi](https://github.com/vercel-labs/quickjs-wasi) as the full shim tier (eval, job drain, name-keyed host callbacks, snapshot/restore, memory caps, interrupts) | same — quickjs-wasi as-is, **including the npm package's shipped `quickjs.wasm` binary**. The harness builds its own binary for cross-host snapshot exchange; this server deliberately does not (§Snapshots) |
-| pi-agent-core + pi-ai as the agent runtime | **[`acp-agents`](../../packages/acp-agents)** — subagents are ACP sessions against any backend in the [registry](../specs/backend-registry-spec.md) (claude, codex, pi, opencode, custom), with the existing model-routing grammar |
+| pi-agent-core + pi-ai as the agent runtime | **[`acp-agents`](../../packages/acp-agents)** — subagents are ACP sessions against any backend in the [registry](../../packages/acp-agents/src/registry.ts) (claude, codex, pi, opencode, custom), with the existing model-routing grammar |
 | root = an in-process `Agent` holding one eval tool | root = the client's agent holding this server's `repl` tool |
 | host serves the conversation over ACP | host serves MCP; ACP is the *downward* protocol to subagents |
 | build surface: broker with call-ID store, CDP-style previewer, `console.log` interception, guest library injection, snapshot storage | the identical list — this is this package's build surface |

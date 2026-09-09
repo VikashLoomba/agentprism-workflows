@@ -1,6 +1,6 @@
 # Run events: typed contract & durable event log
 
-**Status:** implementing · **Contract:** frozen · **Updated:** 2026-07-15
+**Status:** implementing · **Updated:** 2026-07-15
 
 A run already emits a rich in-process event stream — `WorkflowManager` extends `EventEmitter`
 and forwards every engine callback (`log`, `phase`, `agentStart`, `agentEnd`, `tokenUsage`,
@@ -8,10 +8,10 @@ and forwards every engine callback (`log`, `phase`, `agentStart`, `agentEnd`, `t
 bridges live ACP session updates (message chunks, tool calls, usage) as `agentEvent`. What's
 missing was a **contract** and a **durable form**: the events were untyped strings over
 `EventEmitter`, consumers hand-rolled payload types, ACP deltas could not join directly to an
-`agent()` call, and another process had no tailable source. The contract is now frozen in
-[`docs/specs/run-events-spec.md`](../specs/run-events-spec.md), and its staged implementation is in
-progress. The specification—not this roadmap summary—is authoritative for event shapes, ordering,
-durability, compatibility, and semver.
+`agent()` call, and another process had no tailable source. The original design record is archived at
+[`docs/archive/specs/run-events-spec.md`](../archive/specs/run-events-spec.md). The code and
+[`docs/api.md`](../api.md) describe the current event shapes, ordering, durability, and
+compatibility.
 
 ## Direction
 
@@ -31,7 +31,7 @@ durability, compatibility, and semver.
    server, an OTel exporter, an editor extension, a process supervisor) and consume the same
    seam.
 
-The formerly open choices are frozen for v1: the per-event persistence policy is fixed, transcript
+The formerly open choices were settled for v1: the per-event persistence policy is fixed, transcript
 traffic remains relay-only, records are bounded while the complete file follows run retention with
 no rotation/TTL, every JSONL line carries schema version 1, and the existing `onProgress` callback
 remains compatible alongside typed events.

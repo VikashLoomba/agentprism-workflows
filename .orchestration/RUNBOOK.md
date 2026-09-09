@@ -6,7 +6,7 @@ For current development, use the repository commands documented in [`CONTRIBUTIN
 
 ## Historical workflow chain
 
-The workflows live in [`.claude/workflows`](../.claude/workflows). Their durable handoffs live beside this runbook.
+The workflow scripts live in [`workflows/`](workflows/) beside this runbook, next to their durable handoffs. They are no longer exposed as saved Claude Code workflows.
 
 | Stage | Workflow file | Durable handoff | Historical purpose |
 |---|---|---|---|
@@ -19,7 +19,7 @@ The workflows live in [`.claude/workflows`](../.claude/workflows). Their durable
 | 5 | `acp-build-phase5-completeness.js` | `phase5-completeness.json` | Audit API and feature completeness. |
 | 6 | `acp-build-phase6-harden.js` | `phase6-harden.json` | Harden failure paths and release quality. |
 | Publish | `publish-prep.js` | `publish-prep.json` | Prepare the package set for publication. |
-| Auth | `acp-auth-implementation.js` | *(run journal only)* | Implement the authentication design recorded in `docs/specs/acp-auth-spec.md`. |
+| Auth | `acp-auth-implementation.js` | *(run journal only)* | Implement the authentication design recorded in `docs/archive/specs/acp-auth-spec.md`. |
 
 `ground-truth.json` was authoritative for the initial build; its top-level `corrections` block overrode conflicting `findings` or `readiness` entries. It should not be treated as a current package inventory or dependency manifest.
 
@@ -28,10 +28,10 @@ The workflows live in [`.claude/workflows`](../.claude/workflows). Their durable
 Validate a script before any replay:
 
 ```bash
-npx @automatalabs/workflows validate .claude/workflows/acp-build-phase1-freeze.js --args '{}'
+npx @automatalabs/workflows validate .orchestration/workflows/acp-build-phase1-freeze.js --args '{}'
 ```
 
-The MCP `workflow` tool accepts the **raw JavaScript source** in its `script` input. It does not resolve a saved workflow name. SDK callers may read a saved file themselves, call `openWorkflowDir(".claude/workflows").read(name)`, or pass the directory view to `runDynamicWorkflow(name, { workflows: view })`.
+The MCP `workflow` tool accepts the **raw JavaScript source** in its `script` input. It does not resolve a saved workflow name. SDK callers may read a saved file themselves, call `openWorkflowDir(".orchestration/workflows").read(name)`, or pass the directory view to `runDynamicWorkflow(name, { workflows: view })`.
 
 Runs return a `runId`. A paused run can be resumed with the same script plus `resumeFromRunId`; completed agents are recovered from the persisted journal when their deterministic definitions still match. Authentication pauses return `reason: "auth_required"` (persisted as the run's pause reason): inspect status, complete authentication out of band — the backend's own CLI login, or the SDK runner's auth APIs (the MCP server registers no auth tools) — then resume the original `runId`.
 
