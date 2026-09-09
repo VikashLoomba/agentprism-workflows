@@ -1,5 +1,18 @@
 # @automatalabs/workflow-engine
 
+## 3.0.0
+
+### Major Changes
+
+- 954d1be: Require actual effective model routes for strict workflows and remove positional host-selected agent configuration maps. Authored routes, modes, and options remain authoritative for branching and concurrent calls, including calls that mock validation did not observe. Aggregator browse selectors cannot dispatch agents.
+
+  Replace format-2 routing admissions with format 3, snapshot named-agent definitions and tier settings for same-run continuation, and record effective optional configuration beside each actual call identity. Old positional admissions remain inspectable but cannot continue or seed execution. Hosts may enrich missing-route errors with discovery diagnostics without choosing a route. The SDK's non-strict default routing remains available.
+
+### Patch Changes
+
+- Updated dependencies [954d1be]
+  - @automatalabs/shared-types@2.1.0
+
 ## 2.0.0
 
 ### Major Changes

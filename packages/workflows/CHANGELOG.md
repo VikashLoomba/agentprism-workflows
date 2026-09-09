@@ -1,5 +1,25 @@
 # @automatalabs/workflows
 
+## 5.0.0
+
+### Major Changes
+
+- 954d1be: Require actual effective model routes for strict workflows and remove positional host-selected agent configuration maps. Authored routes, modes, and options remain authoritative for branching and concurrent calls, including calls that mock validation did not observe. Aggregator browse selectors cannot dispatch agents.
+
+  Replace format-2 routing admissions with format 3, snapshot named-agent definitions and tier settings for same-run continuation, and record effective optional configuration beside each actual call identity. Old positional admissions remain inspectable but cannot continue or seed execution. Hosts may enrich missing-route errors with discovery diagnostics without choosing a route. The SDK's non-strict default routing remains available.
+
+### Minor Changes
+
+- 954d1be: Probe ACP configuration catalogs concurrently with per-probe deadlines, shared cancellation, and stable request order. Preserve healthy results when other probes time out. Add bounded authoring summaries with full catalog counts, Pi enabledModels preferences, explicit unavailable providers, and OpenCode direct models plus browse-only aggregator groups. Preserve full catalogs and exact-model discovery for execution configuration.
+
+### Patch Changes
+
+- Updated dependencies [954d1be]
+  - @automatalabs/workflow-engine@3.0.0
+  - @automatalabs/shared-types@2.1.0
+  - @automatalabs/repl-engine@0.4.27
+  - @automatalabs/acp-agents@1.2.3
+
 ## 4.0.0
 
 ### Major Changes
