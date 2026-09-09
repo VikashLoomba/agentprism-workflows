@@ -1502,8 +1502,10 @@ export function createWorkflowServer(
               ...(outcome === undefined ? {} : { outcome }),
             }, inspectionRetentionMetadata(manager, input.runId, status));
             const informational = ["running", "terminal", "checkpoint-required", "auth-required"].includes(started.reason);
+            const requiresFreshRun = ["admission-missing", "admission-invalid", "admission-uncovered"].includes(started.reason);
             return { structuredContent: { ...projected },
               content: [{ type: "text", text: `Workflow run ${input.runId} was not continued: ${started.reason}.` +
+                (requiresFreshRun ? " Please start a fresh run." : "") +
                 (started.resolvedCheckpoints?.length ? `\n${JSON.stringify(started.resolvedCheckpoints)}` : "") }], isError: !informational };
           }
           if (!started.duplicate) {

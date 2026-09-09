@@ -41,6 +41,26 @@ return [first, second];`, undefined, { requireAgentConfiguration: true, agentCon
   }
 });
 
+test("another manager's whole stop supersedes a cached pause in the same generation", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "workflow-owner-stop-"));
+  const persistenceRoot = join(cwd, "store");
+  const runner = { async run() { return "unused"; } };
+  const first = new WorkflowManager({ cwd, persistenceRoot, agent: runner });
+  const second = new WorkflowManager({ cwd, persistenceRoot, agent: runner });
+  try {
+    const paused = await first.runSync('export const meta = { name: "owner-stop", description: "same-generation stop" }; return await checkpoint("Continue?");',
+      undefined, { requireAgentConfiguration: true, agentConfigurations: {} });
+    assert.equal(paused.status, "paused");
+    const originalGeneration = first.getRun(paused.runId)?.continuation?.generation;
+    assert.equal(second.stopPersistedRun(paused.runId).outcome, "stopped");
+    assert.equal(first.getPersistence().load(paused.runId)?.continuation?.generation, originalGeneration);
+    assert.equal(first.getRun(paused.runId), undefined, "a same-generation foreign stop replaces the old pause");
+    assert.equal(first.inspectRun(paused.runId)?.status, "aborted");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("non-journaled SDK runs retain their in-memory inspection after completion", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "workflow-ephemeral-inspection-"));
   try {

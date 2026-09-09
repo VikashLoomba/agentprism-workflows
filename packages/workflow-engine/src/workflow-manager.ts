@@ -3721,6 +3721,15 @@ export class WorkflowManager extends EventEmitter {
     if (managed.lease && this.persistence.validateRunLease?.(managed.lease) !== false) return managed;
     const persisted = this.persistence.load(runId);
     if (!persisted) return managed;
+    // A failed terminal save leaves this generation's earlier active snapshot on disk.
+    // It is not evidence of another owner: preserve the settled in-memory outcome while
+    // exact-result resources remain gated on a successful durable completion. A new
+    // continuation generation or a durable foreign stop still supersedes this cache.
+    if (
+      managed.executionSettled &&
+      (persisted.status === "pending" || persisted.status === "running") &&
+      (persisted.continuation?.generation ?? 0) === (managed.continuation?.generation ?? 0)
+    ) return managed;
     if (
       persisted.status !== managed.status ||
       (persisted.continuation?.generation ?? 0) !== (managed.continuation?.generation ?? 0)

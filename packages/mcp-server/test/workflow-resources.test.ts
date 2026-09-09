@@ -258,7 +258,14 @@ test("a failed terminal snapshot save never advertises exact-result availability
     const runId = String(structured(completed)?.runId);
     assert.equal(structured(completed)?.accepted, true);
     await waitUntil(() => manager.getRun(runId)?.executionSettled === true, "failed final save must settle live execution");
+    const settled = manager.getRun(runId)!;
+    assert.equal(settled.status, "completed");
+    assert.equal(fault.durable.load(runId)?.status, "running", "the failed terminal write leaves an earlier active snapshot");
+    assert.equal(fault.durable.load(runId)?.continuation?.generation, settled.continuation?.generation,
+      "an older snapshot in the same generation must not be mistaken for a different owner");
+    assert.equal(manager.inspectRun(runId)?.status, "completed");
     const observed = await client.callTool({ name: "workflow", arguments: { action: "status", runId } });
+    assert.equal(observed.isError, false);
     assert.equal(structured(observed)?.status, "completed");
     assert.equal(structured(observed)?.resultUri, undefined);
     await new Promise((resolve) => setImmediate(resolve));

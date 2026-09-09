@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "../src/mcp-apps.js";
+import { runAndObserve, structured } from "./_harness.js";
 
 const distEntry = resolve(fileURLToPath(import.meta.url), "../../dist/entry.js");
 const SCRIPT = `export const meta = { name: "stdio-modern", description: "stdio modern" }; return 42;`;
@@ -35,9 +36,17 @@ test("--in-process uses serveStdio to serve modern and capability-project the Ap
   try {
     assert.equal(capable.client.getProtocolEra(), "modern");
     const tools = await capable.client.listTools();
-    assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), ["repl", "workflow", "workflow-events", "workflow-runs"]);
-    const result = await capable.client.callTool({ name: "workflow", arguments: { action: "run", script: SCRIPT } });
-    assert.equal((result.structuredContent as Record<string, unknown> | undefined)?.status, "completed");
+    assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), [
+      "repl", "workflow", "workflow-events", "workflow-notifications", "workflow-runs", "workflow_monitor",
+    ]);
+    const status = structured(await runAndObserve(capable.client, { script: SCRIPT }))!;
+    assert.equal(status.status, "completed");
+    assert.equal((status.outcome as Record<string, unknown>).status, "completed");
+    assert.equal(status.resultUri, `workflow://runs/${status.runId}/result`);
+    const result = await capable.client.readResource({ uri: status.resultUri as string });
+    const content = result.contents[0];
+    assert.ok(content && "text" in content && typeof content.text === "string");
+    assert.equal(JSON.parse(content.text), 42);
   } finally {
     await capable.close();
   }
