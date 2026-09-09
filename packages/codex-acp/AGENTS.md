@@ -12,6 +12,7 @@ This file supplements the repository-wide [`../../AGENTS.md`](../../AGENTS.md). 
 - `src/permissions/` and `src/subagents/` — permission and child-session integration.
 - `dist/` — generated package output. Do not hand-edit it.
 - `docs/` and `readme-dev.md` — package-specific protocol and development documentation.
+- `scripts/` — upstream release tooling (`release-preflight.sh`, `next-preview-version.mjs` and its `*.test.mjs`), kept outside `src/`; not used by this monorepo, whose releases run through root Changesets.
 
 Fork-owned integration surfaces include turn-level `outputSchema` forwarding and AgentPrism ACP extensions. Review the dependency surface map and Codex sync runbook in root `CONTRIBUTING.md` before changing or merging upstream code in `CodexAcpServer`, `CodexEventHandler`, approvals, steering, goals, or loaded-turn handling.
 
