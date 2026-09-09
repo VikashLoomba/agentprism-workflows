@@ -1,5 +1,11 @@
 # @automatalabs/acp-agents
 
+## 1.2.1
+
+### Patch Changes
+
+- 6005ed8: Update the wrapped Claude Agent SDK runtime to 0.3.266 and verify the ACP adapter against the current published runtime.
+
 ## 1.2.0
 
 ### Minor Changes
