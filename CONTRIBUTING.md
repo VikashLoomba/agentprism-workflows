@@ -61,6 +61,8 @@ Design from first principles for the request at hand; the rule and its constrain
 - `packages/workflows/test/isolation.live.e2e.test.ts` drives real concurrent-worktree isolation through the default backend; `AGENTPRISM_ISOLATION_E2E_MODEL` may reroute its isolated leg.
 - `packages/pi-acp/test/live.e2e.test.ts` drives Pi structured output, a real HTTP MCP tool round-trip, and tracked-bash stop/reap; it additionally requires `AGENTPRISM_PI_E2E_MODEL` and that model's provider key.
 
+One more test is opt-in for a different reason: `packages/mcp-server/test/ui-monitor-host.test.ts` drives the real run-monitor UI in a real Chrome over CDP. A browser's cold start on a shared CI runner is not deterministic, so the default suite skips it; set `AGENTPRISM_UI_E2E=1` to run it (and `AGENTPRISM_UI_CHROME` for a nonstandard install). The pre-push hook runs it, so it still gates every push from a developer machine.
+
 Run the pre-push live backend and steering gate explicitly with real auth:
 
 ```bash
