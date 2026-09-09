@@ -21,11 +21,11 @@ test("a concurrent acceptance winner cannot consume the retrying daemon's capaci
     const found = originalFind(operation);
     if (!interleaved) {
       interleaved = true;
-      winnerDriver.accept(input, false);
+      winnerDriver.accept(input);
     }
     return found;
   };
-  const accepted = loserDriver.accept(input, false);
+  const accepted = loserDriver.accept(input);
   try {
     assert.equal(accepted.duplicate, true);
     assert.equal(loser.activeRuns.activeCount(), 0, "a duplicate receipt does not create a local reservation or hold");
@@ -50,14 +50,14 @@ test("status retries cold preparation after an occupied capacity slot becomes av
     'export const meta = { name: "cold preparation", description: "recover when capacity frees" }; return 42;' };
   const cold = old.manager.prepareRun(input.script, undefined, {
     operation: workflowOperation(input),
-    preparation: { format: 1, state: "preparing", data: { canConfigureAgents: false, approvedKeys: [], responses: {} }, responses: {} },
+    preparation: { format: 1, state: "preparing", data: { approvedKeys: [], responses: {} }, responses: {} },
   });
   old.manager.getPersistence().releaseRunLease(old.manager.getRun(cold.runId)!.lease!);
   const daemon = await startDaemon(runner);
   const current = daemon.projects.getOrCreate(projectDir);
   const driver = workflowLifecycle(current, runner);
   const occupied = Array.from({ length: 4 }, () => driver.accept({ action: "run", requestId: randomUUID(), script:
-    'export const meta = { name: "waiting setup", description: "occupy capacity", backends: { custom: { command: "custom-acp" } } }; return 1;' }, false).runId);
+    'export const meta = { name: "waiting setup", description: "occupy capacity", backends: { custom: { command: "custom-acp" } } }; return 1;' }).runId);
   const connection = await connectHttp(daemon.url, { listTools: true });
   try {
     await waitUntil(() => occupied.every((runId) => current.manager.getPersistence().load(runId)?.preparation?.state === "input-required"), "occupied setup slots");

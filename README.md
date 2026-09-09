@@ -48,26 +48,27 @@ From an ask like that, the agent picks the primitives — `gate()` fix-loops wit
 
 Scripts run in a deterministic realm and every `agent()` and `checkpoint()` result is journaled.
 MCP `{ action:"resume", runId }` continues that exact run ID with its persisted script, args,
-canonical host-selected agent configuration, journal, event stream, cumulative usage, and durable
+immutable routing inputs, journal, event stream, cumulative usage, and durable
 checkpoint decisions. It never creates a child execution or accepts edited script/args replay.
 Exact journal hits rebuild state without current provider usage. Provider quota and authentication
 walls pause the run; an eligible interrupted ACP call can reattach to the recorded session and
 charge only new usage.
 
-The host atomically persists a versioned effective agent-configuration snapshot at admission and
-reuses it without re-elicitation. Uncovered occurrences fail closed and stay uncovered. Checkpoint
-answers are first-writer-wins under the run lease: identical repeats are idempotent and conflicts
-cannot replace the durable first answer.
+The host atomically persists format-3 immutable routing admission before live dispatch. Each actual
+call must resolve a model; configured calls on branches unseen by mock validation are allowed.
+Continuation reuses captured tiers and named-agent definitions without file drift. Old admissions
+remain inspectable but cannot execute. Checkpoint answers are first-writer-wins under the run lease:
+identical repeats are idempotent and conflicts cannot replace the durable first answer.
 
 Compact reader/experiment fan-out:
 
 ```js
 const [audit, experiment] = await parallel([
   () => agent("Audit src/api without changing files.", {
-    label: "audit:api",
+    label: "audit:api", model: "codex",
   }),
   () => agent("Try the worker fix in isolation; return a unified diff.", {
-    label: "try:worker", isolation: "worktree",
+    label: "try:worker", model: "codex", isolation: "worktree",
   }),
 ]);
 ```
@@ -279,15 +280,12 @@ killing the process; add `--in-process` to the args for the old single-process b
 
 The server is bundled in the `@automatalabs/workflows` tarball, so this needs no separate
 server installation. The independently published `@automatalabs/mcp-server` package and its
-`agentprism-workflow` bin remain available as an alternative. When the MCP client advertises Apps or form
-elicitation, an accepted run with unresolved agent models exposes one durable setup request covering
-only those calls: choose their provider/model and optional advertised mode/config, with phase title,
-description, and bounded credential-redacted task previews. Explicit and inherited models are
-preserved, including backend-only specs; omitted optional mode/config fields do not trigger a form.
-The complete canonical configuration is preflighted and persisted before execution. Clients without
-form elicitation retain automatic default routing: with no `AGENTPRISM_DEFAULT_BACKEND`, a
-model-less call triggers zero-token readiness probes and pins one backend for that run. Set
-the environment variable only when you want an explicit operator default for those headless clients.
+`agentprism-workflow` bin remain available as an alternative. Every MCP client must configure an
+effective model for each actual agent call: directly, in a named-agent definition or resolved tier,
+or through phase routing or `meta.model`. Use a backend-only route such as `codex` to retain that
+backend's default model. Mode and config options remain optional. Missing routing fails with bounded
+live catalog guidance; there is no agent-configuration form or automatic backend selection. Explicit
+backend approval, checkpoints, and live permissions keep their existing interactions.
 
 From a source checkout, point at the built entry instead:
 
@@ -379,9 +377,15 @@ The config response preserves each harness's raw mode id, name, description, and
 implementation/review workflows select Claude `bypassPermissions` or Codex `agent` when advertised.
 Claude `auto` uses a model classifier and may request permission; it is not full-access autonomy.
 
+Config returns a compact `authoringSummary`: Claude/Codex's small catalogs, Pi's native
+`enabledModels` preferences intersected with authenticated models plus unmatched patterns, and
+OpenCode's direct models before explicitly classified aggregator browse groups (including OpenRouter, OpenCode, Hugging Face, and Bedrock). The current
+model is shown separately. Expand `openrouter/*` with `modelFilter`; browse selectors cannot dispatch.
+Use `modelSpecs` for exact-model option discovery. Partial probe failures preserve healthy catalogs.
+
 Run acceptance checks input/source structure and durably saves the script before slow preparation.
 Validation failure after acceptance remains a failed run; declined setup remains cancelled in history.
-No agent dispatch occurs before backend approval and canonical agent configuration are saved.
+No agent dispatch occurs before backend approval and format-3 immutable routing admission are saved.
 
 ```json
 { "action":"run", "requestId":"review-20260908-1", "projectDir":"/absolute/project", "script":"export const meta = { name: 'review', description: 'review', model: 'codex' }; return await agent('Review the repo');" }
@@ -499,7 +503,7 @@ return { applied: true, implementation };
 
 After the pause, send `{ "action":"resume", "requestId":"resume-1", "runId":"…", "checkpointReplies":{ "1":true } }`
 using the exact call index from `checkpointContext`. The response retains the same run ID. Its
-script, args, canonical agent configuration, journal, event stream, and cumulative usage remain
+script, args, immutable routing inputs, journal, event stream, and cumulative usage remain
 attached to that identity. The first strict-JSON checkpoint answer is durable before continuation;
 identical repeats are idempotent and later conflicts cannot replace it.
 
@@ -575,7 +579,7 @@ The backend is chosen per `agent()` call from the effective `model`/`tier` spec 
 
 - Split on the first `/`. If the first segment, ASCII-case-insensitively, is `claude`, `codex`, `opencode`, `pi`, or a registered custom backend name, route there and strip exactly that segment. Custom registrations take priority on a name collision.
 - A backend name alone (`claude`, `codex`, `opencode`, `pi`, or a custom name) selects no model, leaving that harness's configured default untouched.
-- Otherwise route the entire authored string, unchanged, to the effective default backend. In the SDK runner this is `AGENTPRISM_DEFAULT_BACKEND` (historical fallback `claude`). In the MCP server an explicitly present environment value wins; when truly unset, a model-less workflow performs zero-token readiness probes and pins one project default before validation/execution. `anthropic/…`, `openai/…`, bare `opus`, and bare `gpt-…` are not routing aliases.
+- Otherwise route the entire authored string, unchanged, to the effective default backend. In the SDK runner this is `AGENTPRISM_DEFAULT_BACKEND` (historical fallback `claude`). MCP requires an effective model and never auto-selects a backend for an unresolved call. `anthropic/…`, `openai/…`, bare `opus`, and bare `gpt-…` are not routing aliases.
 - When a model id remains, it is sent byte-for-byte through `session/set_config_option`: no catalog matching, case folding, bracket parsing, or fallback. Brackets, dots, and provider prefixes are ordinary id characters, and a harness rejection follows the existing agent-error path.
 
 Per-call `configOptions` extends that same verbatim rule to the rest of the harness's ACP session
@@ -646,7 +650,7 @@ Script-declared backends spawn commands on the host, so they are **inert until a
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `AGENTPRISM_DEFAULT_BACKEND` | unset | Explicit fallback backend when the model/tier doesn't imply one (`claude` \| `codex` \| `opencode` \| `pi` \| a registered custom name). MCP clients with Apps/form capability choose only calls with unresolved models before execution; other clients auto-select and pin a project default from zero-token readiness probes when this variable is absent. The SDK runner retains its historical Claude fallback. |
+| `AGENTPRISM_DEFAULT_BACKEND` | unset | Explicit fallback backend when the model/tier doesn't imply one (`claude` \| `codex` \| `opencode` \| `pi` \| a registered custom name). MCP requires an effective authored/inherited model and never uses this variable to fill a missing route. The SDK runner retains its historical Claude fallback. |
 | `AGENTPRISM_BACKENDS` | (none) | Custom ACP backends as JSON: `{"<name>": {"command": "…", "args": […], "env": {…}, "sessionMeta": {…}}}`. Programmatic `createAcpRunner({ backends })` wins per name. |
 | `AGENTPRISM_ALLOW_SCRIPT_BACKENDS` | (unset) | MCP server only: `1`/`true` approves **script-declared** `meta.backends` through an explicit environment opt-in. |
 | `AGENTPRISM_PERSISTENCE_ROOT` | `~/.agentprism/workflows` | Absolute root for persisted run state, logs, journals, and resume data. |

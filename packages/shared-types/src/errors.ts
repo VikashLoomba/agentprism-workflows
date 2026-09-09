@@ -28,7 +28,7 @@ export enum WorkflowErrorCode {
   SCRIPT_VALIDATION_ERROR = "SCRIPT_VALIDATION_ERROR",
   /** The workflow SCRIPT crashed at runtime: an uncaught throw or an unhandled promise
    *  rejection inside the script body. Distinct from WORKFLOW_ABORTED (someone cancelled the
-   *  run) and SCRIPT_VALIDATION_ERROR (the script never parsed). Non-recoverable: rerunning
+   *  run) and SCRIPT_VALIDATION_ERROR (invalid syntax or agent configuration). Non-recoverable: rerunning
    *  the same deterministic script crashes the same way. */
   SCRIPT_ERROR = "SCRIPT_ERROR",
   /** A schema agent never produced valid structured output (after repair + extraction). Non-recoverable. */

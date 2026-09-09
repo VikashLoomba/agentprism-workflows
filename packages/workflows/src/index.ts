@@ -127,17 +127,23 @@ export {
   formatHarnessConfigReport,
   buildHarnessModelsView,
   buildModelFilter,
+  buildHarnessConfigSummary,
+  formatHarnessConfigSummary,
 } from "./config.js";
 export type {
   ProbeHarnessConfigOptions,
   HarnessConfigReport,
   HarnessModelsView,
+  HarnessConfigSummary,
+  HarnessConfigSummaryEntry,
+  HarnessConfigSummaryModel,
+  HarnessConfigSummaryGroup,
 } from "./config.js";
 export type {
   WorkflowRunOptions,
+  WorkflowRoutingSnapshot,
   WorkflowRunLimitOptions,
   WorkflowAgentAttemptControl,
-  WorkflowAgentConfiguration,
   WorkflowAgentCallCancellation,
   WorkflowContinuationRefusalReason,
   WorkflowContinuationStart,

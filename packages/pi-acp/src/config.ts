@@ -1,5 +1,5 @@
 import type { SessionConfigOption } from "@agentclientprotocol/sdk";
-import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { resolveModelScopeWithDiagnostics, type AgentSession, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   clampThinkingLevel,
   getSupportedThinkingLevels,
@@ -13,6 +13,31 @@ export type ThinkingLevel = ModelThinkingLevel;
 
 /** Additive ACP metadata understood by AgentPrism's generic config validator. */
 export const CONFIG_OPTION_META_NAMESPACE = "@automatalabs/agentprism";
+
+export const MODEL_DISCOVERY_META_KEY = "@automatalabs/agentprism.modelDiscovery";
+
+export interface ModelDiscoveryPreferences {
+  source: "enabledModels";
+  preferred: string[];
+  unmatched: string[];
+}
+
+export async function modelDiscoveryPreferences(
+  enabledModels: string[] | undefined,
+  availableModels: readonly Model<Api>[],
+): Promise<ModelDiscoveryPreferences | undefined> {
+  if (!enabledModels?.length) return undefined;
+  // Pi's public resolver only reads getAvailable(). Bind it to the completed
+  // catalog being advertised so another provider refresh cannot make the
+  // shortlist disagree with the picker. Keep all pattern semantics in Pi.
+  const catalog = { getAvailable: async () => availableModels } as ModelRuntime;
+  const { scopedModels, diagnostics } = await resolveModelScopeWithDiagnostics(enabledModels, catalog);
+  return {
+    source: "enabledModels",
+    preferred: scopedModels.map(({ model }) => `${model.provider}/${model.id}`),
+    unmatched: diagnostics.filter(({ code }) => code === "no-match").map(({ pattern }) => pattern),
+  };
+}
 
 const SYNTHETIC_ALL_THINKING_MODEL = {
   reasoning: {},
@@ -51,7 +76,11 @@ export function thinkingLevelOption(session: AgentSession): SessionConfigOption 
   };
 }
 
-export function modelOption(session: AgentSession, availableModels: readonly Model<Api>[]): SessionConfigOption {
+export function modelOption(
+  session: AgentSession,
+  availableModels: readonly Model<Api>[],
+  preferences?: ModelDiscoveryPreferences,
+): SessionConfigOption {
   return {
     id: "model",
     name: "Model",
@@ -59,6 +88,7 @@ export function modelOption(session: AgentSession, availableModels: readonly Mod
     category: "model",
     currentValue: session.model ? `${session.model.provider}/${session.model.id}` : "",
     options: availableModels.map((model) => ({ value: `${model.provider}/${model.id}`, name: model.name })),
+    ...(preferences ? { _meta: { [MODEL_DISCOVERY_META_KEY]: preferences } } : {}),
   };
 }
 
@@ -68,7 +98,12 @@ export async function applyConfig(
   _availableModels: readonly Model<Api>[],
   configId: string,
   value: string | boolean,
-): Promise<{ configOptions: SessionConfigOption[]; availableModels: readonly Model<Api>[] }> {
+  enabledModels?: string[],
+): Promise<{
+  configOptions: SessionConfigOption[];
+  availableModels: readonly Model<Api>[];
+  preferences: ModelDiscoveryPreferences | undefined;
+}> {
   if (configId !== "thinkingLevel" && configId !== "model") {
     throw adapterError("unknown_config_option");
   }
@@ -83,10 +118,12 @@ export async function applyConfig(
       ? clampThinkingLevel(session.model, requested)
       : requested;
     const availableModels = [...await modelRuntime.getAvailable()];
+    const preferences = await modelDiscoveryPreferences(enabledModels, availableModels);
     session.setThinkingLevel(effective);
     return {
-      configOptions: [thinkingLevelOption(session), modelOption(session, availableModels)],
+      configOptions: [thinkingLevelOption(session), modelOption(session, availableModels, preferences)],
       availableModels,
+      preferences,
     };
   }
   const separator = value.indexOf("/");
@@ -96,6 +133,7 @@ export async function applyConfig(
   const availableModels = [...await modelRuntime.getAvailable()];
   const model = availableModels.find((candidate) => candidate.provider === provider && candidate.id === modelId);
   if (!model) throw adapterError("invalid_model");
+  const preferences = await modelDiscoveryPreferences(enabledModels, availableModels);
   try {
     await session.setModel(model);
   } catch (error) {
@@ -105,7 +143,8 @@ export async function applyConfig(
     throw error;
   }
   return {
-    configOptions: [thinkingLevelOption(session), modelOption(session, availableModels)],
+    configOptions: [thinkingLevelOption(session), modelOption(session, availableModels, preferences)],
     availableModels,
+    preferences,
   };
 }

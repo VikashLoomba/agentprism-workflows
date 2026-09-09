@@ -697,6 +697,12 @@ function projectCallRecord(
     ...(record.modelRequested === undefined
       ? {}
       : { modelRequested: projectText(record.modelRequested, state) }),
+    ...(record.modeRequested === undefined
+      ? {}
+      : { modeRequested: projectText(record.modeRequested, state) }),
+    ...(record.configOptionsRequested === undefined
+      ? {}
+      : { configOptionsRequested: projectConfigOptions(record.configOptionsRequested, state) }),
     ...(record.modelResolved === undefined
       ? {}
       : { modelResolved: projectText(record.modelResolved, state) }),

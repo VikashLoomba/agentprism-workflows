@@ -62,7 +62,7 @@ function runIdOf(result: ToolCallResult): string {
 }
 
 const TWO_AGENT_ASYNC = [
-  'export const meta = { name: "detached-review", description: "detached", phases: [{ title: "Explore" }, { title: "Review" }] };',
+  'export const meta = { model: "claude", name: "detached-review", description: "detached", phases: [{ title: "Explore" }, { title: "Review" }] };',
   'phase("Explore");',
   'log("exploration started");',
   'const first = await agent("first", { label: "explore" });',
@@ -193,10 +193,10 @@ test("the four-run registry includes preparation, admits retries at capacity, an
   const { client, dispose } = await connect(controlled.runner, { listTools: true });
   const acceptedIds: string[] = [];
   try {
-    const malformed = await runAndObserve(client, { script: 'export const meta = { name: "invalid", description: "invalid call" }; return agent("work", { unknownOption: true });' });
+    const malformed = await runAndObserve(client, { script: 'export const meta = { model: "claude", name: "invalid", description: "invalid call" }; return agent("work", { unknownOption: true });' });
     assert.equal(structured(malformed)?.status, "failed", "failed preparation releases capacity");
     const inputs = Array.from({ length: MAX_ACTIVE_RUNS }, (_, index) => ({ action: "run", requestId: randomUUID(),
-      script: `export const meta = { name: "blocked-${index}", description: "blocked" }; return await agent("${index}");` }));
+      script: `export const meta = { model: "claude", name: "blocked-${index}", description: "blocked" }; return await agent("${index}");` }));
     for (const input of inputs) {
       const accepted = await client.callTool({ name: "workflow", arguments: input });
       acceptedIds.push(runIdOf(accepted));
@@ -224,7 +224,7 @@ test("the four-run registry includes preparation, admits retries at capacity, an
 test("terminal outcomes survive repeated status and server restart, then missing/corrupt records use the exact error", async () => {
   const rawResult = { approved: false, findings: ["rollback", "race"] };
   const script = [
-    'export const meta = { name: "retained", description: "retained" };',
+    'export const meta = { model: "claude", name: "retained", description: "retained" };',
     'log("retained log");',
     'return await agent("result");',
   ].join("\n");
@@ -323,7 +323,7 @@ async function connectEliciting(runner: ReturnType<typeof makeRunner>): Promise<
 test("checkpoints pause independently of elicitation capability and auth pauses remain non-secret", async () => {
   const eliciting = await connectEliciting(makeRunner(() => "unused"));
   try {
-    const paused = await runAndObserve(eliciting.client, { script: 'export const meta = { name: "checkpoint", description: "checkpoint" }; return await checkpoint("ship?");' });
+    const paused = await runAndObserve(eliciting.client, { script: 'export const meta = { model: "claude", name: "checkpoint", description: "checkpoint" }; return await checkpoint("ship?");' });
     assert.equal(structured(paused)?.status, "paused");
     assert.equal(structured(paused)?.reason, "checkpoint_required");
     assert.equal(field(field(structured(paused)?.outcome, "checkpointContext"), "prompt"), "ship?");
@@ -348,7 +348,7 @@ test("checkpoints pause independently of elicitation capability and auth pauses 
       name: "workflow",
       arguments: {
         action: "run", requestId: randomUUID(),
-        script: 'export const meta = { name: "auth", description: "auth" }; return await agent("auth");',
+        script: 'export const meta = { model: "claude", name: "auth", description: "auth" }; return await agent("auth");',
       },
     });
     const awaited = await waitForRun(auth.client, runIdOf(accepted));
@@ -372,7 +372,7 @@ test("a long-lived server lazily reconciles crash residue for status and resume"
     sourceCalls++;
     return "cached";
   }));
-  const script = 'export const meta = { name: "stale", description: "stale" }; return await agent("cached");';
+  const script = 'export const meta = { model: "claude", name: "stale", description: "stale" }; return await agent("cached");';
   const source = await runAndObserve(first.client, { script });
   const sourceId = runIdOf(source);
   await first.dispose();
@@ -431,7 +431,7 @@ test("status preserves byte caps while returning a large authored outcome exactl
   const { client, dispose } = await connect(makeRunner(() => authored), { listTools: true });
   try {
     const script = [
-      'export const meta = { name: "large-status", description: "large" };',
+      'export const meta = { model: "claude", name: "large-status", description: "large" };',
       'for (let i = 0; i < 50; i++) log(`line-${i}-${"😀".repeat(1000)}`);',
       'return await agent("large", { label: "large-call" });',
     ].join("\n");

@@ -15,7 +15,7 @@ test("settled history yields to another owner's continuation even when both gene
     const initial = await first.runSync(`export const meta = { name: "owner-inspection", description: "same-run ownership" };
 const first = await checkpoint("First?");
 const second = await checkpoint("Second?");
-return [first, second];`, undefined, { requireAgentConfiguration: true, agentConfigurations: {} });
+return [first, second];`, undefined, { requireAgentConfiguration: true });
     assert.equal(initial.status, "paused");
     const cached = first.getRun(initial.runId);
     assert.ok(cached, "the originating SDK retains its own settled history");
@@ -49,7 +49,7 @@ test("another manager's whole stop supersedes a cached pause in the same generat
   const second = new WorkflowManager({ cwd, persistenceRoot, agent: runner });
   try {
     const paused = await first.runSync('export const meta = { name: "owner-stop", description: "same-generation stop" }; return await checkpoint("Continue?");',
-      undefined, { requireAgentConfiguration: true, agentConfigurations: {} });
+      undefined, { requireAgentConfiguration: true });
     assert.equal(paused.status, "paused");
     const originalGeneration = first.getRun(paused.runId)?.continuation?.generation;
     assert.equal(second.stopPersistedRun(paused.runId).outcome, "stopped");

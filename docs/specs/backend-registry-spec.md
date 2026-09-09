@@ -116,7 +116,12 @@ At module load, `builtins.ts` validates every row's `definition.id` equals its t
 
 The package root must newly export the values `BUILTIN_BACKENDS`, `BUILTIN_BACKEND_IDS`, `builtinBackend`, and `BUILTIN_PROTOCOL_COVERAGE`, and the types `BuiltinBackendDefinition`, `BuiltinBackendReleaseMetadata`, `BuiltinBackendId`, and `BuiltinProtocolCoverageRow`. The existing `BuiltinBackendId` import path through `packages/acp-agents/src/backend.ts` is preserved with a type-only re-export from `backends/builtins.ts`; the old union is deleted. Existing class, auth-profile, registry, protocol-coverage, and backend-type exports remain.
 
-The workflows package imports `BUILTIN_BACKEND_IDS` from `@automatalabs/acp-agents` and deletes its local `BUILTIN_HARNESSES`. `probeHarnessConfig` retains its existing composition: a non-empty `options.harnesses` is deduplicated and probed in caller order; otherwise the targets are `[...BUILTIN_BACKEND_IDS, ...registry.keys()]`, deduplicated in that order. It continues calling `ValidateProbeRunner.probeConfigOptions(target, { cwd })` once per target. `ValidateProbeRunner` is not widened with `listBackends()`. This keeps explicit harness filtering and the current test seam intact while deriving the default built-in set from the registry.
+The workflows package imports `BUILTIN_BACKEND_IDS` from `@automatalabs/acp-agents`.
+[Explicit agent routing](explicit-agent-routing.md) supersedes this record's original sequential
+probe seam: `probeHarnessConfig` now supports bounded concurrency, cancellation, exact `modelSpecs`,
+and host-runner `listBackends()` discovery. Explicit harness filtering remains supported and results
+retain request order. Without explicit targets, a host runner's list takes precedence; otherwise the
+default targets derive from `BUILTIN_BACKEND_IDS` and the custom registry.
 
 ### 2.4 Removing duplicated runner decisions
 

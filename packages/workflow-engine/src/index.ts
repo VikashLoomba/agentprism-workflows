@@ -8,8 +8,7 @@ export {
   parseWorkflowScript,
   workflowMayUseDefaultModel,
   hashCheckpointInputs,
-  canonicalizeWorkflowAgentConfigurations,
-  hashWorkflowAdmissionSelection,
+  hashWorkflowAdmissionRouting,
   resolveWorkflowRunLimits,
   CALL_PATH_FORMAT,
   CALL_INPUTS_FORMAT,
@@ -19,7 +18,6 @@ export {
   type WorkflowRunOptions,
   type WorkflowCallbackContext,
   type WorkflowAgentAttemptControl,
-  type WorkflowAgentConfiguration,
   type WorkflowAgentOptions,
   type AgentOptions,
   type CheckpointOptions,
@@ -332,3 +330,5 @@ export type {
   WorkflowReplayEligibility,
   TokenUsage,
 } from "@automatalabs/shared-types";
+
+export type { WorkflowRoutingSnapshot } from "./workflow-routing.js";

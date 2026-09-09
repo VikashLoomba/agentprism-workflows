@@ -381,6 +381,7 @@ export class PiAcpAgent {
         mcpBridge: bridge,
         failedMcpResults: bridge.failedResults,
         availableModels: [],
+        settingsManager,
         childRegistry,
         lifecycleController: lifecycle,
         onWedged: (sessionId, session, cleanupRetryRequired) =>
@@ -389,7 +390,7 @@ export class PiAcpAgent {
       bindingState.wrapper = wrapper;
       await pi.bindExtensions({});
       const availableModels = [...await this.deps.modelRuntime.getAvailable()];
-      wrapper.publishAvailableModels(availableModels);
+      await wrapper.publishAvailableModels(availableModels);
       this.gate(opening);
       bridge.bindSession(pi);
       const toolInfos = pi.getAllTools();

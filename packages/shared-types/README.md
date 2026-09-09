@@ -161,3 +161,7 @@ From [`src/index.ts`](./src/index.ts):
 ## License
 
 Apache-2.0
+
+Agent call records preserve actual effective `modelRequested?: string`, `modeRequested?: string`,
+and `configOptionsRequested?: Record<string, string | boolean>` beside served-model attribution.
+The engine hashes these resolved inputs before dispatch; routing never comes from a mock ordinal.

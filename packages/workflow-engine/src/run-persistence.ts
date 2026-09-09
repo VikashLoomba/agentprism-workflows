@@ -36,7 +36,7 @@ import type {
   WorkflowRunLimits,
 } from "@automatalabs/shared-types";
 import { WorkflowError, WorkflowErrorCode } from "./errors.js";
-import type { WorkflowAgentConfiguration } from "./workflow.js";
+import type { WorkflowRoutingSnapshot } from "./workflow-routing.js";
 import type { ReplayReport } from "./isolation.js";
 import type { RunEnvironmentIdentity } from "./run-environment.js";
 import { withRunEventsUsingFs, type RunEventPersistence } from "./run-event-persistence.js";
@@ -86,23 +86,15 @@ export interface PersistedResumeFormat {
   terminalEnvironment?: RunEnvironmentIdentity;
 }
 
-/** Immutable host-owned provider selection captured before the run's first live execution. */
+/** Immutable authored-routing context captured before the first live execution. */
 export interface PersistedRunAdmission {
-  format: 2;
+  format: 3;
   strict: true;
-  agentConfigurations: Readonly<Record<number, WorkflowAgentConfiguration>>;
+  routingSnapshot: WorkflowRoutingSnapshot;
   defaultModel?: string;
   scriptBackends?: Record<string, WorkflowBackendConfig>;
-  selectionHash: string;
-  source: "mcp-setup" | "mcp-routing" | "host";
+  routingHash: string;
   recordedAt: string;
-  /** A live occurrence not covered by the admitted map permanently closes continuation. */
-  uncoveredOccurrence?: {
-    ordinal: number;
-    label: string;
-    phase?: string;
-    recordedAt: string;
-  };
 }
 
 export interface PersistedResumeCandidate {

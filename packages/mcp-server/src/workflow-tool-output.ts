@@ -250,6 +250,7 @@ const sessionModeStateSchema = z.object({
 });
 const harnessDiagnosticSchema = z.object({
   backendId: z.string(),
+  optionScope: z.enum(["default-model", "exact-model"]).optional(),
   defaultModeId: z.string().optional().describe(
     "AgentPrism's explicit mode when a call omits mode; absent for no-mode/custom backends.",
   ),
@@ -276,7 +277,7 @@ const configModelDiagnosticSchema = z.object({
 });
 
 const setupRequestSchema = z.object({
-    id: z.string().uuid(), kind: z.enum(["backend-approval", "agent-configuration"]),
+    id: z.string().uuid(), kind: z.literal("backend-approval"),
     title: z.string(), message: z.string(), requestedSchema: z.object({
       type: z.literal("object"), properties: z.record(z.string(), z.unknown()),
       required: z.array(z.string()), additionalProperties: z.literal(false).optional(),
@@ -333,6 +334,7 @@ const discoveryOutputFields = [
   "ok",
   "harnessOptions",
   "omittedHarnesses",
+  "authoringSummary",
   "models",
 ] as const;
 const resultRetrievalFields = [
@@ -417,6 +419,10 @@ export const workflowToolOutputShape = z
     harnessOptions: z.array(harnessDiagnosticSchema).optional(),
     omittedHarnesses: z.number().int().nonnegative().optional(),
     models: z.array(configModelDiagnosticSchema).optional(),
+    authoringSummary: z.object({
+      harnesses: z.array(z.record(z.string(), z.unknown())),
+      omittedHarnesses: z.number().int().nonnegative(),
+    }).strict().optional(),
     runId: z.string().optional(),
     status: z.enum(["pending", "running", "paused", "completed", "failed", "aborted"]).optional(),
     ...executionDetailsShape,
@@ -464,9 +470,9 @@ export const workflowToolOutputShape = z
       valid =
         has("ok") &&
         has("harnessOptions") &&
-        has("omittedHarnesses") &&
+        has("omittedHarnesses") && has("authoringSummary") &&
         has("models") &&
-        hasOnlyExactFields(value, ["action", "ok", "harnessOptions", "omittedHarnesses", "models"]);
+        hasOnlyExactFields(value, ["action", "ok", "harnessOptions", "omittedHarnesses", "models", "authoringSummary"]);
     } else if (value.action === "run" || value.action === "resume") {
       valid = runCommonComplete && has("eventsUri") && has("limits") && has("scriptSource") &&
         value.accepted === true && has("requestId") && has("duplicate") &&
@@ -524,9 +530,9 @@ export const workflowToolOutputShape = z
       },
       {
         title: "Workflow config discovery",
-        required: ["action", "ok", "harnessOptions", "omittedHarnesses", "models"],
+        required: ["action", "ok", "harnessOptions", "omittedHarnesses", "models", "authoringSummary"],
         properties: { action: { const: "config" } },
-        ...forbidsExactOutside(["action", "ok", "harnessOptions", "omittedHarnesses", "models"]),
+        ...forbidsExactOutside(["action", "ok", "harnessOptions", "omittedHarnesses", "models", "authoringSummary"]),
       },
       {
         title: "Workflow operation acceptance",
@@ -712,6 +718,7 @@ export interface WorkflowConfigToolResult {
   harnessOptions: Array<Record<string, unknown>>;
   omittedHarnesses: number;
   models: Array<Record<string, unknown>>;
+  authoringSummary: { harnesses: Array<Record<string, unknown>>; omittedHarnesses: number };
 }
 
 export interface WorkflowPermissionResponseResult extends WorkflowRunStatus, WorkflowScriptResourceFields {

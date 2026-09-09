@@ -18,7 +18,6 @@ import {
   WorkflowManager,
   parseWorkflowScript,
   redactText,
-  type WorkflowAgentConfiguration,
 } from "@automatalabs/workflow-engine";
 import {
   BUILTIN_BACKEND_IDS,
@@ -76,9 +75,7 @@ export interface ValidateWorkflowOptions {
    * or phase/meta route. The dry run resolves and reports it like live execution.
    */
   defaultModel?: string;
-  /** Host-selected configuration keyed by the dry run's zero-based agent occurrence ordinal. */
-  agentConfigurations?: Readonly<Record<number, WorkflowAgentConfiguration>>;
-  /** Refuse any live occurrence not covered by agentConfigurations. */
+  /** Fail when an observed actual call has no effective configured model route. */
   requireAgentConfiguration?: boolean;
   /** Run routed no-prompt config probes after the mock dry run. Default true. */
   probeConfig?: boolean;
@@ -122,7 +119,7 @@ export interface ValidatedMockAnswers {
 
 /** One agent() call observed during the dry run, with its backend attribution. */
 export interface ValidatedAgentCall {
-  /** Zero-based occurrence ordinal shared with WorkflowAgentConfiguration selection. */
+  /** Zero-based occurrence index for this observed mock execution only. */
   index: number;
   label: string;
   /** Credential-redacted, UTF-8-bounded task preview for host configuration UI. */
@@ -190,6 +187,8 @@ export interface ValidateWorkflowReport {
     ok: boolean;
     status: string;
     reason?: string;
+    /** The rejected actual call when strict routing has no effective model. */
+    missingAgentConfiguration?: { label: string; phase?: string };
     /** True when the run was cut off by ValidateWorkflowOptions.timeoutMs. */
     timedOut: boolean;
     agentCalls: ValidatedAgentCall[];
@@ -1591,6 +1590,7 @@ export async function validateWorkflowScript(
   const baseCwd = options.cwd ?? mkdtempSync(join(tmpdir(), "agentprism-validate-"));
   const persistenceRoot = mkdtempSync(join(tmpdir(), "agentprism-validate-state-"));
 
+  let missingAgentConfiguration: { label: string; phase?: string } | undefined;
   const agentCalls: ValidatedAgentCall[] = [];
   const pendingAgentCalls: ValidatedAgentCall[] = [];
   const checkpoints: ValidatedCheckpoint[] = [];
@@ -1691,8 +1691,8 @@ export async function validateWorkflowScript(
       signal: controller.signal,
       maxAgents: options.maxAgents,
       defaultModel: options.defaultModel,
-      agentConfigurations: options.agentConfigurations,
       requireAgentConfiguration: options.requireAgentConfiguration,
+      onMissingAgentConfiguration: (context) => { missingAgentConfiguration = context; return ""; },
       scriptBackends: declaredBackends,
       confirm: async (promptText: string, checkpointOptions: unknown) => {
         const opts = (checkpointOptions ?? {}) as { kind?: string; choices?: string[] };
@@ -1779,6 +1779,7 @@ export async function validateWorkflowScript(
         status: run.status,
         reason,
         timedOut,
+        ...(missingAgentConfiguration ? { missingAgentConfiguration } : {}),
         agentCalls,
         checkpoints,
         phasesVisited: run.phases ?? [],

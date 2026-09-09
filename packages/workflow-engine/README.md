@@ -185,10 +185,25 @@ manual `resumeJournal` remain permanently legacy positional paths. Full types, r
 catalogs, and checkpoint source-index rules are in the
 [incremental resume API](../../docs/api.md#content-addressed-incremental-resume).
 
-Strict `continueRun()` uses format-2 canonical admission and the immutable source/configuration of
-the same run. The host configuration map addresses agent-only occurrence ordinals, so checkpoints
-never shift subsequent agent selections. MCP uses this strict boundary; the SDK retains its
-promise-based execution APIs and generic `executionAdmission` host barrier independently.
+Before live dispatch, the host atomically persists format-3 admission:
+`{ format:3, strict:true, routingSnapshot:{ modelTiers:null|{tiers}, agentDefinitions, mainModel? }, defaultModel?, scriptBackends?, routingHash, recordedAt }`.
+The snapshot captures tier configuration and named-agent definitions, including their absence,
+so cold continuation does not reread changed routing files. The immutable script supplies phase
+and workflow models. `routingHash` binds the routing snapshot, optional host default, and approved
+script backends. Continuation validates the format and integrity and reuses these inputs without
+new routing discovery or provider selection.
+
+Every actual call must resolve a nonblank effective model before identity hashing or dispatch.
+Mock validation observes one path; additional configured live calls are valid, including nested
+and data-dependent calls. A missing live route fails before that call reaches the runner. There is
+no positional configuration map or uncovered-occurrence marker. Effective model, mode, and config
+options enter call identity and durable call records (`modelRequested`, `modeRequested`, and
+`configOptionsRequested`). Old or invalid admissions remain inspectable where supported but cannot
+execute through MCP; start a fresh Run. Supported SDK journal eras retain their separate contracts.
+
+MCP enables `requireAgentConfiguration` for actual-call checks. The optional
+`onMissingAgentConfiguration({ label, phase? })` callback supplies diagnostics only and cannot route
+a call. SDK promise-based APIs and `executionAdmission` remain independently supported.
 
 Hosts that separate durable acceptance from execution use `prepareRun`, `claimPreparedRun`,
 `updatePreparation`, and `admitPreparedRun`. To finish setup without execution, call

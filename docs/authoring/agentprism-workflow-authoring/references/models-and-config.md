@@ -6,19 +6,53 @@ The backend is selected **per `agent()` call** from its effective `model` string
 
 The built-in names (`claude`, `codex`, `opencode`, `pi`) come from the runtime backend registry. Registered custom names extend that set.
 
-- **Omit `model` entirely** for maximum portability. After accepting an MCP run, a client with App or form capability can receive a durable setup request covering only dry-run-observed `agent()` calls whose effective model is unresolved. The user selects those calls' provider/model from live advertised catalogs through a later `setup-response`. Models inherited from an agent definition, resolved tier, phase, or `meta.model` already count as configured, as do backend-only specs. Without those capabilities, an explicitly present `AGENTPRISM_DEFAULT_BACKEND` wins; when it is truly unset, a model-less run performs zero-token readiness probes and pins one backend. The SDK runner itself retains its configured default (`AGENTPRISM_DEFAULT_BACKEND`, historical fallback Claude).
+- **Configure every actual call.** A call may inherit its model from a named-agent definition, resolved tier, phase, or `meta.model`; otherwise supply `model` explicitly. This applies to every MCP client. Missing routing fails before runner dispatch with a label/phase diagnostic and bounded live discovery. No agent-configuration form or automatic default selection exists. The non-strict SDK runner retains its configured default (`AGENTPRISM_DEFAULT_BACKEND`, historical fallback Claude).
 - **Route by one registered first segment.** Split on the first `/`; ASCII-case-insensitive `claude`, `codex`, `opencode`, `pi`, or a registered custom backend name selects that harness and is stripped exactly once. A custom registration wins on a built-in-name collision.
 - **Use a backend name alone** (`claude`, `codex`, `opencode`, `pi`, or a custom name) to preserve the harness's configured default model. No model config call is made.
 - **Everything else goes intact to the default backend.** `anthropic/…`, `openai/…`, bare `opus`, and bare `gpt-…` are not routing aliases. When an id remains after routing, it is sent byte-for-byte: no catalog matching, case folding, bracket parsing, effort/Fast option driving, retry, or fallback. Harness rejection is an agent error.
-- **`tier`** (`"small" | "medium" | "big"`) is a coarse alternative resolved from the host's tier config — use it for "a cheap model" without naming a vendor.
+- **`tier`** (`"small" | "medium" | "big"`) must resolve through the captured tier config or host `mainModel`. A tier suppresses phase/meta/default routing; an unresolved tier cannot dispatch in MCP.
 
-The durable MCP setup request includes each call's resolved label, phase title/detail, and a bounded credential-redacted task preview. It offers one required provider/model field per unresolved call and optional provider-scoped mode and non-model config fields; fields for providers the user did not select are ignored, and omitted optional fields use the selected provider's defaults. Already configured calls keep their authored model/mode/config. Omitting optional mode/config fields never triggers setup. Reply to the exact `setup.request.id` with `{ action:"setup-response", runId, setupId, response:{ action:"accept", content:{ ... } } }`. The server validates the exact advertised values, combines them with preserved authored configurations, reruns zero-token preflight, and atomically persists the format-2 canonical agent occurrence map before live dispatch. Raw form fields are never persisted. Decline/cancel leaves the accepted run inspectable as aborted. An unobserved live occurrence fails before provider dispatch and is recorded durably. Same-ID continuation reuses the canonical snapshot. Both protocol eras use these bounded controls; no inline elicitation or protocol request-state token carries workflow setup.
+Mock validation observes one path. Additional configured live calls are valid; a missing model on
+an unseen branch still fails before that call reaches ACP. Admission captures immutable tier and
+named-agent routing inputs in format 3, with an integrity hash and approved backend definitions.
+Continuation uses the snapshot without new selection or routing-file drift. Old admissions are
+inspectable but cannot execute. Backend-approval setup, checkpoints, and live permissions retain
+their separate contracts in both MCP eras.
 
 The published examples use ids verified against live harness catalogs: `claude/opus[1m]`, `codex/gpt-5.6-sol`, and `opencode/zai/glm-5.2`. For Pi, `pi/openrouter/vendor/model-id` strips only `pi/`; Pi then splits provider `openrouter` from model id `vendor/model-id`. Prefer backend-only forms when the desired model is configured inside the harness.
 
-Never guess model ids, mode ids, effort values, or option names from memory. With MCP, call the `workflow` tool using `action:"config"` and optional `harnesses` / `modelFilter`; it returns the live catalog without starting a workflow.
+Never guess model ids, mode ids, effort values, or option names from memory. With MCP, call the `workflow` tool using `action:"config"` and optional `harnesses` / `modelSpecs` / `modelFilter`; it returns the live catalog without starting a workflow.
 
 One no-prompt session per harness, zero tokens: each successful harness entry contains `modes`, `defaultModeId`, and its config-option catalog. A non-null `modes` object carries every available mode's raw id, name, description, and `_meta`; only exact advertised ids are valid. Omission applies Claude `auto`, Codex `agent`, OpenCode `build`, or no Pi mode. For trusted implementation/review work, explicitly choose Claude `bypassPermissions` or Codex `agent` when the catalog advertises it. Claude `auto` delegates permission policy to a model classifier and may ask the user; it is not fully autonomous. `modes:null` means the backend supports no mode. `probed:true` proves session/config discovery, not universal first-prompt authentication. The bare config probe reads the default model; option domains are model-specific, so use `modelSpecs` for the selected model and confirm every pinned value against its own echoed entry.
+
+Probes run concurrently with independent cancellation deadlines. `probeTimeoutMs` defaults to
+60,000 ms and must be a positive timer-safe integer; `probeConcurrency` defaults to 4 and accepts
+1–16. Results retain request order and healthy catalogs when another backend fails. An optional
+`signal` shares cancellation across probes, retaining completed catalogs and skipping queued targets.
+MCP missing-route diagnostics use a 5,000 ms per-probe bound and concurrency 4. Explicit MCP config requests allow 15,000 ms per probe with a shared 40,000 ms discovery budget inside the 45,000 ms request deadline. Completed catalogs survive cancellation; active probes are aborted and queued targets receive timeout entries without starting. Exact-model fallback probes share the same budget. Discovery cannot select a route.
+
+`authoringSummary` adds bounded guidance alongside the complete supported programmatic catalog.
+The current model is shown separately as `currentModel`, with `currentRoute` only when it is an
+advertised executable leaf; it need not belong to a preference shortlist. `omittedCurrentModel`
+reports a value excluded by presentation bounds. Claude and Codex show their small live model
+catalogs. Pi's native merged `enabledModels` patterns
+produce an ordered preference shortlist intersected with authenticated available models, with
+unmatched patterns reported. This is presentation only, never an execution allowlist. Without a
+preference list, Pi shows available provider groups. OpenCode shows configured direct-provider models
+first, representing each direct provider before filling additional rows when the list is bounded.
+Exact provider IDs `openrouter`, `opencode`, `opencode-go`, `huggingface`, `amazon-bedrock`, and
+`github-copilot` are classified as aggregators, with browse selectors such as `openrouter/*` and counts. Omitted entries carry counts and expansion guidance.
+Browse selectors are not executable models. Expand the full leaf catalog with `modelFilter`
+(case-insensitive substring or slash-delimited regex), for example:
+
+```json
+{ "action":"config", "harnesses":["opencode"], "modelFilter":"/^openrouter\\//" }
+```
+
+Use an exact route such as `opencode/openrouter/openai/gpt-5.6-sol` for execution. Leaf IDs stay
+verbatim; do not shorten provider prefixes or infer models from display names. Backend-only probes
+report options for the default model only. Probe `modelSpecs:["codex/gpt-5.6-sol"]` (or another exact
+returned route) before choosing model-specific mode, effort, or `configOptions`.
 
 ```js
 const plan   = await agent(PLAN_PROMPT,          { label: "plan",      model: "opencode/zai/glm-5.2", schema: PLAN });
@@ -80,7 +114,7 @@ const FINDINGS = {
 };
 
 const report = await agent("Review the diff on this branch for correctness bugs.", {
-  label: "review", schema: FINDINGS,
+  label: "review", model: "codex", schema: FINDINGS,
 });
 report.findings.forEach((f) => log(`${f.file}:${f.line} ${f.summary}`));
 ```

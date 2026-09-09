@@ -2,6 +2,9 @@
 
 **Context:** JavaScript passed to the MCP `workflow` tool. Workflow scripts use `agent(prompt, options?)`; REPL evals use a different API.
 
+The agent-call fragments below assume an explicit workflow default such as `meta.model: "codex"`.
+Quality helpers also need an effective inherited route; MCP never chooses one automatically.
+
 ## DSL globals — complete signatures
 
 ```

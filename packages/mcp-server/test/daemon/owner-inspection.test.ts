@@ -29,7 +29,7 @@ test("an earlier daemon observes and answers permissions after another daemon co
   try {
     const accepted = await first.client.callTool({ name: "workflow", arguments: {
       action: "run", requestId: randomUUID(), projectDir,
-      script: 'export const meta = { name: "owner-inspection", description: "follow current ownership" }; await checkpoint("Continue?"); return await agent("work");',
+      script: 'export const meta = { model: "claude", name: "owner-inspection", description: "follow current ownership" }; await checkpoint("Continue?"); return await agent("work");',
     } });
     assert.equal(accepted.isError, false, textOf(accepted));
     runId = String(structured(accepted)?.runId);
@@ -83,7 +83,7 @@ test("a remote completion between inspection reads cannot attach completed field
   try {
     const accepted = await connection.client.callTool({ name: "workflow", arguments: {
       action: "run", requestId: randomUUID(), projectDir,
-      script: 'export const meta = { name: "observation-race", description: "coherent status" }; await checkpoint("Continue?"); return "remote completion";',
+      script: 'export const meta = { model: "claude", name: "observation-race", description: "coherent status" }; await checkpoint("Continue?"); return "remote completion";',
     } });
     const runId = String(structured(accepted)?.runId);
     assert.equal(structured(await waitForRun(connection.client, runId))?.status, "paused");

@@ -52,6 +52,7 @@ import {
 import { createWorkflowLogger } from "./logger.js";
 import { parseModelRoutingFromMeta, resolveModelForPhase } from "./model-routing.js";
 import { loadModelTierConfig, resolveTierModel } from "./model-tier-config.js";
+import type { WorkflowRoutingSnapshot } from "./workflow-routing.js";
 import { projectRecordedError } from "./recorded-error.js";
 import { registerRunTripwire } from "./rejection-tripwire.js";
 import type { PreparedContinuation, PreparedResume } from "./resume.js";
@@ -92,15 +93,6 @@ export type EngineRunResult<T = unknown> = Omit<WorkflowRunResult<T>, "status" |
  * types): the engine no longer constructs an agent, so only the plain fields it
  * threads through remain.
  */
-export interface WorkflowAgentConfiguration {
-  /** Exact backend/model spec selected by the host for this agent occurrence. */
-  model: string;
-  /** Exact ACP session mode selected from the chosen harness's advertised modes. */
-  mode?: string;
-  /** Exact non-model ACP session options selected from the chosen harness's catalog. */
-  configOptions?: Record<string, string | boolean>;
-}
-
 export interface WorkflowAgentOptions {
   /** Base working directory for the run (e.g. the project root). */
   cwd?: string;
@@ -255,18 +247,13 @@ export interface WorkflowRunOptions extends WorkflowAgentOptions {
     options: CheckpointOptions,
     context?: CheckpointCallContext,
   ) => Promise<unknown>;
-  /**
-   * Host-selected configurations keyed by the zero-based, root-execution-wide agent
-   * occurrence ordinal. A selected model/mode/config becomes the effective call input
-   * before hashing and runner dispatch, so replay identity describes what actually ran.
-   */
-  agentConfigurations?: Readonly<Record<number, WorkflowAgentConfiguration>>;
-  /**
-   * Fail before dispatch if a live occurrence has no host selection.
-   * Composition roots use this after a preflight selection pass so a control-flow branch
-   * that the mock run did not reach cannot silently fall back to an ambient provider.
-   */
+  /** Fail before dispatch when an actual call has no effective authored model route. */
   requireAgentConfiguration?: boolean;
+  /** Optional host diagnostic enrichment; cannot select a route or authorize dispatch. */
+  onMissingAgentConfiguration?: (context: { label: string; phase?: string }) => string | Promise<string>;
+
+  /** Immutable named-agent and tier inputs captured for strict durable execution. */
+  routingSnapshot?: WorkflowRoutingSnapshot;
   /** Internal same-run continuation latch. Replays every exact index/hash journal hit. */
   sameRunContinuation?: boolean;
   /** Internal cumulative usage seed restored before a same-run continuation executes. */
@@ -564,7 +551,6 @@ export async function runWorkflow<T = unknown>(
 ): Promise<EngineRunResult<T>> {
   const started = Date.now();
   const { meta, body } = parseWorkflowScript(script);
-  const agentConfigurations = snapshotHostAgentConfigurations(options.agentConfigurations);
   const journaling = options.journaling ?? true;
   const resumeSeed = options.preparedResume?.strategy === "identity-v1"
     ? options.preparedResume.seed
@@ -589,7 +575,7 @@ export async function runWorkflow<T = unknown>(
   const routingConfig = parseModelRoutingFromMeta(meta.phases, meta.model);
   // Snapshot tier routing once per run. A missing/unparseable file preserves the
   // historical runner-default behavior unless a tier falls through to mainModel.
-  const modelTierConfig = loadModelTierConfig();
+  const modelTierConfig = options.routingSnapshot ? options.routingSnapshot.modelTiers : loadModelTierConfig();
   const effectiveLimits = resolveWorkflowRunLimits(options);
   const {
     maxAgents,
@@ -606,7 +592,7 @@ export async function runWorkflow<T = unknown>(
   // observe a mid-run edit (determinism); a later resume re-reads it. The agents
   // directory is parameterized via options.agentsDir (defaults to AGENTS_DIR).
   const agentRegistry =
-    options.agentRegistry ??
+    (options.routingSnapshot ? new Map(options.routingSnapshot.agentDefinitions.map((definition) => [definition.name, definition])) : options.agentRegistry) ??
     loadAgentRegistry(
       baseCwd,
       options.agentsDir ? { projectDir: options.agentsDir, userDir: options.agentsDir } : undefined,
@@ -1014,13 +1000,7 @@ export async function runWorkflow<T = unknown>(
     }
 
     const assignedPhase = agentOptions.phase ?? state.currentPhase;
-    // Checkpoints consume the shared call limit but cannot shift agent configuration keys.
-    // This counter agrees with validation's root-wide agent-only occurrence ordinal.
     const agentOrdinal = shared.agentOccurrenceCount ?? 0;
-    const hostConfiguration = normalizeHostAgentConfiguration(
-      agentConfigurations?.[agentOrdinal],
-      agentOrdinal,
-    );
 
     const requestedLabel = agentOptions.label?.trim();
     const pendingLabel = requestedLabel || defaultAgentLabel(assignedPhase, shared.agentCount + 1);
@@ -1044,44 +1024,41 @@ export async function runWorkflow<T = unknown>(
     const phaseModel = agentOptions.tier ? undefined : resolveModelForPhase(assignedPhase, routingConfig);
     const authoredModel =
       explicitModel ??
-      (agentOptions.tier ? tierModel || options.mainModel : phaseModel ?? options.defaultModel);
-    const modelSpec = hostConfiguration?.model ?? authoredModel;
-    if (hostConfiguration === undefined && options.requireAgentConfiguration) {
-      throw new WorkflowError(
-        `agent ${JSON.stringify(pendingLabel)} occurrence ${agentOrdinal} has no host-selected configuration; ` +
-          "the preflight control path did not cover this live agent call",
+      (agentOptions.tier ? tierModel || (options.routingSnapshot ? options.routingSnapshot.mainModel : options.mainModel) : phaseModel ?? options.defaultModel);
+    const modelSpec = authoredModel;
+    if (options.requireAgentConfiguration && (typeof modelSpec !== "string" || modelSpec.trim() === "")) {
+      const failure = new WorkflowError(
+        `agent ${JSON.stringify(pendingLabel)}${assignedPhase === undefined ? "" : ` in phase ${JSON.stringify(assignedPhase)}`} has no configured model route. ` +
+          'Set agent(..., { model: "codex" }) or configure a model in its agent definition, resolved tier, phase, or workflow meta.model. ' +
+          'A backend name alone intentionally uses its configured default model; mode and configOptions are optional. Use workflow action:"config" to discover available backends and exact model options.',
         WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-        {
-          recoverable: false,
-          agentLabel: pendingLabel,
-          details: {
-            uncoveredOccurrence: {
-              ordinal: agentOrdinal,
-              label: pendingLabel,
-              ...(assignedPhase === undefined ? {} : { phase: assignedPhase }),
-            },
-          },
-        },
+        { recoverable: false, agentLabel: pendingLabel, details: {
+          missingAgentConfiguration: { label: pendingLabel, ...(assignedPhase === undefined ? {} : { phase: assignedPhase }) },
+        } },
+      );
+      if (!options.onMissingAgentConfiguration) throw failure;
+      return (async () => {
+        let diagnostic: string | undefined;
+        try {
+          diagnostic = await options.onMissingAgentConfiguration!({ label: pendingLabel, ...(assignedPhase === undefined ? {} : { phase: assignedPhase }) });
+        } catch { /* Discovery failure never masks the actionable configuration error. */ }
+        throwIfAborted();
+        if (!diagnostic) throw failure;
+        throw new WorkflowError(`${failure.message}\n${diagnostic}`, failure.code, {
+          recoverable: false, agentLabel: pendingLabel, details: failure.details,
+        });
+      })();
+    }
+    if (modelSpec?.endsWith("/*")) {
+      throw new WorkflowError(
+        `agent ${JSON.stringify(pendingLabel)} model ${JSON.stringify(modelSpec)} is a discovery selector. Expand that provider with workflow action:"config" and modelFilter, then use an exact model route.`,
+        WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
+        { recoverable: false, agentLabel: pendingLabel },
       );
     }
-    // A host selection is a complete model/mode/config decision, not a patch over the
-    // script's provider-specific settings. Otherwise changing providers could leak an
-    // authored mode or option id into the newly selected backend, and users could not
-    // clear authored options by leaving the selected provider fields empty.
-    const effectiveMode = hostConfiguration === undefined ? agentOptions.mode : hostConfiguration.mode;
-    const effectiveConfigOptions = hostConfiguration === undefined
-      ? agentOptions.configOptions
-      : hostConfiguration.configOptions;
-    const {
-      mode: _authoredMode,
-      configOptions: _authoredConfigOptions,
-      ...agentOptionsWithoutProviderConfig
-    } = agentOptions;
-    const effectiveAgentOptions: AgentOptions = {
-      ...agentOptionsWithoutProviderConfig,
-      ...(effectiveMode === undefined ? {} : { mode: effectiveMode }),
-      ...(effectiveConfigOptions === undefined ? {} : { configOptions: effectiveConfigOptions }),
-    };
+    const effectiveMode = agentOptions.mode;
+    const effectiveConfigOptions = agentOptions.configOptions === undefined ? undefined : { ...agentOptions.configOptions };
+    const effectiveAgentOptions = { ...agentOptions, configOptions: effectiveConfigOptions };
     // For display in /workflows: the model this agent runs on — its explicit/phase/default
     // spec, else the session's main model. The real resolved id overrides this via
     // onModelResolved once the subagent session is created.
@@ -1160,6 +1137,8 @@ export async function runWorkflow<T = unknown>(
         ...(callInputsHash !== undefined ? { inputsHash: callInputsHash } : {}),
         label,
         ...(modelSpec !== undefined ? { modelRequested: modelSpec } : {}),
+        ...(effectiveMode === undefined ? {} : { modeRequested: effectiveMode }),
+        ...(effectiveConfigOptions === undefined ? {} : { configOptionsRequested: { ...effectiveConfigOptions } }),
         ...(resolvedIsolation !== undefined ? { isolation: resolvedIsolation } : {}),
         ...terminal,
       });
@@ -3276,32 +3255,16 @@ function hashCanonicalStrictJson(value: unknown): string | undefined {
   return canonical === undefined ? undefined : createHash("sha256").update(canonical).digest("hex");
 }
 
-/** Canonical host-owned occurrence map used by durable run admission. */
-export function canonicalizeWorkflowAgentConfigurations(
-  value: Readonly<Record<number, WorkflowAgentConfiguration>>,
-): Readonly<Record<number, WorkflowAgentConfiguration>> {
-  return snapshotHostAgentConfigurations(value) ?? deepFreeze({});
-}
-
-/** Stable binding for every provider-affecting value admitted by the host. */
-export function hashWorkflowAdmissionSelection(input: {
-  format: 2;
-  agentConfigurations: Readonly<Record<number, WorkflowAgentConfiguration>>;
+/** Stable binding for immutable routing inputs admitted before live execution. */
+export function hashWorkflowAdmissionRouting(input: {
+  format: 3;
+  routingSnapshot: WorkflowRoutingSnapshot;
   defaultModel?: string;
   scriptBackends?: Record<string, WorkflowBackendConfig>;
 }): string {
-  const hash = hashCanonicalStrictJson({
-    format: input.format,
-    agentConfigurations: canonicalizeWorkflowAgentConfigurations(input.agentConfigurations),
-    ...(input.defaultModel === undefined ? {} : { defaultModel: input.defaultModel }),
-    ...(input.scriptBackends === undefined ? {} : { scriptBackends: input.scriptBackends }),
-  });
+  const hash = hashCanonicalStrictJson(input);
   if (hash === undefined) {
-    throw new WorkflowError(
-      "workflow admission selection must be strict JSON",
-      WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-      { recoverable: false },
-    );
+    throw new WorkflowError("workflow admission routing must be strict JSON", WorkflowErrorCode.SCRIPT_VALIDATION_ERROR, { recoverable: false });
   }
   return hash;
 }
@@ -3490,78 +3453,6 @@ function hashCheckpoint(promptText: string, options: CheckpointOptions): string 
     choices: options.choices ?? null,
   });
   return createHash("sha256").update(identity).digest("hex");
-}
-
-function snapshotHostAgentConfigurations(
-  value: Readonly<Record<number, WorkflowAgentConfiguration>> | undefined,
-): Readonly<Record<number, WorkflowAgentConfiguration>> | undefined {
-  if (value === undefined) return undefined;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new WorkflowError(
-      "host agentConfigurations must be an object keyed by non-negative occurrence ordinals",
-      WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-      { recoverable: false },
-    );
-  }
-  const snapshot: Record<number, WorkflowAgentConfiguration> = {};
-  for (const [key, configuration] of Object.entries(value)) {
-    if (!/^(?:0|[1-9][0-9]*)$/.test(key) || !Number.isSafeInteger(Number(key))) {
-      throw new WorkflowError(
-        `host agentConfigurations key ${JSON.stringify(key)} must be a non-negative safe integer`,
-        WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-        { recoverable: false },
-      );
-    }
-    snapshot[Number(key)] = normalizeHostAgentConfiguration(configuration, Number(key))!;
-  }
-  return deepFreeze(snapshot);
-}
-
-function normalizeHostAgentConfiguration(
-  value: WorkflowAgentConfiguration | undefined,
-  ordinal: number,
-): WorkflowAgentConfiguration | undefined {
-  if (value === undefined) return undefined;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new WorkflowError(
-      `host agent configuration ${ordinal} must be an object`,
-      WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-      { recoverable: false },
-    );
-  }
-  if (typeof value.model !== "string" || value.model.trim() === "") {
-    throw new WorkflowError(
-      `host agent configuration ${ordinal}.model must be a non-empty string`,
-      WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-      { recoverable: false },
-    );
-  }
-  if (value.mode !== undefined && (typeof value.mode !== "string" || value.mode.trim() === "")) {
-    throw new WorkflowError(
-      `host agent configuration ${ordinal}.mode must be a non-empty string`,
-      WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-      { recoverable: false },
-    );
-  }
-  const configOptions = value.configOptions;
-  if (
-    configOptions !== undefined &&
-    (!configOptions ||
-      typeof configOptions !== "object" ||
-      Array.isArray(configOptions) ||
-      Object.values(configOptions).some((entry) => typeof entry !== "string" && typeof entry !== "boolean"))
-  ) {
-    throw new WorkflowError(
-      `host agent configuration ${ordinal}.configOptions must contain only string or boolean values`,
-      WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-      { recoverable: false },
-    );
-  }
-  return {
-    model: value.model,
-    ...(value.mode === undefined ? {} : { mode: value.mode }),
-    ...(configOptions === undefined ? {} : { configOptions: { ...configOptions } }),
-  };
 }
 
 function hashAgentCall(

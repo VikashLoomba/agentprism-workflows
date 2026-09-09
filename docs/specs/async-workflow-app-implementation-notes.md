@@ -15,8 +15,11 @@ fails. Accepted identities cannot be silently reconstructed from unreadable/stal
 
 Run acceptance performs structural validation and records the immutable at-most-1-MiB UTF-8 source,
 args, limits, operation identity, and pending preparation under the run lease. The project-owned
-`WorkflowLifecycle` then drives mock routing, backend approval, provider setup, and final validation.
-No live agent runs until canonical admission format 2 is saved. Preparation format 1 is a separate
+`WorkflowLifecycle` then drives backend approval, mock routing, and routed configuration validation.
+No live agent runs until immutable routing admission format 3 is saved. Every actual call must resolve
+a model; additional configured calls on live branches are allowed. Missing routing produces bounded
+discovery diagnostics, never provider setup or automatic backend selection. See
+[explicit agent routing](explicit-agent-routing.md) for the snapshot and continuation contract. Preparation format 1 is a separate
 host-neutral manager envelope; the MCP driver owns its JSON payload and persisted setup schema.
 `prepareRun`, `claimPreparedRun`, `updatePreparation`, `admitPreparedRun`, and `settlePreparedRun`
 keep engine persistence independent of MCP transport objects.
@@ -28,11 +31,11 @@ waiting setup, and execution. Receipt retries do not reserve capacity again. Req
 state is never retained by an accepted run.
 
 Setup has `{state:"preparing"}` or `{state:"input-required",request}`. The request records its UUID,
-kind, title, message, and exact object schema. `setup-response` validates that UUID and shape,
+kind (`backend-approval` only), title, message, and exact object schema. `setup-response` validates that UUID and shape,
 persists canonical answers plus a response fingerprint, and acknowledges separately. Exact repeats
 remain idempotent after terminal settlement. Conflicts fail. Decline/cancel/false backend approval
-remain aborted runs. Invalid choice leaves setup pending; changed provider availability fails before
-dispatch. Raw submitted form fields are not persisted.
+remain aborted runs. Invalid approval content leaves setup pending. Backend approval remains required before probing
+script-declared commands; it never selects agent models.
 
 Cold preparation recovers under the existing run lease with the same setup identity. During daemon
 succession, signed control forwards setup/permission replies and cancellation to a live predecessor.

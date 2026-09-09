@@ -218,136 +218,6 @@ test("config discovery structured diagnostics stay within 24 KiB", async () => {
   }
 });
 
-test("model-less MCP workflows auto-select and cache the first backend with positive readiness evidence", async () => {
-  const previousDefault = process.env.AGENTPRISM_DEFAULT_BACKEND;
-  delete process.env.AGENTPRISM_DEFAULT_BACKEND;
-  const liveModels: Array<string | undefined> = [];
-  const probes: Array<{ spec?: string; selectModel?: boolean }> = [];
-  const modelOption = (currentValue: string, choices: string[] = [currentValue]) => ({
-    id: "model",
-    name: "Model",
-    type: "select" as const,
-    currentValue,
-    options: choices.filter(Boolean).map((value) => ({ value, name: value })),
-  });
-  const runner = Object.assign(
-    makeRunner((_prompt, options) => {
-      liveModels.push(options.model);
-      return "ok";
-    }),
-    {
-      defaultBackendId: () => "claude",
-      listBackends: () => ["claude", "codex", "opencode", "pi"],
-      listCustomBackends: () => [],
-      async probeConfigOptions(spec?: string, options?: { selectModel?: boolean }) {
-        probes.push({ spec, selectModel: options?.selectModel });
-        const backendId = spec?.split("/", 1)[0] ?? "claude";
-        if (backendId === "opencode") throw new Error("opencode is not installed");
-        if (backendId === "pi") return { backendId, options: [modelOption("", [])] };
-        return {
-          backendId,
-          options: [modelOption(backendId === "codex" ? "gpt" : "opus")],
-        };
-      },
-    },
-  );
-  const { client, dispose } = await connect(runner, { listTools: true });
-  try {
-    const first = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
-    assert.notEqual(first.isError, true);
-    assert.deepEqual(liveModels, ["codex"]);
-    assert.equal(probes.filter(({ spec }) => spec === "claude").length, 1);
-    assert.equal(probes.filter(({ spec }) => spec === "opencode").length, 1);
-    assert.equal(probes.filter(({ spec }) => spec === "pi").length, 1);
-    assert.equal(probes.filter(({ spec }) => spec === "codex").length, 2, "discovery plus routed preflight");
-
-    const second = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
-    assert.notEqual(second.isError, true);
-    assert.deepEqual(liveModels, ["codex", "codex"]);
-    assert.equal(probes.filter(({ spec }) => spec === "claude").length, 1, "project discovery is cached");
-    assert.equal(probes.filter(({ spec }) => spec === "opencode").length, 1);
-    assert.equal(probes.filter(({ spec }) => spec === "pi").length, 1);
-    assert.equal(probes.filter(({ spec }) => spec === "codex").length, 3, "only normal preflight repeats");
-  } finally {
-    await dispose();
-    if (previousDefault === undefined) delete process.env.AGENTPRISM_DEFAULT_BACKEND;
-    else process.env.AGENTPRISM_DEFAULT_BACKEND = previousDefault;
-  }
-});
-
-test("an explicit AGENTPRISM_DEFAULT_BACKEND wins and skips automatic candidate discovery", async () => {
-  const previousDefault = process.env.AGENTPRISM_DEFAULT_BACKEND;
-  process.env.AGENTPRISM_DEFAULT_BACKEND = "pi";
-  const liveModels: Array<string | undefined> = [];
-  const probes: string[] = [];
-  const runner = Object.assign(
-    makeRunner((_prompt, options) => {
-      liveModels.push(options.model);
-      return "ok";
-    }),
-    {
-      defaultBackendId: () => "pi",
-      listBackends: () => ["claude", "codex", "opencode", "pi"],
-      async probeConfigOptions(spec?: string) {
-        probes.push(spec ?? "claude");
-        return { backendId: spec ?? "pi", options: [] };
-      },
-    },
-  );
-  const { client, dispose } = await connect(runner, { listTools: true });
-  try {
-    const result = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
-    assert.notEqual(result.isError, true);
-    assert.deepEqual(liveModels, ["pi"]);
-    assert.deepEqual(probes, ["pi"], "only the normal routed preflight probes the explicit backend");
-    assert.doesNotMatch(textOf(result), /auto-selected backend/);
-  } finally {
-    await dispose();
-    if (previousDefault === undefined) delete process.env.AGENTPRISM_DEFAULT_BACKEND;
-    else process.env.AGENTPRISM_DEFAULT_BACKEND = previousDefault;
-  }
-});
-
-test("automatic default discovery leaves an inspectable failed run when every backend is unavailable", async () => {
-  const previousDefault = process.env.AGENTPRISM_DEFAULT_BACKEND;
-  delete process.env.AGENTPRISM_DEFAULT_BACKEND;
-  let liveCalls = 0;
-  const runner = Object.assign(
-    makeRunner(() => {
-      liveCalls++;
-      return "unexpected";
-    }),
-    {
-      defaultBackendId: () => "claude",
-      listBackends: () => ["claude", "codex", "pi"],
-      async probeConfigOptions(spec?: string) {
-        if (spec === "pi") {
-          return {
-            backendId: "pi",
-            options: [{ id: "model", name: "Model", type: "select" as const, currentValue: "", options: [] }],
-          };
-        }
-        throw new Error(`${spec} login required`);
-      },
-    },
-  );
-  const { client, dispose } = await connect(runner, { listTools: true });
-  try {
-    const result = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
-    assert.equal(result.isError, false, "status reads succeed independently of execution outcome");
-    assert.equal(structured(result)?.status, "failed");
-    assert.match(String(structured(result)?.runId), RUN_ID);
-    assert.equal(liveCalls, 0);
-    assert.match(textOf(result), /No usable default ACP backend/);
-    assert.match(textOf(result), /claude login required/);
-    assert.match(textOf(result), /pi: session opened but/);
-  } finally {
-    await dispose();
-    if (previousDefault === undefined) delete process.env.AGENTPRISM_DEFAULT_BACKEND;
-    else process.env.AGENTPRISM_DEFAULT_BACKEND = previousDefault;
-  }
-});
-
 test("fully pinned and agent-less workflows do not trigger automatic backend discovery", async () => {
   const previousDefault = process.env.AGENTPRISM_DEFAULT_BACKEND;
   delete process.env.AGENTPRISM_DEFAULT_BACKEND;
@@ -450,7 +320,7 @@ test("spread-built explicit models need only their routed probe, even without a 
   }
 });
 
-test("a live branch not covered by canonical preflight configuration fails closed", async () => {
+test("an unconfigured live branch fails with actionable discovery", async () => {
   const previousDefault = process.env.AGENTPRISM_DEFAULT_BACKEND;
   delete process.env.AGENTPRISM_DEFAULT_BACKEND;
   const liveModels: Array<string | undefined> = [];
@@ -494,8 +364,8 @@ test("a live branch not covered by canonical preflight configuration fails close
     assert.equal(result.isError, false, "status reads succeed independently of execution outcome");
     assert.equal(structured(result)?.status, "failed");
     assert.deepEqual(liveModels, ["claude"]);
-    assert.deepEqual(probes, ["claude"], "uncovered calls need no speculative default probe");
-    assert.match(textOf(result), /occurrence 1 has no host-selected configuration/);
+    assert.deepEqual(probes, ["claude", "claude", "codex"], "missing routes discover catalogs without selecting a default");
+    assert.match(textOf(result), /has no configured model route/);
   } finally {
     await dispose();
     if (previousDefault === undefined) delete process.env.AGENTPRISM_DEFAULT_BACKEND;
@@ -549,7 +419,7 @@ test("run and status both validate after listTools caching; status is read-only 
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
     const script = [
-      'export const meta = { name: "inspection", description: "inspection", phases: [{ title: "Plan" }, { title: "Review" }] };',
+      'export const meta = { name: "inspection", model: "claude", description: "inspection", phases: [{ title: "Plan" }, { title: "Review" }] };',
       'phase("Plan");',
       'log("plan complete");',
       'await agent("one", { label: "plan-one" });',
@@ -602,7 +472,7 @@ test("status surfaces a live run's in-flight agent calls", async () => {
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
     const script = [
-      'export const meta = { name: "live-inspect", description: "live inspect", phases: [{ title: "Work" }] };',
+      'export const meta = { name: "live-inspect", model: "claude", description: "live inspect", phases: [{ title: "Work" }] };',
       'phase("Work");',
       'await agent("first", { label: "settled-agent" });',
       'await agent("hold", { label: "held-agent" });',
@@ -692,7 +562,7 @@ test("status keeps its observation projection within 24 KiB and text within 8 Ki
   try {
     const phases = Array.from({ length: 70 }, (_, index) => ({ title: `phase-${index}-${"x".repeat(600)}` }));
     const script = [
-      `export const meta = ${JSON.stringify({ name: "large", description: "large", phases })};`,
+      `export const meta = ${JSON.stringify({ name: "large", description: "large", model: "claude", phases })};`,
       'for (let i = 0; i < 50; i++) { phase(`dynamic-${i}-${"x".repeat(600)}`); log(`line-${i}-${"😀".repeat(1000)}`); await agent(`prompt-${i}`, { label: `call-${i}` }); }',
       'return true;',
     ].join("\n");
@@ -743,7 +613,7 @@ test("paused and failed terminal summaries carry redacted final-20 log tails and
 
     const failed = await runAndObserve(client, {
         action: "run",
-        script: `export const meta = { name: "failed-tail", description: "failed" };\n${logs}\nawait agent("fail");`,
+        script: `export const meta = { name: "failed-tail", model: "claude", description: "failed" };\n${logs}\nawait agent("fail");`,
       });
     assert.equal(failed.isError, false, "status reads succeed independently of execution outcome");
     const failedTail = field(structured(failed)?.logTail, "lines") as string[];
@@ -752,7 +622,7 @@ test("paused and failed terminal summaries carry redacted final-20 log tails and
 
     const empty = await runAndObserve(client, {
         action: "run",
-        script: 'export const meta = { name: "empty-tail", description: "empty" };\nawait agent("fail");',
+        script: 'export const meta = { name: "empty-tail", model: "claude", description: "empty" };\nawait agent("fail");',
       });
     const emptyLines = field(structured(empty)?.logTail, "lines") as string[];
     assert.equal(emptyLines.length, 1);
@@ -1006,7 +876,7 @@ test("mocked dry-run failure persists its accepted run without executing a real 
     const result = await runAndObserve(client, {
         action: "run",
         script: [
-          'export const meta = { name: "preflight-failure", description: "must not admit" };',
+          'export const meta = { name: "preflight-failure", model: "claude", description: "must not admit" };',
           'await agent("mock-only", { label: "mock-only" });',
           'throw new Error("dry-run boom");',
         ].join("\n"),

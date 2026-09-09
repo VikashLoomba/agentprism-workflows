@@ -492,7 +492,7 @@ test("modern subscriptions/listen receives list and durable run-event updates", 
   });
   const listSubscription = await connected.client.listen({ resourcesListChanged: true });
   try {
-    const script = `export const meta = { name: "modern-events", description: "modern events" };
+    const script = `export const meta = { name: "modern-events", model: "codex", description: "modern events" };
 return await agent("wait", { label: "wait" });`;
     const accepted = await connected.client.callTool({
       name: "workflow",

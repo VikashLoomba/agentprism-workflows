@@ -2,16 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { ProtocolError, ProtocolErrorCode } from "@modelcontextprotocol/server";
 import {
-  parseWorkflowScript, probeHarnessConfig, redactText, validateWorkflowScript,
-  type ExecOptions, type PersistedRunState, type ValidateHarnessOptions,
-  type ValidatedAgentCall, type WorkflowAgentConfiguration, type WorkflowBackendConfig,
+  parseWorkflowScript, redactText, validateWorkflowScript,
+  type PersistedRunState, type WorkflowBackendConfig,
 } from "@automatalabs/workflows";
 import type { AgentRunner } from "@automatalabs/shared-types";
-import { assertSelectedWorkflowModels, buildWorkflowAgentConfigurationPlan } from "./workflow-agent-configuration.js";
-import { DEFAULT_BACKEND_ENV, discoverProjectDefaultBackend, workflowNeedsPinnedDefault } from "./default-backend.js";
 import type { ProjectContext } from "./project-registry.js";
 import { clampWorkflowInput, type WorkflowExecuteToolInput, type WorkflowSetupResponseToolInput } from "./workflow-tool-input.js";
-import { validationText, workflowProbeRunner } from "./workflow-preflight.js";
+import { missingRoutingDiagnostics, validationText, workflowProbeRunner } from "./workflow-preflight.js";
 
 /** Every MCP request has a finite transport budget; human input is durable run state. */
 export const WORKFLOW_REQUEST_BOUND_MS = 45_000;
@@ -20,7 +17,7 @@ const MAX_SCRIPT_BYTES = 1_048_576;
 
 export interface WorkflowSetupRequest {
     id: string;
-    kind: "backend-approval" | "agent-configuration";
+    kind: "backend-approval";
     title: string;
     message: string;
     requestedSchema: {
@@ -34,13 +31,9 @@ export interface WorkflowSetupRequest {
 export type WorkflowSetup = { state: "preparing" } | { state: "input-required"; request: WorkflowSetupRequest };
 
 interface PreparationData extends Record<string, unknown> {
-  canConfigureAgents: boolean;
   approvedKeys: string[];
   setup?: WorkflowSetupRequest;
   pendingBackendKey?: string;
-  plan?: { calls: ValidatedAgentCall[]; harnesses: ValidateHarnessOptions[]; selectionHash: string };
-  agentConfigurations?: Record<number, WorkflowAgentConfiguration>;
-  selectedOccurrences?: number[];
   responses: Record<string, string>;
 }
 
@@ -87,7 +80,8 @@ function readAcceptedScript(input: WorkflowExecuteToolInput): string {
 function preparationData(state: PersistedRunState): PreparationData {
   const preparation = state.preparation;
   const data = preparation?.data as PreparationData | undefined;
-  if (preparation?.format !== 1 || !data || typeof data.canConfigureAgents !== "boolean" || !Array.isArray(data.approvedKeys) || !data.responses) {
+  if (preparation?.format !== 1 || !data || !Array.isArray(data.approvedKeys) || !data.responses ||
+    (data.setup !== undefined && data.setup.kind !== "backend-approval")) {
     throw new Error("Stored workflow preparation is incompatible; start a fresh run");
   }
   return data;
@@ -114,7 +108,7 @@ export class WorkflowLifecycle {
     this.probeRunner = workflowProbeRunner(runner);
   }
 
-  accept(input: WorkflowExecuteToolInput, canConfigureAgents: boolean): { runId: string; duplicate: boolean } {
+  accept(input: WorkflowExecuteToolInput): { runId: string; duplicate: boolean } {
     const operation = workflowOperation(input);
     const existing = this.context.manager.findAcceptedRun(operation);
     if (existing) {
@@ -128,7 +122,7 @@ export class WorkflowLifecycle {
     if (!this.context.activeRuns.reserve()) throw new Error("Workflow limit reached (4 active or preparing runs)");
     let reserved = true;
     try {
-      const data: PreparationData = { canConfigureAgents, approvedKeys: [], responses: {} };
+      const data: PreparationData = { approvedKeys: [], responses: {} };
       const accepted = this.context.manager.prepareRun(script, input.args, {
         ...clampWorkflowInput(input), agent: this.runner, operation,
         preparation: { format: 1, state: "preparing", data, responses: data.responses },
@@ -212,25 +206,14 @@ export class WorkflowLifecycle {
     if (!this.context.activeRuns.has(input.runId)) {
       throw new Error("Workflow setup requires an available active-run slot and ownership; retry after capacity is available");
     }
-    if (input.response.action === "accept") {
-      if (data.setup.kind === "backend-approval") {
-        if (input.response.content.approve && data.pendingBackendKey) data.approvedKeys.push(data.pendingBackendKey);
-        else {
-          cancelSetup("Workflow setup was declined");
-          return;
-        }
-      } else {
-        if (!data.plan) throw new Error("Workflow setup is missing its exact advertised selection plan");
-        const plan = buildWorkflowAgentConfigurationPlan(parseWorkflowScript(state.script).meta, data.plan.calls, data.plan.harnesses);
-        if (!plan || plan.selectionHash !== data.plan.selectionHash) throw new Error("Stored workflow selection plan is incompatible");
-        data.agentConfigurations = plan.parse(input.response.content);
-        data.selectedOccurrences = plan.callIndexes;
-      }
+    if (input.response.content.approve && data.pendingBackendKey) data.approvedKeys.push(data.pendingBackendKey);
+    else {
+      cancelSetup("Workflow setup was declined");
+      return;
     }
     data.responses[input.setupId] = fingerprint;
     delete data.setup;
     delete data.pendingBackendKey;
-    delete data.plan;
     this.save(input.runId, data, state.preparationRevision);
     this.schedule(input.runId);
   }
@@ -279,7 +262,7 @@ export class WorkflowLifecycle {
     // Timeout invalidates this entire driver generation. Late probe completion cannot admit it.
     let expired = false;
     const run = async () => {
-      const staticValidation = await validateWorkflowScript(script, { args: input.args, dryRun: false });
+      const staticValidation = await validateWorkflowScript(script, { args: input.args, dryRun: false, requireAgentConfiguration: true });
       if (!staticValidation.ok) throw new Error(validationText(staticValidation));
       const backends = parseWorkflowScript(script).meta.backends;
       const allowed = ["1", "true"].includes(process.env.AGENTPRISM_ALLOW_SCRIPT_BACKENDS?.trim().toLowerCase() ?? "");
@@ -295,63 +278,22 @@ export class WorkflowLifecycle {
         if (!expired) this.save(runId, data, revision);
         return;
       }
-      const discovery = await validateWorkflowScript(script, {
-        args: input.args, cwd: this.context.projectDir, maxAgents: input.maxAgents,
-        timeoutMs: 30_000, probeConfig: false, loadSavedWorkflow: (name) => manager.resolveSavedWorkflow(name),
-      });
-      if (!discovery.ok) throw new Error(validationText(discovery));
-      let agentConfigurations: ExecOptions["agentConfigurations"] = data.agentConfigurations;
-      if (data.agentConfigurations !== undefined) {
-        const harnesses = [...new Set([...(this.probeRunner.listBackends?.() ?? []), ...Object.keys(backends ?? {})])];
-        const current = await probeHarnessConfig({ cwd: this.context.projectDir,
-          ...(harnesses.length ? { harnesses } : {}), backends, probeRunner: this.probeRunner });
-        assertSelectedWorkflowModels(data.selectedOccurrences ?? [], data.agentConfigurations, current.harnessOptions);
-      }
-      if (agentConfigurations === undefined && data.canConfigureAgents && discovery.dryRun?.agentCalls.some((call) => call.model === undefined)) {
-        const configuredHarnesses = [...new Set([...(this.probeRunner.listBackends?.() ?? []), ...Object.keys(backends ?? {})])];
-        const advertised = await probeHarnessConfig({ cwd: this.context.projectDir,
-          ...(configuredHarnesses.length ? { harnesses: configuredHarnesses } : {}), backends, probeRunner: this.probeRunner });
-        const calls = discovery.dryRun?.agentCalls ?? [];
-        const plan = buildWorkflowAgentConfigurationPlan(staticValidation.parse.meta!, calls, advertised.harnessOptions);
-        if (plan) {
-          // Validator/probe records use optional undefined properties in memory. Persist the
-          // actual JSON catalog representation, then rebuild this exact form on response.
-          data.plan = JSON.parse(JSON.stringify({ calls, harnesses: advertised.harnessOptions,
-            selectionHash: plan.selectionHash })) as PreparationData["plan"];
-          data.setup = { id: randomUUID(), kind: "agent-configuration", title: plan.request.title,
-            message: plan.request.message, requestedSchema: plan.request.requestedSchema };
-          if (!expired) this.save(runId, data, revision);
-          return;
-        }
-      }
-      let defaultModel: string | undefined;
-      if (agentConfigurations === undefined && workflowNeedsPinnedDefault(discovery)) {
-        if (process.env[DEFAULT_BACKEND_ENV] !== undefined) defaultModel = this.probeRunner.defaultBackendId?.();
-        else if (this.probeRunner.defaultBackendId && this.probeRunner.listBackends) {
-          defaultModel = (await discoverProjectDefaultBackend(this.context, this.probeRunner)).backendId;
-        }
-      }
       const preflight = await validateWorkflowScript(script, {
         args: input.args, cwd: this.context.projectDir, maxAgents: input.maxAgents, timeoutMs: 30_000,
-        defaultModel, agentConfigurations, requireAgentConfiguration: agentConfigurations !== undefined,
+        requireAgentConfiguration: true,
         probeRunner: this.probeRunner, loadSavedWorkflow: (name) => manager.resolveSavedWorkflow(name),
       });
-      if (!preflight.ok) throw new Error(validationText(preflight));
-      if (agentConfigurations === undefined) {
-        const canonical: Record<number, WorkflowAgentConfiguration> = {};
-        for (const call of preflight.dryRun?.agentCalls ?? []) {
-          const model = call.model ?? defaultModel;
-          if (!model) throw new Error(`Agent occurrence ${call.index} (${call.label}) has no resolved provider/model`);
-          canonical[call.index] = { model, ...(call.mode === undefined ? {} : { mode: call.mode }),
-            ...(call.configOptions === undefined ? {} : { configOptions: call.configOptions }) };
-        }
-        agentConfigurations = canonical;
+      if (!preflight.ok) {
+        const diagnostic = validationText(preflight);
+        throw new Error(preflight.dryRun?.missingAgentConfiguration !== undefined
+          ? `${diagnostic}\n\n${await missingRoutingDiagnostics(this.probeRunner, this.context.projectDir, backends)}`
+          : diagnostic);
       }
       const current = manager.getPersistence().load(runId);
       if (expired || !current?.preparation || current.status !== "pending" || current.preparationRevision !== revision) return;
       const started = manager.admitPreparedRun(runId, {
-        agent: this.runner, defaultModel, agentConfigurations, requireAgentConfiguration: true,
-        agentConfigurationSource: data.agentConfigurations ? "mcp-setup" : "mcp-routing",
+        agent: this.runner, requireAgentConfiguration: true,
+        onMissingAgentConfiguration: () => missingRoutingDiagnostics(this.probeRunner, this.context.projectDir, backends),
         scriptBackends: backends, maxAgents: input.maxAgents, concurrency: input.concurrency, agentRetries: input.agentRetries,
       });
       this.context.activeRuns.track(runId, started.promise);

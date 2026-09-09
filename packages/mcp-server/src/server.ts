@@ -84,6 +84,9 @@ import type { WorkflowRunControlRouter } from "./daemon/run-control.js";
 import {
   configSummary,
   configText,
+  missingRoutingDiagnostics,
+  WORKFLOW_CONFIG_PROBE_TIMEOUT_MS,
+  WORKFLOW_CONFIG_DISCOVERY_TIMEOUT_MS,
   workflowProbeRunner,
 } from "./workflow-preflight.js";
 import type { WorkflowServerControl } from "./lifecycle.js";
@@ -99,13 +102,6 @@ import {
   type WorkflowPendingPermission,
   type WorkflowPermissionResponseAcknowledgement,
 } from "./workflow-permissions.js";
-
-function supportsWorkflowSetupForms(capabilities: unknown): boolean {
-  if (!capabilities || typeof capabilities !== "object") return false;
-  const elicitation = (capabilities as { elicitation?: unknown }).elicitation;
-  return elicitation !== null && typeof elicitation === "object" &&
-    (Object.keys(elicitation).length === 0 || "form" in elicitation);
-}
 
 const SERVER_NAME = "agentprism-workflow";
 const require = createRequire(import.meta.url);
@@ -140,7 +136,7 @@ export const SERVER_INSTRUCTIONS = [
     "script that fans out agent() subagents and optional checkpoint() gates. Run and resume always return " +
     "a durable runId for bounded status, permissions-response, result, and stop calls; resume continues " +
     "the exact run from its durable admission and journal. action:\"config\" discovers the live backend " +
-    "and model option catalog. Accepted runs prepare durably; live execution begins only after validation and setup. Checkpoints always require an explicit answer.",
+    "and model option catalog. Every agent call must resolve an explicit model route (backend-only routes are valid). Accepted runs prepare durably; custom backends require approval. Checkpoints always require an explicit answer.",
   "• repl — INTERACTIVE STATEFUL orchestration. A persistent per-project JavaScript VM driven with " +
     "action:\"eval\". Named bindings, pending subagent handles, queued turns, checkpoints, and `_` " +
     "persist between calls and survive daemon restarts. Use it when the next orchestration step depends " +
@@ -267,6 +263,7 @@ interface RetainedInspectionText {
 }
 
 interface InspectionRetentionMetadata {
+  configurationDiagnosticReason?: string;
   phases: RetainedInspectionText[];
   logs: RetainedInspectionText[];
 }
@@ -286,6 +283,11 @@ function inspectionRetentionMetadata(
 ): InspectionRetentionMetadata {
   const live = manager.getRun(runId);
   const persisted = live ? undefined : manager.getPersistence().load(runId);
+  const reason = live?.error?.message ?? persisted?.reason;
+  const errorCode = live?.error?.code ?? persisted?.errorCode;
+  const configurationDiagnosticReason = errorCode === WorkflowErrorCode.SCRIPT_VALIDATION_ERROR && reason !== undefined
+    ? truncateUtf8(redactText(reason).value, 6_144, "…[configuration diagnostics truncated]")
+    : undefined;
   const sourcePhases = live?.snapshot.phases ?? persisted?.phases ?? [];
   const sourceLogs = live?.snapshot.logs ?? persisted?.logs ?? [];
   const phaseCandidates = sourcePhases.slice(-MAX_INSPECTION_PHASES).map(retainedInspectionText);
@@ -293,6 +295,7 @@ function inspectionRetentionMetadata(
     status.filter.logLines === 0 ? [] : sourceLogs.slice(-status.filter.logLines)
   ).map(retainedInspectionText);
   return {
+    configurationDiagnosticReason,
     phases: status.phases.length === 0 ? [] : phaseCandidates.slice(-status.phases.length),
     logs: status.logTail.lines.length === 0 ? [] : logCandidates.slice(-status.logTail.lines.length),
   };
@@ -305,6 +308,7 @@ function addInspectionResourceFields<Status extends WorkflowRunStatus, Fields ex
 ): Status & Fields {
   const projected: Status & Fields = {
     ...status,
+    ...(retention.configurationDiagnosticReason === undefined ? {} : { reason: retention.configurationDiagnosticReason }),
     calls: [...status.calls],
     logTail: { ...status.logTail, lines: [...status.logTail.lines] },
     phases: [...status.phases],
@@ -977,66 +981,78 @@ export function createWorkflowServer(
       }
       const parsedInput = parseWorkflowToolInput(args, { requireProjectDir });
       if (parsedInput.action === "config") {
-        let cwd = defaultContext?.projectDir;
-        if (parsedInput.projectDir !== undefined) {
-          const resolution = resolveProjectDir(parsedInput.projectDir);
-          if (!resolution.ok) {
-            throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Invalid workflow tool input: ${resolution.message}`);
+        return boundWorkflowRequest((async () => {
+          let cwd = defaultContext?.projectDir;
+          if (parsedInput.projectDir !== undefined) {
+            const resolution = resolveProjectDir(parsedInput.projectDir);
+            if (!resolution.ok) {
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Invalid workflow tool input: ${resolution.message}`);
+            }
+            cwd = resolution.projectDir;
           }
-          cwd = resolution.projectDir;
-        }
-        if (cwd === undefined) {
-          throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Invalid workflow tool input: config requires projectDir on this server");
-        }
-        if (parsedInput.modelFilter !== undefined) {
+          if (cwd === undefined) {
+            throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Invalid workflow tool input: config requires projectDir on this server");
+          }
+          if (parsedInput.modelFilter !== undefined) {
+            try {
+              buildModelFilter(parsedInput.modelFilter);
+            } catch (error) {
+              throw new ProtocolError(
+                ProtocolErrorCode.InvalidParams,
+                `Invalid workflow tool input: modelFilter is invalid — ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+          const discovery = new AbortController();
+          const discoveryTimer = setTimeout(() => discovery.abort(new Error(
+            `config discovery timed out after ${WORKFLOW_CONFIG_DISCOVERY_TIMEOUT_MS}ms`,
+          )), WORKFLOW_CONFIG_DISCOVERY_TIMEOUT_MS);
           try {
-            buildModelFilter(parsedInput.modelFilter);
-          } catch (error) {
-            throw new ProtocolError(
-              ProtocolErrorCode.InvalidParams,
-              `Invalid workflow tool input: modelFilter is invalid — ${error instanceof Error ? error.message : String(error)}`,
-            );
+            let report = await probeHarnessConfig({
+              harnesses: parsedInput.harnesses,
+              modelSpecs: parsedInput.modelSpecs,
+              cwd,
+              probeRunner, probeTimeoutMs: WORKFLOW_CONFIG_PROBE_TIMEOUT_MS,
+              signal: discovery.signal,
+            });
+            const missingCatalogBackends = [...new Set(
+              report.harnessOptions
+                .filter((harness) => !harness.probed && harness.model !== undefined)
+                .map((harness) => harness.backendId)
+                .filter((backendId) => !report.harnessOptions.some((harness) =>
+                  harness.probed && harness.backendId === backendId && harness.model === undefined)),
+            )];
+            if (missingCatalogBackends.length > 0) {
+              const catalogs = await probeHarnessConfig({
+                harnesses: missingCatalogBackends,
+                cwd,
+                probeRunner, probeTimeoutMs: WORKFLOW_CONFIG_PROBE_TIMEOUT_MS,
+                signal: discovery.signal,
+              });
+              report = {
+                ok: false,
+                exitCode: 1,
+                harnessOptions: [...report.harnessOptions, ...catalogs.harnessOptions],
+              };
+            }
+            let projected;
+            try {
+              projected = configSummary(report, parsedInput.modelFilter);
+            } catch (error) {
+              throw new ProtocolError(
+                ProtocolErrorCode.InvalidParams,
+                `Invalid workflow tool input: modelFilter is invalid — ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+            return {
+              structuredContent: projected,
+              content: [{ type: "text", text: configText(report, parsedInput.modelFilter) }],
+              isError: false,
+            };
+          } finally {
+            clearTimeout(discoveryTimer);
           }
-        }
-        let report = await probeHarnessConfig({
-          harnesses: parsedInput.harnesses,
-          modelSpecs: parsedInput.modelSpecs,
-          cwd,
-          probeRunner,
-        });
-        const missingCatalogBackends = [...new Set(
-          report.harnessOptions
-            .filter((harness) => !harness.probed && harness.model !== undefined)
-            .map((harness) => harness.backendId)
-            .filter((backendId) => !report.harnessOptions.some((harness) =>
-              harness.probed && harness.backendId === backendId && harness.model === undefined)),
-        )];
-        if (missingCatalogBackends.length > 0) {
-          const catalogs = await probeHarnessConfig({
-            harnesses: missingCatalogBackends,
-            cwd,
-            probeRunner,
-          });
-          report = {
-            ok: false,
-            exitCode: 1,
-            harnessOptions: [...report.harnessOptions, ...catalogs.harnessOptions],
-          };
-        }
-        let projected;
-        try {
-          projected = configSummary(report, parsedInput.modelFilter);
-        } catch (error) {
-          throw new ProtocolError(
-            ProtocolErrorCode.InvalidParams,
-            `Invalid workflow tool input: modelFilter is invalid — ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-        return {
-          structuredContent: projected,
-          content: [{ type: "text", text: configText(report, parsedInput.modelFilter) }],
-          isError: false,
-        };
+        })());
       }
       const context = resolveContext(parsedInput);
       if (context === undefined) {
@@ -1490,6 +1506,7 @@ export function createWorkflowServer(
         try {
           const started = await manager.continueRun(input.runId, {
             agent: runner, operation: workflowOperation(input), maxAgents: input.maxAgents,
+            onMissingAgentConfiguration: () => missingRoutingDiagnostics(probeRunner, context.projectDir, persisted?.admission?.scriptBackends),
             concurrency: input.concurrency, agentRetries: input.agentRetries, checkpointReplies: input.checkpointReplies,
           });
           if (!started.accepted) {
@@ -1521,7 +1538,7 @@ export function createWorkflowServer(
               ...scriptContentBlocks(scriptResources, input.runId), ...eventsContentBlocks(scriptResources, input.runId)], isError: false };
         } finally { if (reserved) context.activeRuns.releaseReservation(); }
       }
-      const accepted = lifecycle.accept(parsedInput, supportsWorkflowSetupForms(toolCatalog.clientCapabilities(ctx)) || toolCatalog.supportsApps(ctx));
+      const accepted = lifecycle.accept(parsedInput);
       const state = manager.getPersistence().load(accepted.runId)!;
       scriptResources.notifyRunAdmitted(accepted.runId);
       return {

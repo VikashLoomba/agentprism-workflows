@@ -170,7 +170,7 @@ If the bin isn't on the host's `PATH`, launch it through `npx` instead:
 }
 ```
 
-`env` here is inherited by the server process **and** by every agent subprocess it spawns (see [Backends & auth](#backends--auth)), so it is where you put `AGENTPRISM_*` settings and any credentials the agent CLIs need. With an Apps/form-capable MCP client, one durable setup request lets the user supply provider/model and optional advertised mode/config only for dry-run-observed calls whose effective model is unresolved. Explicit and inherited models, including backend-only specs, are preserved; omitted optional mode/config fields do not trigger a form. For clients without form elicitation, leave `AGENTPRISM_DEFAULT_BACKEND` unset for automatic selection: a model-less call causes the server to probe configured backends without prompting and pin one project default. Set it explicitly to `claude`, `codex`, `opencode`, `pi`, or a registered custom backend name only when the operator wants to force that automatic fallback.
+`env` here is inherited by the server process **and** by every agent subprocess it spawns (see [Backends & auth](#backends--auth)), so it is where you put `AGENTPRISM_*` settings and any credentials the agent CLIs need. Every MCP client must configure an effective model directly or through a named-agent definition, resolved tier, phase, or `meta.model`. A backend-only route such as `codex` explicitly uses that backend's configured default model. Missing routing fails with live discovery guidance; neither agent-configuration setup nor automatic backend selection fills it. `AGENTPRISM_DEFAULT_BACKEND` does not configure an otherwise model-less MCP call.
 
 After reload, `workflow` and `repl` appear; Apps-capable hosts also discover `workflow_monitor`.
 
@@ -222,6 +222,12 @@ Discover exact live model, mode, and config values before pinning them:
 Catalogs preserve raw mode IDs, names, descriptions, and `_meta`. For trusted work, choose
 Claude `bypassPermissions` or Codex `agent` when advertised. Claude `auto` uses a model classifier and may request permission.
 
+Config returns a compact `authoringSummary`: Claude/Codex's small catalogs, Pi's native
+`enabledModels` preferences intersected with authenticated models plus unmatched patterns, and
+OpenCode's direct models before explicitly classified aggregator browse groups (including OpenRouter, OpenCode, Hugging Face, and Bedrock). The current
+model is shown separately. Expand `openrouter/*` with `modelFilter`; browse selectors cannot dispatch.
+Use `modelSpecs` for exact-model option discovery. Partial probe failures preserve healthy catalogs.
+
 ### Durable acceptance and setup
 
 ```json
@@ -263,7 +269,7 @@ type WorkflowSetup =
   | { state:"preparing" }
   | { state:"input-required"; request: {
       id: string;
-      kind: "backend-approval" | "agent-configuration";
+      kind: "backend-approval";
       title: string;
       message: string;
       requestedSchema: {
@@ -282,13 +288,14 @@ the same setup ID is idempotent even after execution starts; a conflicting respo
 Decline, cancel, and a false backend approval retain a cancelled (`aborted`) run in history.
 
 Script-declared spawn commands require approval before any probe or live dispatch, unless
-`AGENTPRISM_ALLOW_SCRIPT_BACKENDS=1` is set. Apps/form-capable clients get an agent-configuration
-setup request only for mock-observed calls with unresolved effective models. Authored and inherited
-models, including backend-only specs, are preserved. The saved form includes provider/model choices,
-optional advertised mode/config, phase and label, and bounded credential-redacted task previews.
-Accepted choices are checked against the saved form and current catalog. The full routed preflight
-then persists canonical effective configurations before execution. Raw submitted form fields are
-not retained. Clients without either capability keep the automatic default-backend policy.
+`AGENTPRISM_ALLOW_SCRIPT_BACKENDS=1` is set. All clients require each actual call to resolve a
+model directly or through an agent definition, resolved tier, phase, or `meta.model`. A backend-only
+route such as `codex` explicitly retains that backend's default model. Mode and config options remain
+optional. Missing routing returns an actionable error with bounded live discovery; there is no
+agent-configuration setup or automatic backend selection. Mock validation cannot prove coverage;
+additional configured calls on live branches are valid. Format-3 admission captures immutable tier
+and named-agent routing inputs and approved backend definitions with an integrity hash before live
+dispatch. Same-ID continuation reuses the snapshot without routing discovery or file drift.
 
 ### Output and interaction
 
@@ -319,7 +326,7 @@ a successor cannot reconstruct it. Setup and checkpoints, in contrast, are durab
 
 An `AUTH_REQUIRED` pause reports `reason:"auth_required"` and `outcome.authContext`. Configure the
 named backend's credentials out of band, then call `action:"resume"` with a new `requestId` and the
-same `runId`. Continuation uses the immutable stored script, args, cwd, canonical agent configuration,
+same `runId`. Continuation uses the immutable stored script, args, cwd, immutable routing inputs,
 journal, event stream, cumulative usage, and checkpoint answers; it never accepts edited input.
 Historical records without current admission or explicit checkpoint provenance remain readable
 where supported but refuse continuation/reuse clearly; start a fresh run.
@@ -610,7 +617,7 @@ The prompt is intentionally compact: it frames the optional **`task`**, directs 
 
 ## Backends & auth
 
-Each `agent()` call is dispatched to an **ACP agent server** chosen by the call's effective `model`/`tier`. Apps/form-capable MCP clients select only observed calls whose effective model is unresolved before execution as described above. For clients without that capability, an explicitly present `AGENTPRISM_DEFAULT_BACKEND` is the fallback. When it is truly unset, the MCP server runs zero-token session/config probes only for workflows that may reach a model-less call, excludes definite probe failures and explicitly empty built-in model catalogs, prefers positive session-open readiness evidence (Codex authorization or Pi's credential-filtered catalog), then falls back to the first session-ready backend whose prompt authentication remains unknown. The selected backend is pinned into validation, call identity, execution, and resume; a later `AUTH_REQUIRED` pauses rather than switching providers. The four built-in backends are:
+Each `agent()` call is dispatched to an **ACP agent server** chosen by the call's effective `model`/`tier`. Every actual call requires a model directly or through inherited routing. Mode and config options remain optional. Missing routes fail before dispatch with bounded catalog guidance; Config discovers options without choosing a route. Format-3 admission preserves captured tier and named-agent inputs for cold continuation. A later `AUTH_REQUIRED` pauses without switching providers. The four built-in backends are:
 
 - **Claude** → `@agentclientprotocol/claude-agent-acp` (the Claude Agent SDK over ACP). By default the server resolves that package's bin and runs it under the current Node; if it can't be resolved, it falls back to `npx -y @agentclientprotocol/claude-agent-acp`.
 - **Codex** → `@automatalabs/codex-acp` (a published fork that bakes in the structured-output patch). By default the server resolves that package and runs it under the current Node.
@@ -625,7 +632,7 @@ A workflow script can **declare its own backends** in `meta.backends` as
 `AGENTPRISM_ALLOW_SCRIPT_BACKENDS=1` is configured. Every client can answer with `setup-response`;
 repeat answers are scoped to the saved setup ID. Host-registered names always win over declarations.
 
-**Authentication belongs to the agents, not this server.** Claude, Codex, and OpenCode use their normal CLI credentials; pi uses the selected provider's environment key or `~/.pi/agent/auth.json`. There is no separate auth state for an MCP host to inspect or manage. In particular, a successful no-prompt config probe means session/config discovery succeeded, not that ACP universally proved first-prompt authentication; ambient CLI credentials are not observable through generic runner bookkeeping, so automatic default selection reports unknown readiness honestly where necessary. If a run genuinely hits expired/missing credentials, the backend returns ACP `AUTH_REQUIRED` and the managed run **pauses** with `reason: "auth_required"` plus a non-secret `authContext` naming the backend and advertised methods: configure that credential out-of-band, then call `workflow` with `{ action:"resume", requestId, runId }` — that exact run continues from its stored script, args, canonical agent configuration, and journal on the same pinned backend. Programmatic auth flows (env-var/gateway credential injection, LLM provider routing) live in the [`@automatalabs/workflows`](../workflows) SDK runner APIs for hosts that embed the engine directly.
+**Authentication belongs to the agents, not this server.** Claude, Codex, and OpenCode use their normal CLI credentials; pi uses the selected provider's environment key or `~/.pi/agent/auth.json`. There is no separate auth state for an MCP host to inspect or manage. In particular, a successful no-prompt config probe means session/config discovery succeeded, not that ACP universally proved first-prompt authentication; ambient CLI credentials are not observable through generic runner bookkeeping, so discovery never claims universal first-prompt readiness. If a run genuinely hits expired/missing credentials, the backend returns ACP `AUTH_REQUIRED` and the managed run **pauses** with `reason: "auth_required"` plus a non-secret `authContext` naming the backend and advertised methods: configure that credential out-of-band, then call `workflow` with `{ action:"resume", requestId, runId }` — that exact run continues from its stored script, args, immutable routing inputs, and journal on the same pinned backend. Programmatic auth flows (env-var/gateway credential injection, LLM provider routing) live in the [`@automatalabs/workflows`](../workflows) SDK runner APIs for hosts that embed the engine directly.
 
 ---
 
@@ -635,7 +642,7 @@ All settings are read from the environment of the `agentprism-workflow` process 
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `AGENTPRISM_DEFAULT_BACKEND` | unset | Explicit fallback backend used when an `agent()` call's model/tier does not pin a provider: `claude`, `codex`, `opencode`, `pi`, or a registered custom backend name. Form-eliciting clients select only calls with unresolved models; otherwise MCP auto-selects a project default when this variable is absent. If explicitly present but empty/unknown, historical runner behavior falls back to Claude. |
+| `AGENTPRISM_DEFAULT_BACKEND` | unset | Explicit fallback backend used when an `agent()` call's model/tier does not pin a provider: `claude`, `codex`, `opencode`, `pi`, or a registered custom backend name. MCP requires an effective authored/inherited model; this variable cannot fill a missing route. If explicitly present but empty/unknown, historical runner behavior falls back to Claude. |
 | `AGENTPRISM_BACKENDS` | — | Custom ACP backends as a JSON object: `{"<name>": {"command": "…", "args": […], "env": {…}, "sessionMeta": {…}}}`. Registered names route `model`/`tier` specs **before** built-in heuristics; `claude`/`codex`/`opencode`/`pi` are reserved. |
 | `AGENTPRISM_ALLOW_SCRIPT_BACKENDS` | — | `1`/`true` approves **script-declared** `meta.backends` headlessly. Otherwise each accepted run exposes durable backend-approval setup before probing or execution. Understand the risk: this lets any workflow script spawn arbitrary commands. |
 | `AGENTPRISM_ACP_INIT_TIMEOUT_MS` | `60000` | Deadline for a backend's one-time ACP `initialize` handshake; a command that is not an ACP server fails fast with a clear error instead of hanging. |

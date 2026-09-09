@@ -14,6 +14,7 @@ A workflow script is a deterministic orchestrator. Script code owns loops, fan-o
 ```js
 export const meta = {
   name: "review-target",
+  model: "codex",
   description: "Review a target and return concrete findings",
   phases: [{ title: "Review" }],
 };
@@ -59,11 +60,15 @@ const results = (await parallel([
 
 ## Model selection
 
-Omit `model` for the server default, or use a backend-only value such as `"codex"` to retain that backend's configured default model. When `AGENTPRISM_DEFAULT_BACKEND` is truly unset, the MCP server probes backend readiness without prompting and pins one project default at admission; an explicit environment default wins. Before pinning a model id, `mode`, or `configOptions`, call `workflow` with `action:"config"` and use `modelSpecs` for that model's exact domain. For trusted implementation/review work, select Claude `bypassPermissions` or Codex `agent` when advertised. Claude `auto` is classifier-driven and may request permission; do not treat it as full-access autonomy. Pin only exact advertised ids and never guess model or option ids. The effective choices are persisted canonically for the run and reused unchanged by continuation.
+Every actual call must resolve a model from its own options, a named-agent definition, a resolved
+tier, the current phase, or `meta.model`. A backend-only value such as `"codex"` explicitly retains
+that backend's configured default model. Omit a call's `model` only when it inherits a route.
+Missing routing fails with bounded discovery guidance for every client; there is no configuration
+form or automatically selected backend. Mode and config options remain optional. Before pinning a model id, `mode`, or `configOptions`, call `workflow` with `action:"config"` and use `modelSpecs` for that model's exact domain. For trusted implementation/review work, select Claude `bypassPermissions` or Codex `agent` when advertised. Claude `auto` is classifier-driven and may request permission; do not treat it as full-access autonomy. Pin only exact advertised ids and never guess model or option ids. The effective choices are persisted canonically for the run and reused unchanged by continuation.
 
 ## Validation and execution
 
-Every Run requires a caller-generated `requestId`. After bounded input/source checks, the server durably accepts the immutable source and args and returns its `runId` before mock validation, backend probes, or human setup. An early malformed-input/source rejection creates no run. Later preparation failure remains an inspectable failed run, and declined setup remains an inspectable aborted run. No live worker starts until validation and any required approval/configuration finish.
+Every Run requires a caller-generated `requestId`. After bounded input/source checks, the server durably accepts the immutable source and args and returns its `runId` before mock validation, backend probes, or human setup. An early malformed-input/source rejection creates no run. Later preparation failure remains an inspectable failed run, and declined setup remains an inspectable aborted run. No live worker starts until validation and required backend approval and immutable routing admission finish.
 
 Run and Resume always return bounded acknowledgements. Reuse the same `requestId` and identical inputs when an acknowledgement is lost; a new logical operation needs a fresh ID. Retain `runId` for status, setup, checkpoint replies, stop, and results. No workflow execution-mode field is accepted.
 
@@ -78,7 +83,7 @@ Accept a run and retain its `runId`:
   "action": "run",
   "requestId": "review-2026-09-08-1",
   "projectDir": "/absolute/project",
-  "script": "export const meta = { name: 'review', description: 'Review a target' }; return await agent(`Review ${args.target}`, { label: 'review' });",
+  "script": "export const meta = { name: 'review', description: 'Review a target', model: 'codex' }; return await agent(`Review ${args.target}`, { label: 'review' });",
   "args": { "target": "packages/core" }
 }
 ```
@@ -89,7 +94,7 @@ Observe the current state. Status is always an immediate snapshot; issue it agai
 { "action": "status", "runId": "RUN_ID" }
 ```
 
-If `setup.state` is `"input-required"`, answer the exact `setup.request.id` with `action:"setup-response"` and fields matching its `requestedSchema`. Setup acceptance is `{ action:"accept", content:{ ... } }`; decline/cancel has no content. A checkpoint is different: it appears in `outcome.checkpointContext` and requires a new Resume with `checkpointReplies`.
+If `setup.state` is `"input-required"`, answer the backend-approval request at the exact `setup.request.id` with `action:"setup-response"` and fields matching its `requestedSchema`. Setup acceptance is `{ action:"accept", content:{ ... } }`; decline/cancel has no content. A checkpoint is different: it appears in `outcome.checkpointContext` and requires a new Resume with `checkpointReplies`.
 
 Every unanswered `checkpoint()` pauses. For example, answer the exact observed checkpoint index with `{ action:"resume", requestId:"review-answer-1", runId:"RUN_ID", checkpointReplies:{ "1":false } }`. The explicit value follows the script's authored control flow. Timeouts, absent panels, and dismissed interactions cannot supply an answer.
 
@@ -108,7 +113,7 @@ Continue an incomplete run in place; do not resend `script` or `args`:
 ```
 
 The response keeps the same `runId` without exposing an execution-attempt identity. It reuses the
-admitted script, args, effective agent configuration, journal, event stream, cumulative usage, and
+admitted script, args, immutable routing inputs, journal, event stream, cumulative usage, and
 durable checkpoint decisions. Use `status` on that same ID, then `result` after completion.
 Explicitly stop with `{ action:"stop", runId:"RUN_ID" }`. Client disconnection or a request timeout leaves accepted work owned by the server; process loss preserves durable state for later inspection/recovery.
 

@@ -33,6 +33,15 @@ checkpoint `default`/`headless` acceptance paths are removed. Run and resume ack
 asynchronous operations; status is always an immediate snapshot. Identical retries reuse the same
 `requestId`; changed arguments with that ID fail instead of creating another operation.
 
+## Routing and discovery
+
+Every client must supply an effective model directly or through authored routing. Missing routing
+fails preparation or the actual live call with bounded discovery guidance; no agent-configuration
+setup kind exists. `setup-response` remains for explicit custom-backend approval. The Config action
+returns compact `authoringSummary` guidance alongside bounded catalogs; `modelSpecs` selects exact
+models before option discovery and `modelFilter` expands leaf models. Aggregator `/*` entries are
+browse selectors and cannot dispatch. See [explicit agent routing](explicit-agent-routing.md).
+
 ## Protocol and verification
 
 Production registration uses the split MCP SDK v2 boundary. The stateful legacy 2025 transport and

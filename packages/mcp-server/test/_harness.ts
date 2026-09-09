@@ -228,7 +228,7 @@ export function persistedRunFile(runId: string): string | undefined {
 
 /** Valid one-agent script: meta first, exactly one agent() call, returns its result. */
 export const ONE_AGENT_SCRIPT = [
-  'export const meta = { name: "one-agent", description: "a single subagent" };',
+  'export const meta = { name: "one-agent", description: "a single subagent", model: "claude" };',
   'const r = await agent("hello");',
   "return r;",
 ].join("\n");
@@ -241,7 +241,7 @@ export const NO_AGENT_SCRIPT = [
 
 /** Two sequential agent() calls — used to prove resume replays the whole journaled prefix. */
 export const TWO_AGENT_SCRIPT = [
-  'export const meta = { name: "two-agent", description: "two sequential subagents" };',
+  'export const meta = { name: "two-agent", description: "two sequential subagents", model: "claude" };',
   'const a = await agent("alpha");',
   'const b = await agent("beta");',
   "return { a, b };",

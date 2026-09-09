@@ -5,11 +5,17 @@ import {
   type PromptResponse,
   type SessionUpdate,
 } from "@agentclientprotocol/sdk";
-import type { AgentSession, SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, SessionEntry, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { adapterError, classifyPreflight, isRequestError, unexpectedError } from "./errors.js";
 import type { PiAcpDeps } from "./deps.js";
-import { applyConfig, modelOption, thinkingLevelOption } from "./config.js";
+import {
+  applyConfig,
+  modelDiscoveryPreferences,
+  modelOption,
+  thinkingLevelOption,
+  type ModelDiscoveryPreferences,
+} from "./config.js";
 import { shutdownPiSession } from "./pi-shutdown.js";
 import { convertPromptContent, type ConvertedPrompt } from "./prompt-content.js";
 import { replayEntry } from "./replay.js";
@@ -65,6 +71,7 @@ export interface PiSessionOptions {
   mcpBridge: McpBridge;
   failedMcpResults: Map<string, McpResultProjection>;
   availableModels: readonly Model<Api>[];
+  settingsManager: SettingsManager;
   childRegistry: ChildProcessRegistrySlot;
   lifecycleController: AbortController;
   onWedged(sessionId: string, session: PiSession, cleanupRetryRequired: boolean): Promise<void>;
@@ -79,6 +86,8 @@ export class PiSession {
   private readonly mcpBridge: McpBridge;
   private readonly failedMcpResults: Map<string, McpResultProjection>;
   private availableModels: readonly Model<Api>[];
+  private readonly settingsManager: SettingsManager;
+  private modelPreferences: ModelDiscoveryPreferences | undefined;
   private readonly childRegistry: ChildProcessRegistrySlot;
   private readonly lifecycleController: AbortController;
   private readonly onWedged: PiSessionOptions["onWedged"];
@@ -113,6 +122,7 @@ export class PiSession {
     this.mcpBridge = options.mcpBridge;
     this.failedMcpResults = options.failedMcpResults;
     this.availableModels = options.availableModels;
+    this.settingsManager = options.settingsManager;
     this.childRegistry = options.childRegistry;
     this.lifecycleController = options.lifecycleController;
     this.onWedged = options.onWedged;
@@ -181,11 +191,14 @@ export class PiSession {
   }
 
   configOptions() {
-    return [thinkingLevelOption(this.pi), modelOption(this.pi, this.availableModels)];
+    return [thinkingLevelOption(this.pi), modelOption(this.pi, this.availableModels, this.modelPreferences)];
   }
 
-  publishAvailableModels(models: readonly Model<Api>[]): void {
-    this.availableModels = [...models];
+  async publishAvailableModels(models: readonly Model<Api>[]): Promise<void> {
+    const availableModels = [...models];
+    const preferences = await modelDiscoveryPreferences(this.settingsManager.getEnabledModels(), availableModels);
+    this.availableModels = availableModels;
+    this.modelPreferences = preferences;
   }
 
   activeTurnSignal(): AbortSignal | undefined { return this.activeTurn?.controller.signal; }
@@ -255,8 +268,12 @@ export class PiSession {
     try {
       release = await this.mcpBridge.acquireTurnBoundary();
       if (this.closing) throw adapterError("session_busy");
-      const result = await applyConfig(this.pi, this.deps.modelRuntime, this.availableModels, configId, value);
+      const result = await applyConfig(
+        this.pi, this.deps.modelRuntime, this.availableModels, configId, value,
+        this.settingsManager.getEnabledModels(),
+      );
       this.availableModels = result.availableModels;
+      this.modelPreferences = result.preferences;
       return result.configOptions;
     } finally {
       release?.();

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -41,15 +41,13 @@ test("strict continuation keeps one run id, immutable inputs, admitted config, a
   const testRun = fixture(runner);
   try {
     const script = `export const meta = { name: "same-run-usage", description: "same run usage" };
-const alpha = await agent("alpha", { label: "alpha" });
-const beta = await agent("beta", { label: "beta" });
+const alpha = await agent("alpha", { label: "alpha", model: "claude/opus" });
+const beta = await agent("beta", { label: "beta", model: "codex/gpt" });
 if (beta === null) throw new Error("beta is required");
 return { alpha, beta, marker: args.marker };`;
     const first = await testRun.manager.runSync(script, { marker: "original" }, {
       runId: "same-run-usage",
-      agentConfigurations: { 0: { model: "claude/opus" }, 1: { model: "codex/gpt" } },
       requireAgentConfiguration: true,
-      agentConfigurationSource: "host",
     });
     assert.equal(first.status, "failed");
     assert.equal(first.tokenUsage?.total, 13);
@@ -82,9 +80,8 @@ return { alpha, beta, marker: args.marker };`;
     assert.equal(continuationEvents.events[0]?.event.type, "resumed");
 
     const persisted = testRun.manager.getPersistence().load(first.runId);
-    assert.equal(persisted?.admission?.format, 2);
-    assert.equal(persisted?.admission?.agentConfigurations[0]?.model, "claude/opus");
-    assert.equal(persisted?.admission?.agentConfigurations[1]?.model, "codex/gpt");
+    assert.equal(persisted?.admission?.format, 3);
+    assert.deepEqual(persisted?.calls?.map((call) => call.modelRequested), ["claude/opus", "codex/gpt"]);
     assert.deepEqual(persisted?.args, { marker: "original" });
     assert.equal(persisted?.tokenUsage?.total, 20);
   } finally {
@@ -92,38 +89,26 @@ return { alpha, beta, marker: args.marker };`;
   }
 });
 
-test("an uncovered strict occurrence is durable and permanently blocks continuation", async () => {
+test("additional configured calls run and old positional admissions are inspectable but cannot continue", async () => {
   let calls = 0;
-  const testRun = fixture({
-    async run() {
-      calls++;
-      return "covered";
-    },
-  });
+  const testRun = fixture({ async run() { calls++; return "configured"; } });
   try {
-    const script = `export const meta = { name: "uncovered", description: "uncovered" };
-const values = [];
-for (let index = 0; index < args.count; index++) values.push(await agent(String(index), { label: String(index) }));
-return values;`;
-    const result = await testRun.manager.runSync(script, { count: 2 }, {
-      runId: "uncovered-run",
-      agentConfigurations: { 0: { model: "claude/opus" } },
-      requireAgentConfiguration: true,
-    });
+    const script = `export const meta = { name: "dynamic", description: "dynamic calls", model: "codex" };
+for (let index = 0; index < args.count; index++) await agent(String(index), { label: String(index) });
+throw new Error("inspect and retry");`;
+    const result = await testRun.manager.runSync(script, { count: 3 }, { requireAgentConfiguration: true });
     assert.equal(result.status, "failed");
-    assert.equal(calls, 1);
-    const persisted = testRun.manager.getPersistence().load(result.runId);
-    assert.deepEqual(persisted?.admission?.uncoveredOccurrence && {
-      ordinal: persisted.admission.uncoveredOccurrence.ordinal,
-      label: persisted.admission.uncoveredOccurrence.label,
-    }, { ordinal: 1, label: "1" });
-
-    const continued = await testRun.manager.continueRun(result.runId);
-    assert.deepEqual(continued, { accepted: false, reason: "admission-uncovered" });
-    assert.equal(calls, 1);
-  } finally {
-    testRun.cleanup();
-  }
+    assert.equal(calls, 3);
+    const persistence = testRun.manager.getPersistence();
+    const persisted = persistence.load(result.runId)!;
+    persisted.admission = { format: 2, strict: true, agentConfigurations: { 0: { model: "claude" } }, selectionHash: "0".repeat(64), source: "mcp-setup", recordedAt: new Date().toISOString() } as never;
+    persistence.save(persisted);
+    assert.equal(testRun.manager.inspectRun(result.runId)?.status, "failed");
+    assert.deepEqual(await testRun.manager.continueRun(result.runId), { accepted: false, reason: "admission-invalid" });
+    assert.deepEqual(await testRun.manager.resumeInBackground(result.runId), { accepted: false });
+    await assert.rejects(testRun.manager.runSync(script, { count: 3 }, { resumeFromRunId: result.runId }), /incompatible routing admission/);
+    assert.equal(calls, 3);
+  } finally { testRun.cleanup(); }
 });
 
 test("the first leased checkpoint answer wins; repeats are idempotent and conflicts stay ignored", async () => {
@@ -133,7 +118,6 @@ test("the first leased checkpoint answer wins; repeats are idempotent and confli
 return await checkpoint("ship?", { kind: "select", choices: ["ship", "hold"], });`;
     const paused = await testRun.manager.runSync(script, undefined, {
       runId: "checkpoint-race",
-      agentConfigurations: {},
       requireAgentConfiguration: true,
     });
     assert.equal(paused.status, "paused");
@@ -179,7 +163,6 @@ test("a mismatched checkpoint batch never reports or persists a provisional answ
 return await checkpoint("ship?", { });`;
     const paused = await testRun.manager.runSync(script, undefined, {
       runId: "checkpoint-batch",
-      agentConfigurations: {},
       requireAgentConfiguration: true,
     });
     assert.equal(paused.status, "paused");
@@ -215,7 +198,6 @@ const second = await checkpoint("second?", { kind: "confirm" });
 return { first, second };`;
     const paused = await testRun.manager.runSync(script, undefined, {
       runId: "two-gates",
-      agentConfigurations: {},
       requireAgentConfiguration: true,
     });
     assert.equal(paused.status, "paused");
@@ -299,7 +281,7 @@ return { alpha, beta };`;
   }
 });
 
-test("a fresh manager dispatches the persisted canonical selection unchanged on cold continuation", async () => {
+test("a fresh manager preserves actual authored configuration on cold continuation", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "same-run-cold-cwd-"));
   const persistenceRoot = mkdtempSync(join(tmpdir(), "same-run-cold-store-"));
   const dispatched: Array<{ model?: string; mode?: string; configOptions?: unknown }> = [];
@@ -316,20 +298,14 @@ test("a fresh manager dispatches the persisted canonical selection unchanged on 
   };
   try {
     const script = `export const meta = { name: "cold-dispatch", description: "cold dispatch" };
-const alpha = await agent("alpha", { label: "alpha" });
-const beta = await agent("beta", { label: "beta" });
+const alpha = await agent("alpha", { label: "alpha", model: "claude/opus", mode: "bypassPermissions", configOptions: { effort: "high", verbose: true } });
+const beta = await agent("beta", { label: "beta", model: "codex/gpt", mode: "agent", configOptions: { reasoning_effort: "xhigh" } });
 if (beta === null) throw new Error("beta is required");
 return { alpha, beta };`;
-    const selection = {
-      0: { model: "claude/opus", mode: "bypassPermissions", configOptions: { effort: "high", verbose: true } },
-      1: { model: "codex/gpt", mode: "agent", configOptions: { reasoning_effort: "xhigh" } },
-    } as const;
     const warm = new WorkflowManager({ cwd, persistenceRoot, agent: runner });
     const first = await warm.runSync(script, undefined, {
       runId: "cold-dispatch",
-      agentConfigurations: selection,
       requireAgentConfiguration: true,
-      agentConfigurationSource: "mcp-setup",
     });
     assert.equal(first.status, "failed");
     assert.deepEqual(dispatched.map((call) => call.model), ["claude/opus", "codex/gpt"]);

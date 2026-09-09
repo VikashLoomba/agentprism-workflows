@@ -21,6 +21,15 @@ import {
 } from "./validate.js";
 import type { SelectChoiceGroup, ValidateHarnessOptions } from "./validate.js";
 import type { SessionConfigOption } from "@automatalabs/acp-agents";
+import { buildHarnessConfigSummary, formatHarnessConfigSummary } from "./config-summary.js";
+import type { HarnessConfigSummary } from "./config-summary.js";
+export { buildHarnessConfigSummary, formatHarnessConfigSummary } from "./config-summary.js";
+export type {
+  HarnessConfigSummary,
+  HarnessConfigSummaryEntry,
+  HarnessConfigSummaryModel,
+  HarnessConfigSummaryGroup,
+} from "./config-summary.js";
 
 export interface ProbeHarnessConfigOptions {
   /** Harness names to probe (built-in `claude` / `codex` / `opencode` / `pi` or a registered
@@ -37,6 +46,14 @@ export interface ProbeHarnessConfigOptions {
   cwd?: string;
   /** Host-owned no-prompt probe runner. When supplied it is reused and never disposed. */
   probeRunner?: ValidateProbeRunner;
+  /** Per-probe cancellation deadline in milliseconds. Default 60,000; lifecycle
+   *  diagnostics can use a shorter bound. Must be a positive timer-safe integer. */
+  probeTimeoutMs?: number;
+  /** Maximum concurrent probes, from 1 to 16. Default 4. */
+  probeConcurrency?: number;
+  /** Shared discovery cancellation budget. Completed catalogs are retained; active
+   * probes are aborted and queued targets become failed entries without starting. */
+  signal?: AbortSignal;
 }
 
 export interface HarnessConfigReport {
@@ -46,6 +63,8 @@ export interface HarnessConfigReport {
   exitCode: 0 | 1;
   /** One entry per requested harness, in request order — the same shape validate reports. */
   harnessOptions: ValidateHarnessOptions[];
+  /** Bounded presentation alongside the complete supported catalog. */
+  authoringSummary?: HarnessConfigSummary;
 }
 
 const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
@@ -59,6 +78,14 @@ const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
 export async function probeHarnessConfig(
   options: ProbeHarnessConfigOptions = {},
 ): Promise<HarnessConfigReport> {
+  const timeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+  const concurrency = options.probeConcurrency ?? 4;
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) {
+    throw new TypeError("probeTimeoutMs must be a positive integer no greater than 2147483647");
+  }
+  if (!Number.isInteger(concurrency) || concurrency <= 0 || concurrency > 16) {
+    throw new TypeError("probeConcurrency must be an integer between 1 and 16");
+  }
   const cwd = options.cwd ?? process.cwd();
   const registry = resolveBackendRegistry(options.backends);
   const defaultHarnesses = options.probeRunner?.listBackends?.() ?? [...BUILTIN_BACKEND_IDS, ...registry.keys()];
@@ -77,42 +104,52 @@ export async function probeHarnessConfig(
     ).values(),
   ];
 
-  const harnessOptions: ValidateHarnessOptions[] = [];
+  const harnessOptions: ValidateHarnessOptions[] = new Array(targets.length);
   const ownsRunner = options.probeRunner === undefined;
   const runner = options.probeRunner ?? createValidateProbeRunner(options.backends);
   try {
-    for (const target of targets) {
-      try {
-        const result = await withProbeTimeout(
-          (signal) => runner.probeConfigOptions(target.spec, {
-            cwd,
-            selectModel: target.selectModel,
-            backends: options.backends,
-            signal,
-          }),
-          DEFAULT_PROBE_TIMEOUT_MS,
-        );
-        harnessOptions.push({
-          backendId: result.backendId,
-          ...(result.defaultModeId === undefined ? {} : { defaultModeId: result.defaultModeId }),
-          ...(target.selectModel ? { model: target.spec } : {}),
-          probed: true,
-          modes: result.modes ?? null,
-          options: result.options,
-        });
-      } catch (error) {
-        harnessOptions.push({
-          backendId: target.spec.split("/", 1)[0] ?? target.spec,
-          ...(target.selectModel ? { model: target.spec } : {}),
-          probed: false,
-          error: probeErrorMessage(error),
-        });
+    let nextTarget = 0;
+    await Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, async () => {
+      while (nextTarget < targets.length) {
+        const index = nextTarget++;
+        const target = targets[index];
+        try {
+          const result = await withProbeTimeout(
+            (signal) => runner.probeConfigOptions(target.spec, {
+              cwd,
+              selectModel: target.selectModel,
+              backends: options.backends,
+              signal,
+            }),
+            timeoutMs,
+            options.signal,
+          );
+          harnessOptions[index] = {
+            backendId: result.backendId,
+            ...(result.defaultModeId === undefined ? {} : { defaultModeId: result.defaultModeId }),
+            ...(target.selectModel ? { model: target.spec } : {}),
+            probed: true,
+            modes: result.modes ?? null,
+            options: result.options,
+          };
+        } catch (error) {
+          harnessOptions[index] = {
+            backendId: target.spec.split("/", 1)[0] ?? target.spec,
+            ...(target.selectModel ? { model: target.spec } : {}),
+            probed: false,
+            error: probeErrorMessage(error),
+          };
+        }
       }
-    }
+    }));
   } finally {
     if (ownsRunner) {
       try {
-        await runner.dispose?.();
+        // Always initiate owned cleanup, including after cancellation, without
+        // letting stalled disposal extend the caller's discovery budget.
+        const disposal = Promise.resolve().then(() => runner.dispose?.());
+        void disposal.catch(() => {});
+        await withProbeTimeout(() => disposal, timeoutMs, options.signal);
       } catch {
         // Probe results are already complete; disposal (e.g. of a timed-out process) is best-effort.
       }
@@ -120,11 +157,14 @@ export async function probeHarnessConfig(
   }
 
   const ok = harnessOptions.every((harness) => harness.probed);
-  return { ok, exitCode: ok ? 0 : 1, harnessOptions };
+  return {
+    ok, exitCode: ok ? 0 : 1, harnessOptions,
+    authoringSummary: buildHarnessConfigSummary({ harnessOptions }),
+  };
 }
 
 /** Render a HarnessConfigReport as the human-readable CLI output (validate's table format). */
-export function formatHarnessConfigReport(report: HarnessConfigReport): string {
+export function formatHarnessConfigReport(report: HarnessConfigReport, options: { includeSummary?: boolean } = {}): string {
   const lines: string[] = ["advertised modes and config options:"];
   if (report.harnessOptions.length === 0) {
     lines.push("  (no harnesses requested)");
@@ -133,6 +173,9 @@ export function formatHarnessConfigReport(report: HarnessConfigReport): string {
   }
   const probed = report.harnessOptions.filter((harness) => harness.probed).length;
   lines.push(`result: ${probed}/${report.harnessOptions.length} harness(es) probed`);
+  if (options.includeSummary !== false) {
+    lines.push(formatHarnessConfigSummary(report.authoringSummary ?? buildHarnessConfigSummary(report)));
+  }
   return lines.join("\n");
 }
 
@@ -238,21 +281,37 @@ export function formatHarnessModels(views: readonly HarnessModelsView[]): string
 }
 
 /** Bound one probe; the underlying promise keeps its handlers, so a late settle is inert. */
-function withProbeTimeout<T>(op: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+function withProbeTimeout<T>(op: (signal: AbortSignal) => Promise<T>, ms: number, signal?: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error("config discovery cancelled"));
+      return;
+    }
     const controller = new AbortController();
-    const timer = setTimeout(() => {
-      controller.abort();
-      reject(new Error(`probe timed out after ${ms}ms`));
-    }, ms);
-    timer.unref?.();
-    op(controller.signal).then(
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const abort = (reason: unknown) => {
+      cleanup();
+      controller.abort(reason);
+      reject(reason);
+    };
+    const onAbort = () => abort(signal?.reason ?? new Error("config discovery cancelled"));
+    const timer = setTimeout(() => abort(new Error(`probe timed out after ${ms}ms`)), ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // Keep the deadline alive even if a stalled runner has no referenced handles.
+    // Defer invocation so synchronous throws also clear the timer through this path.
+    Promise.resolve().then(() => {
+      controller.signal.throwIfAborted();
+      return op(controller.signal);
+    }).then(
       (value) => {
-        clearTimeout(timer);
+        cleanup();
         resolve(value);
       },
       (error) => {
-        clearTimeout(timer);
+        cleanup();
         reject(error);
       },
     );
