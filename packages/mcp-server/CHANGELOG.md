@@ -1,5 +1,20 @@
 # @automatalabs/mcp-server
 
+## 5.0.0
+
+### Major Changes
+
+- c1ceaec: Make MCP workflow run and resume operations asynchronous with durable caller request identities, pending setup, explicit setup replies, retry-safe continuation, and bounded lifecycle requests. Open run views through the dedicated workflow_monitor tool, with quiet selection context, required-input/terminal notifications, fullscreen support, explicit controls, and exact-result download.
+
+  Every unanswered script-authored checkpoint now pauses until an explicit answer. Remove checkpoint headless/default policies, the MCP background/foreground split, held lifecycle elicitation, and retired schemas without aliases. Persist explicit checkpoint provenance and reject incompatible historical execution while retaining readable history. Keep both supported MCP protocol eras and the public SDK promise and explicit confirm APIs.
+
+### Patch Changes
+
+- Updated dependencies [c1ceaec]
+  - @automatalabs/shared-types@2.0.0
+  - @automatalabs/workflows@4.0.0
+  - @automatalabs/repl-engine@0.4.26
+
 ## 4.1.1
 
 ### Patch Changes
