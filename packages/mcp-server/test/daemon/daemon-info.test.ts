@@ -2,7 +2,7 @@
 // stale-holder recovery, and the env fingerprint the shim uses to detect config divergence.
 // Importing _harness isolates $HOME so daemon.json lands in a throwaway workflow home.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 
@@ -16,8 +16,10 @@ import {
   daemonLockPath,
   envFingerprint,
   findDaemonInstanceOnPort,
-  legacyDaemonInfoPath,
+  isDaemonProcess,
+  isSupersededBy,
   listDaemonInstances,
+  listDaemonProcesses,
   pidIsAlive,
   readDaemonInfo,
   releaseSpawnLock,
@@ -120,33 +122,50 @@ test("family pointers: writeDaemonInfo records the instance and repoints ONLY it
   assert.equal(existsSync(daemonInstancePath(process.pid)), false);
 });
 
-test("listDaemonInstances lists live instances and a live legacy daemon.json, pruning dead instance records", () => {
+test("listDaemonInstances lists live instances and prunes dead instance records", () => {
   const dead = deadPid();
   writeFileSync(daemonInstancePath(dead), JSON.stringify(info({ pid: dead })));
   writeDaemonInfo(info({ pid: process.pid, port: 41002 }));
-  writeFileSync(legacyDaemonInfoPath(), JSON.stringify(info({ pid: process.pid, port: 41003, version: "0.0.0-legacy" })));
   try {
-    const instances = listDaemonInstances();
-    assert.deepEqual(
-      instances.map((i) => [i.info.port, i.legacy]),
-      [[41002, false]],
-      "the live instance is listed; the legacy file names the same (already listed) pid so it is not duplicated; the dead one is pruned",
-    );
+    assert.deepEqual(listDaemonInstances().map((i) => i.info.port), [41002], "the live instance is listed; the dead one is pruned");
     assert.equal(existsSync(daemonInstancePath(dead)), false, "dead instance records are pruned");
-    // A legacy daemon with a pid of its own is listed as legacy.
-    clearDaemonInfo(process.pid);
-    assert.deepEqual(
-      listDaemonInstances().map((i) => [i.info.port, i.legacy, i.info.version]),
-      [[41003, true, "0.0.0-legacy"]],
-    );
   } finally {
     clearDaemonInfo(process.pid);
-    try {
-      rmSync(legacyDaemonInfoPath(), { force: true });
-    } catch {
-      /* best-effort */
-    }
   }
+});
+
+test("isSupersededBy: a pointer naming another pid OR no pointer at all means superseded; only a pointer naming ownPid does not", () => {
+  const family = envFingerprint({ AGENTPRISM_BACKENDS: "supersede-test" });
+  try {
+    assert.equal(isSupersededBy(process.pid, family), true, "no pointer: a successor came and went");
+    writeDaemonInfo(info({ pid: process.pid, envFingerprint: family, port: 41004 }));
+    assert.equal(isSupersededBy(process.pid, family), false, "the pointer names this daemon");
+    writeDaemonInfo(info({ pid: process.pid + 1, envFingerprint: family, port: 41005 }));
+    assert.equal(isSupersededBy(process.pid, family), true, "the pointer names a successor");
+  } finally {
+    clearDaemonInfo(process.pid);
+    clearDaemonInfo(process.pid + 1);
+  }
+});
+
+test("listDaemonProcesses/isDaemonProcess find a --daemon-run process of ours by its command line, and nothing else", { skip: process.platform === "win32" }, async () => {
+  // A stand-in daemon: any process whose argv carries --daemon-run and our bundle marker.
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "--", "--daemon-run", "agentprism-test-marker"], { stdio: "ignore" });
+  const pid = child.pid!;
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const listed = listDaemonProcesses().find((proc) => proc.pid === pid);
+    assert.ok(listed, "the stand-in daemon is listed from the process table");
+    assert.match(listed.args, /--daemon-run/);
+    assert.equal(isDaemonProcess(pid), true);
+    assert.equal(isDaemonProcess(process.pid), false, "this test process is not a daemon");
+    assert.equal(listDaemonProcesses().some((proc) => proc.pid === process.pid), false, "never lists itself");
+  } finally {
+    child.kill("SIGKILL");
+  }
+  await new Promise((resolve) => child.once("exit", resolve));
+  assert.equal(isDaemonProcess(pid), false, "a dead pid is not a daemon process");
+  assert.equal(listDaemonProcesses().some((proc) => proc.pid === pid), false);
 });
 
 test("compareVersions is a total order: numeric fields, prerelease below release, unparseable falls back to string order", () => {

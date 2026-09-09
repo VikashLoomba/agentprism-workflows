@@ -13,7 +13,7 @@ import type { ElicitResult } from "@modelcontextprotocol/client";
 
 // can collide with a developer's real daemon.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -464,6 +464,43 @@ test("a modern in-flight request is failed as ambiguous and never replayed after
   } finally {
     await session.close();
   }
+});
+
+test("a shim exits when its host closes stdin, ending its daemon session (a dead host never pins the daemon)", async () => {
+  const info = readInfo();
+  assert.ok(info && pidAlive(info.pid), "expected a running daemon from the prior test");
+  const sessionsOf = async (): Promise<number> =>
+    ((await (await fetch(`http://127.0.0.1:${info.port}/healthz`)).json()) as { sessions: number }).sessions;
+
+  // A raw host: initialize + initialized so the shim opens its standalone GET stream (the exact
+  // state an orphaned shim used to sit in forever), then close stdin as a dying host would.
+  const shim = spawn(process.execPath, [distEntry], { env: childEnv, stdio: ["pipe", "pipe", "pipe"] });
+  let stdout = "";
+  shim.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+  const baseline = await sessionsOf();
+  shim.stdin.write(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "dying-host", version: "0" } } }) + "\n",
+  );
+  const deadline = Date.now() + 15_000;
+  while (!/"id":1/.test(stdout) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  assert.match(stdout, /"id":1/, "initialize must be answered through the shim");
+  shim.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+  while ((await sessionsOf()) <= baseline && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  assert.ok((await sessionsOf()) > baseline, "the shim holds a daemon session");
+
+  shim.stdin.end();
+  const exit = await new Promise<number | null | "timeout">((resolvePromise) => {
+    const timer = setTimeout(() => resolvePromise("timeout"), 5_000);
+    shim.once("exit", (code) => {
+      clearTimeout(timer);
+      resolvePromise(code);
+    });
+  });
+  if (exit === "timeout") shim.kill("SIGKILL");
+  assert.equal(exit, 0, "the shim must exit promptly once its host closed stdin");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await sessionsOf(), baseline, "the shim's session was ended (spec DELETE), not left to time out");
+  assert.ok(pidAlive(info.pid), "the daemon itself is untouched");
 });
 
 test("daemon stop terminates the daemon and clears discovery state", async () => {

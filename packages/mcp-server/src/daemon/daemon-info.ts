@@ -6,8 +6,11 @@
  *   daemons/<envFingerprint>.json       the FAMILY POINTER — "the current daemon for this env"
  *   daemons/<envFingerprint>.lock       the family's spawn lock (wx + stale-pid recovery)
  *   daemons/instances/<pid>.json        one record per live daemon, for `daemon status`/`stop --all`
- *   daemon.json                         LEGACY single pointer written by daemons that predate
- *                                       families; never written here, only listed/stopped
+ *
+ * These files are hints, not truth: the CLI reconciles them against the OS process table
+ * (`listDaemonProcesses`), so a daemon that lost or never wrote its record is still listed and
+ * stoppable. Supersession is a one-way door: once the pointer names another daemon (or is gone),
+ * the daemon it left behind stays superseded for life (the latch lives in createDaemon).
  *
  * A daemon serves every client with the env it was started with (the ACP backend registry is
  * resolved once at construction), so clients are keyed by their env fingerprint: every distinct
@@ -20,6 +23,7 @@
  * on graceful shutdown; readers always pid-check because a crash leaves files behind.
  */
 
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import {
@@ -128,11 +132,6 @@ export function daemonInstancePath(pid: number): string {
   return join(daemonsDir(), "instances", `${pid}.json`);
 }
 
-/** The single pointer daemons predating families wrote. Listed and stoppable, never written. */
-export function legacyDaemonInfoPath(): string {
-  return join(workflowHomeDir(), "daemon.json");
-}
-
 export function daemonLogPath(): string {
   return join(workflowHomeDir(), "logs", "daemon.log");
 }
@@ -216,31 +215,30 @@ export function clearDaemonInfo(pid: number): void {
 }
 
 /**
- * True when a successor has taken over the family's discovery: the pointer exists and names a
- * pid other than `ownPid`. Such a daemon is a "lame duck" — it keeps serving in-flight work,
+ * True when this daemon no longer owns its family's discovery: the pointer names a pid other
+ * than `ownPid`, or is gone. Such a daemon is a "lame duck" — it keeps serving in-flight work,
  * admits no new sessions, migrates its idle sessions to the successor, and exits as soon as
  * nothing is in flight.
  *
- * A missing/unreadable pointer is NOT supersession (no successor has claimed discovery). The
- * check is intentionally stateless: if the pointer is later repointed back at `ownPid` — e.g. a
- * successor died and this daemon reclaimed discovery — this returns false again and normal
- * service resumes.
+ * A missing pointer counts: a daemon that published its pointer and later finds it gone has
+ * been superseded and its successor has since exited (a successor clears only a pointer naming
+ * itself). createDaemon applies this only once the pointer has been seen naming the daemon, and
+ * latches the first true — nothing ever repoints discovery at an older daemon, and treating a
+ * vanished pointer as "back in service" is how zombie daemons used to accumulate.
  */
 export function isSupersededBy(ownPid: number, fingerprint: string = envFingerprint()): boolean {
   const info = readDaemonInfo(fingerprint);
-  return info !== undefined && info.pid !== ownPid;
+  return info === undefined || info.pid !== ownPid;
 }
 
 export interface DaemonInstance {
   info: DaemonInfo;
-  /** True for the pre-family single `daemon.json` pointer. */
-  legacy: boolean;
 }
 
 /**
- * Every daemon this machine currently knows about: live instance records (dead ones are pruned
- * as a side effect) plus a live legacy `daemon.json` daemon, if any. Liveness is a pid check
- * only; callers probe /healthz for identity and load.
+ * Every daemon with a live instance record (dead ones are pruned as a side effect). Liveness is
+ * a pid check only; callers probe /healthz for identity and load, and reconcile against
+ * `listDaemonProcesses` for daemons that have no record.
  */
 export function listDaemonInstances(): DaemonInstance[] {
   const instances: DaemonInstance[] = [];
@@ -266,18 +264,73 @@ export function listDaemonInstances(): DaemonInstance[] {
     }
     if (seen.has(info.pid)) continue;
     seen.add(info.pid);
-    instances.push({ info, legacy: false });
-  }
-  const legacy = readInfoFile(legacyDaemonInfoPath());
-  if (legacy !== undefined && pidIsAlive(legacy.pid) && !seen.has(legacy.pid)) {
-    instances.push({ info: legacy, legacy: true });
+    instances.push({ info });
   }
   return instances;
 }
 
-/** A live daemon of ours (any family, including legacy) bound to `port`, if any. */
+/** A live daemon of ours (any family) bound to `port`, if any. */
 export function findDaemonInstanceOnPort(port: number): DaemonInstance | undefined {
   return listDaemonInstances().find((instance) => instance.info.port === port);
+}
+
+export interface DaemonProcess {
+  pid: number;
+  /** The process's command line as the OS reports it. */
+  args: string;
+}
+
+/** The argv shape every daemon of ours is launched with (see entry.ts). */
+const DAEMON_ARGS_PATTERN = /(^|\s)--daemon-run(\s|$)/;
+const DAEMON_BUNDLE_PATTERN = /agentprism|mcp-server/;
+
+function readProcessTable(args: string[]): string | undefined {
+  if (process.platform === "win32") return undefined;
+  try {
+    return execFileSync("ps", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Every live daemon process of ours the OS knows about, whatever it recorded (or failed to
+ * record) on disk — the ground truth `daemon status` and `daemon stop --all` reconcile the
+ * instance records against, so a daemon can never hide from the CLI. Only this user's
+ * processes; never this process itself. POSIX only (`ps`); on Windows the records are all
+ * there is.
+ */
+export function listDaemonProcesses(): DaemonProcess[] {
+  const table = readProcessTable(["-ww", "-eo", "pid=,uid=,args="]);
+  if (table === undefined) return [];
+  const uid = process.getuid?.();
+  const found: DaemonProcess[] = [];
+  for (const line of table.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (match === null) continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid) continue;
+    if (uid !== undefined && Number(match[2]) !== uid) continue;
+    const args = match[3]!.trim();
+    if (!DAEMON_ARGS_PATTERN.test(args) || !DAEMON_BUNDLE_PATTERN.test(args)) continue;
+    found.push({ pid, args });
+  }
+  return found;
+}
+
+/**
+ * True when `pid` is alive AND is a daemon process of ours — the identity check that keeps a
+ * stale record whose pid the OS has since reused from ever being signalled. On POSIX a `ps`
+ * that fails or knows no such process means "not verified", never "assume it is ours"; on
+ * Windows (no process table here) this degrades to the pid liveness check.
+ */
+export function isDaemonProcess(pid: number): boolean {
+  if (!pidIsAlive(pid)) return false;
+  if (process.platform === "win32") return true;
+  const table = readProcessTable(["-ww", "-o", "args=", "-p", String(pid)]);
+  if (table === undefined) return false;
+  const args = table.trim();
+  return DAEMON_ARGS_PATTERN.test(args) && DAEMON_BUNDLE_PATTERN.test(args);
 }
 
 /**

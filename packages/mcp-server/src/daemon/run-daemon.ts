@@ -83,7 +83,7 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<"starte
     const holder = findDaemonInstanceOnPort(port);
     if (holder === undefined) return `port ${port} is taken by another process`;
     return (
-      `port ${port} is still held by ${holder.legacy ? "a legacy " : ""}daemon pid ${holder.info.pid} ` +
+      `port ${port} is still held by daemon pid ${holder.info.pid} ` +
       `(v${holder.info.version}, started ${holder.info.startedAt})`
     );
   };
