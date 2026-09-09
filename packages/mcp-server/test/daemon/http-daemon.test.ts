@@ -181,9 +181,12 @@ test("idle eviction closes a dead client's session; its background run survives 
     const [record] = daemon.sessions.values();
     const evictedSessionId = record.sessionId;
 
-    // Simulate a crashed client: transport aborts its sockets, no DELETE is ever sent.
+    // Simulate a crashed client: transport aborts its sockets, no DELETE is ever sent. The
+    // daemon learns of it from the kernel closing the sockets, which a loaded CI runner can
+    // deliver well after 50 ms — wait for the accounting, not for a timer.
     await a.transport.close();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const closeDeadline = Date.now() + 5_000;
+    while (record.openConnections > 0 && Date.now() < closeDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(record.openConnections, 0, "dead client should hold no connections");
 
     record.lastActivityAt = Date.now() - SESSION_IDLE_TTL_MS - 1;
