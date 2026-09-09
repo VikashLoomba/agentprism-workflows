@@ -20,10 +20,10 @@ and may follow a shifted checkpoint only while prior correspondence is intact.
 
 ## Implemented contract
 
-The frozen contract resolves the original design questions:
+The original design questions were settled by these historical records:
 
-- [Current journal replay contract](../specs/journal-replay-contract.md)
-- [Historical incremental-resume specification](../specs/incremental-resume-spec.md)
+- [Journal replay design record](../archive/specs/journal-replay-contract.md)
+- [Incremental-resume design record](../archive/specs/incremental-resume-spec.md)
 - [Public API and reports](../api.md#content-addressed-incremental-resume)
 - [Workflow authoring guidance](../authoring/agentprism-workflow-authoring/references/determinism-and-resume.md)
 

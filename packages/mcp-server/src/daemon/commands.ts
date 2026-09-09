@@ -12,12 +12,15 @@ import {
   clearDaemonInfo,
   daemonLogPath,
   envFingerprint,
+  isDaemonProcess,
   listDaemonInstances,
+  listDaemonProcesses,
   pidIsAlive,
   probeHealthz,
   readDaemonInfo,
   type DaemonHealth,
   type DaemonInstance,
+  type DaemonProcess,
 } from "./daemon-info.js";
 import { resolveDaemonPort, runDaemon } from "./run-daemon.js";
 
@@ -26,8 +29,10 @@ export const DAEMON_USAGE = `Usage: daemon <command>
 Commands:
   start            Start the daemon in the background (no-op when already running)
   stop [--all]     Stop this env's daemon (SIGTERM, waits for exit); --all stops every daemon
-                   on this machine, including draining (superseded) and legacy ones
-  status           Show every daemon: pid, port, version, uptime, sessions, active runs
+                   on this machine, including draining (superseded) ones and daemon processes
+                   that have no record on disk
+  status           Show every daemon: pid, port, version, uptime, sessions, active runs, plus
+                   any daemon process the OS knows about that has no record
   url              Print the MCP endpoint URL and client registration snippets
   run              Run the daemon in the foreground (logs to stderr)
   logs [-n LINES]  Print the tail of the daemon log
@@ -68,19 +73,17 @@ async function probeAll(): Promise<ProbedInstance[]> {
 
 function formatInstance(instance: ProbedInstance, currentPid: number | undefined): string[] {
   const { info, health } = instance;
-  const role = instance.legacy
-    ? "legacy (pre-family daemon; stop it with `daemon stop --all`)"
-    : info.pid === currentPid
-      ? "current for this env"
-      : health?.lameDuck
-        ? "draining (superseded by a newer daemon; admits no new sessions)"
-        : "other env family";
+  const role = info.pid === currentPid
+    ? "current for this env"
+    : health?.lameDuck
+      ? "draining (superseded by a newer daemon; admits no new sessions)"
+      : "other env family";
   const lines = [
     `${DAEMON_NAME} v${health?.version ?? info.version}`,
     `  pid:         ${info.pid}`,
     `  url:         ${info.url}`,
     `  role:        ${role}`,
-    `  instance:    ${health?.instanceId ?? info.instanceId ?? "legacy/unknown"}`,
+    `  instance:    ${health?.instanceId ?? info.instanceId ?? "unknown"}`,
     `  run control: ${health?.controlProtocol === 1 || info.controlProtocol === 1 ? "v1" : "unavailable"}`,
   ];
   if (health === undefined) {
@@ -99,15 +102,44 @@ function formatInstance(instance: ProbedInstance, currentPid: number | undefined
 }
 
 async function stopInstance(instance: DaemonInstance, timeoutMs: number): Promise<boolean> {
-  const stopped = await stopDaemon(instance.info.pid, timeoutMs);
+  const pid = instance.info.pid;
+  if (!isDaemonProcess(pid)) {
+    // The record outlived its daemon and the OS reused the pid: never signal a stranger.
+    clearDaemonInfo(pid);
+    console.log(`${DAEMON_NAME} record for pid ${pid} was stale (pid now belongs to another process); removed`);
+    return true;
+  }
+  const stopped = await stopDaemon(pid, timeoutMs);
   if (stopped) {
-    // A graceful exit clears its own records; a legacy daemon's file is left for it (pid-checked).
-    if (!instance.legacy) clearDaemonInfo(instance.info.pid);
-    console.log(`${DAEMON_NAME} (pid ${instance.info.pid}, v${instance.info.version}) stopped`);
+    // A graceful exit clears its own records; this covers a daemon that died without doing so.
+    clearDaemonInfo(pid);
+    console.log(`${DAEMON_NAME} (pid ${pid}, v${instance.info.version}) stopped`);
   } else {
-    console.error(`${DAEMON_NAME} (pid ${instance.info.pid}) did not exit within ${Math.round(timeoutMs / 1000)}s`);
+    console.error(`${DAEMON_NAME} (pid ${pid}) did not exit within ${Math.round(timeoutMs / 1000)}s`);
   }
   return stopped;
+}
+
+async function stopUntrackedProcess(proc: DaemonProcess, timeoutMs: number): Promise<boolean> {
+  const stopped = await stopDaemon(proc.pid, timeoutMs);
+  if (stopped) console.log(`${DAEMON_NAME} untracked process (pid ${proc.pid}) stopped`);
+  else console.error(`${DAEMON_NAME} untracked process (pid ${proc.pid}) did not exit within ${Math.round(timeoutMs / 1000)}s`);
+  return stopped;
+}
+
+/** Daemon processes the OS reports that no instance record accounts for. */
+function untrackedProcesses(instances: DaemonInstance[]): DaemonProcess[] {
+  const tracked = new Set(instances.map((instance) => instance.info.pid));
+  return listDaemonProcesses().filter((proc) => !tracked.has(proc.pid));
+}
+
+function formatUntracked(proc: DaemonProcess): string[] {
+  return [
+    `${DAEMON_NAME} (untracked process)`,
+    `  pid:         ${proc.pid}`,
+    `  role:        no instance record on disk (stop it with \`daemon stop --all\`)`,
+    `  command:     ${proc.args}`,
+  ];
 }
 
 export async function runDaemonCommand(args: string[], options: { bundlePath: string }): Promise<number> {
@@ -130,39 +162,48 @@ export async function runDaemonCommand(args: string[], options: { bundlePath: st
     case "stop": {
       if (rest.includes("--all")) {
         const instances = listDaemonInstances();
-        if (instances.length === 0) {
+        const untracked = untrackedProcesses(instances);
+        if (instances.length === 0 && untracked.length === 0) {
           console.log(`${DAEMON_NAME} is not running`);
           return 0;
         }
-        const results = await Promise.all(instances.map((instance) => stopInstance(instance, 7_000)));
+        const results = await Promise.all([
+          ...instances.map((instance) => stopInstance(instance, 7_000)),
+          ...untracked.map((proc) => stopUntrackedProcess(proc, 7_000)),
+        ]);
         return results.every(Boolean) ? 0 : 1;
       }
       const info = readDaemonInfo();
       if (info === undefined || !pidIsAlive(info.pid)) {
         if (info !== undefined) clearDaemonInfo(info.pid);
         const others = listDaemonInstances();
+        const otherCount = others.length + untrackedProcesses(others).length;
         console.log(
           `${DAEMON_NAME} is not running for this env` +
-            (others.length > 0 ? ` (${others.length} other daemon(s) alive — see \`daemon status\`, stop with \`daemon stop --all\`)` : ""),
+            (otherCount > 0 ? ` (${otherCount} other daemon(s) alive — see \`daemon status\`, stop with \`daemon stop --all\`)` : ""),
         );
         return 0;
       }
-      const stopped = await stopInstance({ info, legacy: false }, 7_000);
+      const stopped = await stopInstance({ info }, 7_000);
       return stopped ? 0 : 1;
     }
     case "status": {
       const current = readDaemonInfo();
       const currentPid = current !== undefined && pidIsAlive(current.pid) ? current.pid : undefined;
       const instances = await probeAll();
-      if (instances.length === 0) {
+      const untracked = untrackedProcesses(instances);
+      if (instances.length === 0 && untracked.length === 0) {
         console.log(
           `${DAEMON_NAME}: not running (client v${SERVER_VERSION}, env family ${envFingerprint()}, default port ${resolveDaemonPort()})`,
         );
         return 1;
       }
-      const blocks = instances
-        .sort((a, b) => (a.info.pid === currentPid ? -1 : b.info.pid === currentPid ? 1 : 0))
-        .map((instance) => formatInstance(instance, currentPid).join("\n"));
+      const blocks = [
+        ...instances
+          .sort((a, b) => (a.info.pid === currentPid ? -1 : b.info.pid === currentPid ? 1 : 0))
+          .map((instance) => formatInstance(instance, currentPid).join("\n")),
+        ...untracked.map((proc) => formatUntracked(proc).join("\n")),
+      ];
       console.log(blocks.join("\n\n"));
       if (currentPid === undefined) {
         console.log(`\n(no current daemon for this env — client v${SERVER_VERSION}, env family ${envFingerprint()})`);

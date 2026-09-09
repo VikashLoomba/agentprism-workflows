@@ -115,4 +115,15 @@ if ! AGENTPRISM_LIVE_E2E=1 ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-8 timeout 
   echo "  A leg stalling with slow turns usually means an expired OAuth session — re-login and retry." >&2
   exit 1
 fi
-echo "pre-push: live backend e2e green — pushing." >&2
+echo "pre-push: live backend e2e green." >&2
+
+# 4. The run-monitor UI in a real Chrome (packages/mcp-server/test/ui-monitor-host.test.ts).
+#    Opt-in (AGENTPRISM_UI_E2E=1) because a browser's cold start on a shared CI runner is not
+#    deterministic; a developer machine with Chrome is where it runs. Needs `pnpm build` (done above).
+if ! AGENTPRISM_UI_E2E=1 npx tsx --test packages/mcp-server/test/ui-monitor-host.test.ts >&2; then
+  echo "" >&2
+  echo "pre-push: run-monitor UI browser harness FAILED — push blocked." >&2
+  echo "  Install Chrome (or set AGENTPRISM_UI_CHROME) and fix the failure above." >&2
+  exit 1
+fi
+echo "pre-push: UI browser harness green — pushing." >&2

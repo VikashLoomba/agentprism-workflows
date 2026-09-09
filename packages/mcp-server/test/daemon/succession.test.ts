@@ -233,7 +233,7 @@ test("the first run-control release temporarily adopts a busy pre-v1 predecessor
   }
 });
 
-test("lame-duck admission: a superseded daemon (daemon.json names a different pid) rejects new sessions with a clear error, keeps serving existing ones, and resumes normal service when discovery points back at it", async () => {
+test("lame-duck admission: a superseded daemon (daemon.json names a different pid) rejects new sessions with a clear error, keeps serving existing ones, and STAYS superseded even if discovery later points back at it", async () => {
   resetDiscovery();
   const daemon = await createDaemon({ runner: okRunner(), port: 0, log: () => undefined });
   try {
@@ -282,18 +282,27 @@ test("lame-duck admission: a superseded daemon (daemon.json names a different pi
     const body = (await raw.json()) as { error?: { message?: string } };
     assert.match(body.error?.message ?? "", /superseded/i);
 
-    // Discovery points BACK at this daemon → it resumes normal service.
+    // Discovery points BACK at this daemon, then vanishes entirely (the successor exited and
+    // cleared its own pointer). Neither resurrects a lame duck: supersession is latched, so the
+    // daemon keeps refusing new sessions and reports itself draining. (Before, a vanished
+    // pointer meant "not superseded" and the predecessor came back to life as a zombie.)
     writeDaemonInfo(infoForHandle(daemon, process.pid, SERVER_VERSION));
-    assert.equal(isSupersededBy(process.pid), false);
-    const resumed = await connectHttp(daemon.url, { listTools: true });
-    const after = await resumed.client.callTool({
+    assert.equal(isSupersededBy(process.pid), false, "the raw pointer check flips back…");
+    await assert.rejects(connectHttp(daemon.url), "…but the daemon stays a lame duck");
+    resetDiscovery();
+    assert.equal(isSupersededBy(process.pid), true, "no pointer at all is supersession too");
+    await assert.rejects(connectHttp(daemon.url), "still a lame duck with no pointer");
+    const stillDraining = (await (await fetch(`http://127.0.0.1:${daemon.port}/healthz`)).json()) as { lameDuck?: boolean };
+    assert.equal(stillDraining.lameDuck, true);
+
+    // The EXISTING session still works throughout.
+    const late = await existing.client.callTool({
       name: "workflow",
       arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT, projectDir },
     });
-    assert.equal(structured(await waitForRun(resumed.client, String(structured(after)?.runId)))?.status, "completed", textOf(after));
+    assert.equal(structured(await waitForRun(existing.client, String(structured(late)?.runId)))?.status, "completed", textOf(late));
 
     await existing.dispose();
-    await resumed.dispose();
   } finally {
     await daemon.close();
     resetDiscovery();

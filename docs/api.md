@@ -1785,4 +1785,4 @@ and `null` reject without feedback.
 
 `keepSession:true` skips the release-time `session/close`; the resulting `AgentSessionRecord` is returned in `WorkflowRunResult.agentSessions` so the host can later call `runner.loadSession()` or `runner.resumeSession()`.
 
-See the [README](../README.md#writing-workflow-scripts) for authoring guidance and examples, and [`design-notes.md`](design-notes.md) for the protocol-level design.
+See the [README](../README.md#writing-workflow-scripts) for authoring guidance and examples.

@@ -456,6 +456,21 @@ export async function runShim(options: RunShimOptions): Promise<void> {
   stdio.onclose = () => void shutdown(0);
   process.once("SIGINT", () => void shutdown(0));
   process.once("SIGTERM", () => void shutdown(0));
+  // The shim lives exactly as long as its host. The SDK stdio transport reacts only to `data`
+  // and `error` on stdin — never to EOF — so a host that exited without signalling us used to
+  // leave a shim behind whose open GET stream counted as a live session and kept the daemon
+  // alive forever. Listen for EOF ourselves, and also for being reparented (the host died
+  // without closing our stdin, e.g. killed hard while something else held the pipe).
+  process.stdin.once("end", () => void shutdown(0));
+  process.stdin.once("close", () => void shutdown(0));
+  const hostPid = process.ppid;
+  const hostWatch = setInterval(() => {
+    if (process.ppid !== hostPid) {
+      log(`[${DAEMON_NAME} shim] host process ${hostPid} is gone; exiting`);
+      void shutdown(0);
+    }
+  }, 1_000);
+  hostWatch.unref();
 
   armCompatibilityDrain(info);
   await http.start();

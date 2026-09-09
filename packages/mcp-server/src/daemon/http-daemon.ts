@@ -36,7 +36,7 @@ import { WorkflowPermissionBroker } from "../workflow-permissions.js";
 import { workflowLifecycle } from "../workflow-lifecycle.js";
 import { workflowToolInputBranches } from "../workflow-tool-input.js";
 import { DAEMON_NAME, HEALTHZ_PATH, MCP_ENDPOINT_PATH, REPL_DRAIN_BOUND_MS } from "./constants.js";
-import { envFingerprint, isSupersededBy } from "./daemon-info.js";
+import { envFingerprint, readDaemonInfo } from "./daemon-info.js";
 import { BoundedEventStore } from "./event-store.js";
 import { validateRequest } from "./middleware.js";
 import {
@@ -99,9 +99,9 @@ export interface CreateDaemonOptions {
   version?: string;
   /**
    * Whether this daemon has been superseded (a newer daemon owns discovery). A lame-duck
-   * daemon admits no new MCP sessions. Defaults to the stateless `daemon.json` pid check
-   * (`isSupersededBy(ownPid)`), re-evaluated on every admission so discovery pointing back at
-   * this daemon transparently restores normal service. Injected in tests.
+   * daemon admits no new MCP sessions. Defaults to the family-pointer check
+   * (`isSupersededBy(ownPid)`). The daemon LATCHES the first true: once superseded, always
+   * superseded, whatever the check says later. Injected in tests.
    */
   isSuperseded?: () => boolean;
 }
@@ -335,10 +335,30 @@ export async function createDaemon(options: CreateDaemonOptions): Promise<Daemon
   const ownPid = options.ownPid ?? process.pid;
   const ownInstanceId = options.ownInstanceId ?? randomUUID();
   const version = options.version ?? SERVER_VERSION;
-  // A lame duck (a newer daemon owns discovery) admits no new sessions. Re-evaluated per
-  // request so that if discovery is ever repointed back at this daemon it resumes service.
-  const isSuperseded = options.isSuperseded ?? (() => isSupersededBy(ownPid));
   const familyFingerprint = envFingerprint(env);
+  // A lame duck (a newer daemon owns discovery) admits no new sessions. The default check reads
+  // the family pointer: another pid means a successor took discovery; a MISSING pointer means
+  // the same — a successor came and then exited, clearing its own pointer — but only once this
+  // daemon has been published (runDaemon writes the pointer right after construction; until it
+  // has been seen naming this daemon, "missing" is just "not published yet").
+  let published = false;
+  const pointerCheck = (): boolean => {
+    const info = readDaemonInfo(familyFingerprint);
+    if (info !== undefined && info.pid === ownPid) {
+      published = true;
+      return false;
+    }
+    return info === undefined ? published : true;
+  };
+  // Supersession is a one-way door: nothing ever repoints discovery at an older daemon, and a
+  // pointer that later goes missing must not resurrect a predecessor into full service — that
+  // is exactly how zombie daemons used to accumulate. Latch the first true.
+  const supersededCheck = options.isSuperseded ?? pointerCheck;
+  let superseded = false;
+  const isSuperseded = (): boolean => {
+    if (!superseded && supersededCheck()) superseded = true;
+    return superseded;
+  };
 
   const sessions = new SessionRegistry();
   const permissionBroker = options.permissionBroker ?? new WorkflowPermissionBroker();

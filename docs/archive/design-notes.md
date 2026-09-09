@@ -1,6 +1,6 @@
 # AgentPrism Workflows — Design Notes & Protocol Reference
 
-The deep design reference behind [`../README.md`](../README.md). It records *what* the system is,
+The deep design reference behind [`../README.md`](../../README.md). It records *what* the system is,
 *which libraries* it uses, and *what each library actually supports* — with concrete,
 package-specific API references (field/method names, file:line, versions). For installation and
 usage, start with the README; read this when you need the protocol-level mechanics (ACP lifecycle,
@@ -780,7 +780,7 @@ turn/start.output_schema            app-server-protocol/.../v2/turn.rs:143
 
 **The gap + the forward.** The stock adapter's `sendPrompt()` builds the `runTurn({…})` call but
 never sets `outputSchema`. The fork forwards it from the prompt's `_meta` (the adapter already reads
-`request._meta` nearby) — a ~1-line change in [`packages/codex-acp/src/CodexAcpClient.ts`](../packages/codex-acp/src/CodexAcpClient.ts):
+`request._meta` nearby) — a ~1-line change in [`packages/codex-acp/src/CodexAcpClient.ts`](../../packages/codex-acp/src/CodexAcpClient.ts):
 
     // inside sendPrompt() → the runTurn({ ... }) call
     outputSchema: (request._meta as any)?.["outputSchema"] ?? null,
@@ -978,7 +978,7 @@ and retry settings affect only the live target because served calls resolve at t
 
 Isolation artifacts carry an initial run-level `executionMode` marker, per-call provenance, and a
 persisted `ReplayReport`; they cannot be resumed or selected as later baselines. See
-[`api.md`](api.md#isolation-mode) for the public surface and complete refusal vocabulary.
+[`api.md`](../api.md#isolation-mode) for the public surface and complete refusal vocabulary.
 
 ---
 

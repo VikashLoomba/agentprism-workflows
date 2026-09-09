@@ -85,7 +85,6 @@ export function installDaemonLifecycle(options: DaemonLifecycleOptions): DaemonL
         log(`[agentprism-daemon] migrated ${migrated.length} idle session(s) to the successor: ${migrated.join(", ")}`);
       }
     } else {
-      supersessionAnnounced = false;
       const evicted = daemon.sessions.evictIdle(options.sessionTtlMs);
       if (evicted.length > 0) {
         log(`[agentprism-daemon] evicted ${evicted.length} idle session(s): ${evicted.join(", ")}`);

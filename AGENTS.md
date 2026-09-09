@@ -2,29 +2,29 @@
 
 These instructions apply across this repository. A nested `AGENTS.md` may add package-specific guidance, but it does not override the root monorepo, delivery, or release rules.
 
-## Start with the authoritative sources
+## Start here
 
 Before changing code, read the relevant parts of:
 
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development, tests, generated artifacts, dependency gates, attribution, PRs, and releases.
 - [`README.md`](README.md) — product surface and package map.
-- [`docs/design-notes.md`](docs/design-notes.md) — protocol and package architecture.
 - [`docs/api.md`](docs/api.md) — supported integration APIs.
 - [`docs/authoring/`](docs/authoring/) — canonical workflow and REPL authoring documentation shipped through MCP.
-- [`docs/specs/`](docs/specs/) — implemented contracts and design records; apply the planning distinction below.
 
-Prefer executable guards and current source over stale prose. When they disagree, investigate and update the authoritative documentation rather than coding around the discrepancy.
+Then read the code. The source and its tests are the current state; prose describes it and never governs it. When prose and code disagree, fix the prose.
 
-## Design first; do not fossilize implemented contracts
+`docs/archive/` holds historical design records from past implementation trains. They are not maintained, not an authority, and may be wrong. Do not read them unless the user points you at one.
 
-Documents under `docs/specs/` are authoritative descriptions of implemented contracts, not an untouchable architectural constitution.
+## Existing implementations are not the design authority
 
-- **During design and planning**, treat existing specs as current-state evidence and migration surface, not as constraints on the quality of the target design. Question whether the current architecture should be improved. Design the best coherent solution for the user's request.
-- If that design conflicts with an implemented or “frozen” contract, make the conflict explicit. Explain what should be preserved, revised, superseded, or migrated, including compatibility, rollout, test, and documentation consequences. Do not silently contort a new design around an older contract, and do not silently break one.
-- **During implementation**, after the design and scope are agreed, preserve contracts outside the approved change. Deliberate contract changes belong in the same implementation train as their migrations, tests, and documentation updates.
-- When a task is explicitly scoped to implement or verify an already-approved frozen contract, that contract is the implementation authority for that scoped task. If following it would create a material architectural problem, stop and surface the issue instead of improvising a different contract.
+Design from first principles for the user's request. The current code, its tests, and its docs describe what exists, not what must remain. Changing existing architecture, contracts, and the tests that enshrine them is expected whenever it produces a better outcome.
 
-The user's actual request remains the source of scope. Preserve its exact intent when creating plans, workflow prompts, issues, or derived specifications; see `CONTRIBUTING.md`’s workflow source-gate rules.
+- Read the code, not a description of it, before proposing a design.
+- Never treat a document, a test, or an existing structure as a reason to reject or contort a better design. The only fixed constraints are the user's request, the package dependency direction below, the compatibility policy below, and published SDK and wire surfaces, which need an explicit scope decision to change.
+- When you change something that was previously documented or tested as a contract, say so plainly in the plan and the PR: what changed, why, and what was migrated. Land the migration, tests, and docs in the same change.
+- Nothing in this repository is "frozen". A task that says "implement this document" still requires you to check it against the code and first principles, and to raise problems rather than build them.
+
+The user's actual request remains the source of scope. Preserve its exact intent when creating plans, workflow prompts, or issues; see `CONTRIBUTING.md`'s workflow source-gate rules.
 
 ## Compatibility policy
 
@@ -71,7 +71,7 @@ For MCP server work, preserve the deliberate SDK boundary: production server cod
 
 - The pre-push hook additionally runs attribution, dependency freshness, and real Claude/Codex/OpenCode/pi plus steering gates. It has no bypass; fix authentication or dependency failures.
 - Any stale package or dependency reported by a repository update gate during any task is immediate maintenance work, not an “unrelated” caveat to leave for delivery. This applies to every dependency, runtime, adapter, source upstream, or workspace package the repository gates for currency. Pause the original delivery, open a separate update PR from current `origin/main`, follow that gate’s prescribed update and merge mechanics, land it, then update and revalidate the original branch.
-- Never weaken a guard or assertion merely to make a change pass. Fix the implementation or the documented contract that the guard protects.
+- Never weaken a guard or assertion merely to make a change pass. Deleting or inverting a test because the behavior it protects is being deliberately redesigned is expected; name it in the PR.
 
 ## Generated and coupled artifacts
 

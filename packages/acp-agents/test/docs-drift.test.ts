@@ -56,30 +56,19 @@ test("steering documentation stays aligned with the executable extension matrix"
   }
   const piReadme = readRepoFile("packages/pi-acp/README.md");
   assert.ok(piReadme.includes("AgentSession.steer"), "Pi README must document native pi steering");
-  const piSpec = readRepoFile("docs/specs/pi-acp-spec.md");
-  assert.ok(piSpec.includes("pi.clearQueue()"), "Pi spec must document queue clearing before abort");
 });
 
-// §4.6.4 item 4 — the full `_meta` support matrix (§3.6) lives as executable data in
-// protocol-coverage.ts, not prose alone. Assert the code matrix and the frozen spec §3.6 cannot
-// drift apart: every matrix row's capability literal must appear in the spec's §3.6 section, and the
-// spec must still document the codex DEFAULT_AUTH_REQUEST channel and the -32000 auth-exclusivity.
-test("the executable AUTH_META_MATRIX stays in lockstep with spec §3.6", () => {
-  const spec = readRepoFile("docs/specs/acp-auth-spec.md");
-  const start = spec.indexOf("### 3.6 Full `_meta` capability support matrix");
-  assert.ok(start >= 0, "spec must contain the §3.6 matrix section");
-  const end = spec.indexOf("\n## ", start);
-  const section = spec.slice(start, end === -1 ? undefined : end);
-
+// The full `_meta` support matrix lives as executable data in protocol-coverage.ts, not prose
+// alone. The code matrix and the public API reference must not drift apart: every matrix row's
+// capability literal appears in docs/api.md, which also documents the codex DEFAULT_AUTH_REQUEST
+// channel and the -32000 auth-exclusivity code.
+test("the executable AUTH_META_MATRIX stays in lockstep with docs/api.md", () => {
+  const api = readRepoFile("docs/api.md");
   for (const row of AUTH_META_MATRIX) {
-    assert.ok(
-      section.includes(row.capability),
-      `spec §3.6 must document the "${row.capability}" (${row.agent}) _meta surface`,
-    );
+    assert.ok(api.includes(row.capability), `docs/api.md must document the "${row.capability}" (${row.agent}) _meta surface`);
   }
-  assert.ok(section.includes(CODEX_SPAWN_AUTH_ENV), "spec §3.6 must cite the DEFAULT_AUTH_REQUEST channel");
-  // The -32000 auth-exclusivity guarantee the §1.5 matcher relies on is stated in the spec.
-  assert.ok(spec.includes("-32000"), "spec must document the -32000 auth-required code");
+  assert.ok(api.includes(CODEX_SPAWN_AUTH_ENV), "docs/api.md must cite the DEFAULT_AUTH_REQUEST channel");
+  assert.ok(api.includes("-32000"), "docs/api.md must document the -32000 auth-required code");
 });
 
 test("adapter versions cited in docs match the installed acp-agents dependencies", () => {
@@ -95,7 +84,7 @@ test("adapter versions cited in docs match the installed acp-agents dependencies
     "codex-acp is consumed as a workspace package",
   );
 
-  for (const path of ["docs/api.md", "docs/design-notes.md"]) {
+  for (const path of ["docs/api.md"]) {
     const text = readRepoFile(path);
     for (const [packageName, version] of expected) {
       const cited = [
@@ -114,48 +103,20 @@ test("adapter versions cited in docs match the installed acp-agents dependencies
   }
 });
 
-test("the executable Pi contract stays grounded in the frozen pi-acp spec", () => {
-  const spec = readRepoFile("docs/specs/pi-acp-spec.md");
-  assert.ok(spec.includes("## 5. Capability advertisement (`initialize`)"));
-  assert.ok(spec.includes("## 8. Error taxonomy and pinned wire codes (`src/errors.ts`)"));
-  assert.ok(spec.includes("### 9.4 Structured output through client-hosted MCP injection"));
-  assert.ok(spec.includes("### 9.5 Auth (`src/auth.ts`)"));
-  assert.ok(spec.includes("mcpCapabilities: { http: true, sse: true }"));
-  assert.ok(!spec.includes('agentCapabilities._meta["@automatalabs/pi-acp"]'));
-  assert.ok(!spec.includes("{ outputSchema: true }"));
-  for (const retired of [
-    /when armed[^\n]*structured-output tool/i,
-    /install[^\n]*(?:inactive )?structured-output tool/i,
-    /connect the request's stdio MCP servers/i,
-    /configOptions:\s*\[thinkingLevelOption\]/,
-    /wrapper\/translator\/structured tool/i,
-    /createAgentSession\([^\n]*customTools/i,
-    /arm structured output if requested/i,
-    /MCP stdio client factory/i,
-    /Disposal\/disconnect errors[^\n]*never mask/i,
-    /observable structured-tool collision/i,
-  ]) {
-    assert.doesNotMatch(spec, retired, `frozen pi-acp spec retains a retired Pi mechanism: ${retired.source}`);
-  }
-  assert.match(spec, /MCP is connected \*\*before\*\*\s*`forkFrom`/);
-  assert.match(spec, /fork allocates and\s+reserves its target id before MCP connect/);
+test("the executable Pi contract stays grounded in the pi-acp README", () => {
+  const readme = readRepoFile("packages/pi-acp/README.md");
   for (const methodId of PI_ACP_PROTOCOL_CONTRACT.authMethodIds) {
-    assert.ok(spec.includes(methodId), `frozen pi-acp spec must contain auth method ${methodId}`);
-  }
-  for (const errorKind of PI_ACP_PROTOCOL_CONTRACT.providerErrorKinds) {
-    assert.ok(spec.includes(`errorKind:"${errorKind}"`), `frozen pi-acp spec must contain errorKind ${errorKind}`);
+    assert.ok(readme.includes(methodId), `pi-acp README must document auth method ${methodId}`);
   }
 });
 
-test("all seven public guidance files reject the retired Pi channels as whole files", () => {
+test("all five public guidance files reject the retired Pi channels as whole files", () => {
   const publicGuidance = [
     "README.md",
     "docs/api.md",
-    "docs/design-notes.md",
     "packages/workflows/README.md",
     "packages/pi-acp/README.md",
     "packages/acp-agents/README.md",
-    "docs/specs/acp-auth-spec.md",
   ];
   const stalePiClaims = [
     /Pi[^\n]{0,160}(?:turn-level|turn params?)[^\n]{0,80}(?:_meta\.)?outputSchema/i,
@@ -173,8 +134,8 @@ test("all seven public guidance files reject the retired Pi channels as whole fi
     }
   }
 
-  const structuredGuidance = publicGuidance.slice(0, 5);
-  for (const path of structuredGuidance) {
+  // The structured-output guidance lives in the four documents that describe backends, not the low-level acp-agents README.
+  for (const path of publicGuidance.slice(0, 4)) {
     const text = readRepoFile(path);
     assert.match(text, /client-hosted[^\n]{0,500}(?:HTTP[^\n]{0,160})?StructuredOutput|StructuredOutput[^\n]{0,500}client-hosted/i,
       `${path} must describe Pi's client-hosted StructuredOutput capture`);
@@ -196,16 +157,20 @@ test("root agent entrypoints preserve planning freedom and monorepo delivery rul
 
   assert.equal(claude.trim(), "@AGENTS.md", "CLAUDE.md must import the canonical root AGENTS.md");
   assert.ok(
-    agents.includes("not an untouchable architectural constitution"),
-    "root agent guidance must not fossilize implemented specs during design",
+    agents.includes("Existing implementations are not the design authority"),
+    "root agent guidance must make first-principles design the default",
   );
   assert.ok(
-    agents.includes("During design and planning") && agents.includes("During implementation"),
-    "root agent guidance must distinguish planning from scoped implementation",
+    agents.includes('Nothing in this repository is "frozen"'),
+    "root agent guidance must not let any document freeze an implementation",
   );
   assert.ok(
-    contributing.includes("Planning versus implemented specifications"),
-    "CONTRIBUTING.md must retain the authoritative planning/implementation distinction",
+    !agents.includes("docs/specs") && !agents.includes("design-notes"),
+    "root agent guidance must not route agents to archived design records",
+  );
+  assert.ok(
+    contributing.includes("Existing implementations are not the design authority"),
+    "CONTRIBUTING.md must carry the same first-principles rule",
   );
   assert.match(
     agents,
@@ -247,7 +212,7 @@ test("public package inventories cover every workspace package", () => {
     }));
 
   assert.equal(manifests.length, 10, "update the documented package-count contract when the workspace changes");
-  for (const path of ["README.md", "docs/api.md", "docs/design-notes.md"]) {
+  for (const path of ["README.md", "docs/api.md"]) {
     const text = readRepoFile(path);
     for (const { manifest } of manifests) {
       assert.ok(text.includes(manifest.name), `${path} must inventory ${manifest.name}`);
@@ -268,19 +233,12 @@ test("public package inventories cover every workspace package", () => {
     assert.ok(contributing.includes(`packages/${dir}`), `CONTRIBUTING.md must inventory packages/${dir}`);
   }
   assert.match(contributing, /\(monorepo\) of ten packages/);
-  assert.match(readRepoFile("docs/design-notes.md"), /monorepo of \*\*ten\*\* published packages/);
 });
 
 test("auth, MCP, and authoring docs retain the implemented contracts", () => {
   const packageJson = JSON.parse(readRepoFile("packages/acp-agents/package.json")) as {
     dependencies: Record<string, string>;
   };
-  const authSpec = readRepoFile("docs/specs/acp-auth-spec.md");
-  assert.ok(authSpec.startsWith("# ACP Authentication — Implemented End-to-End Design Record"));
-  assert.ok(authSpec.includes("### 3.3 Codex — `@automatalabs/codex-acp` (workspace)"));
-  assert.ok(authSpec.includes("### 4.6 Implemented test matrix (historical plan)"));
-  assert.ok(authSpec.includes("### 4.7 Completed PR sequencing (historical)"));
-
   const mcpReadme = readRepoFile("packages/mcp-server/README.md");
   for (const contract of ["OpenCode", "`AGENTPRISM_PERSISTENCE_ROOT`", 'action:"resume"', "`author-workflow`"]) {
     assert.ok(mcpReadme.includes(contract), `MCP README must document ${contract}`);
@@ -353,7 +311,6 @@ test("maintained examples do not reintroduce invalid agent/model contracts", () 
   const maintainedDocs = [
     "README.md",
     "docs/api.md",
-    "docs/design-notes.md",
     "packages/mcp-server/README.md",
     "packages/workflows/README.md",
     "docs/authoring/agentprism-workflow-authoring/SKILL.md",
