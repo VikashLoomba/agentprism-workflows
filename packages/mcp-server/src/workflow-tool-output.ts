@@ -1,6 +1,7 @@
-import type { TokenUsage, WorkflowRunLimits } from "@automatalabs/shared-types";
+import type { TokenUsage, WorkflowContinuationResult, WorkflowRunLimits } from "@automatalabs/shared-types";
 import type { WorkflowRunResult, WorkflowRunStatus } from "@automatalabs/workflows";
 import { z } from "zod";
+import { workflowToolInputShape } from "./workflow-tool-input.js";
 
 const logTailSchema = z.object({
   lines: z.array(z.string()),
@@ -61,13 +62,6 @@ const pendingPermissionSchema = z.object({
   requestRedacted: z.boolean(),
 });
 
-const permissionInteractionSchema = z.object({
-  permissionRequests: z.literal("may-block"),
-  collectWith: z.tuple([z.literal("run"), z.literal("resume")]),
-  respondWith: z.literal("permissions-response"),
-  elicitation: z.enum(["available", "unavailable"]),
-});
-
 const permissionAcknowledgementSchema = z.object({
   permissionId: z.string().uuid(),
   runId: z.string(),
@@ -82,9 +76,8 @@ const checkpointContextSchema = z.object({
   prompt: z.string(),
   kind: z.enum(["confirm", "input", "select"]),
   choices: z.array(z.string()).optional(),
-  default: z.unknown().optional(),
   timeoutMs: z.number().nonnegative().optional(),
-});
+}).strict();
 
 const fallbackSchema = z.object({
   callIndex: z.number().int().nonnegative(),
@@ -123,8 +116,8 @@ const checkpointTakenSchema = z.object({
   callIndex: z.number().int().nonnegative(),
   kind: z.enum(["confirm", "input", "select"]),
   decision: z.unknown(),
-  source: z.enum(["live", "headless-default", "journal-replay", "injected"]),
-});
+  source: z.enum(["live", "journal-replay", "injected"]),
+}).strict();
 
 const scriptSourceSchema = z.enum(["inline", "path", "stored"]);
 
@@ -269,35 +262,6 @@ const harnessDiagnosticSchema = z.object({
   options: z.array(z.unknown()),
   omittedOptions: z.number().int().nonnegative(),
 });
-const validationSummarySchema = z.object({
-  ok: z.literal(false),
-  exitCode: z.union([z.literal(1), z.literal(2)]),
-  parse: z.object({
-    ok: z.boolean(),
-    error: z.string().optional(),
-    meta: z.object({
-      name: z.string(),
-      description: z.string(),
-      phases: z.array(z.string()),
-    }).optional(),
-  }),
-  dryRun: z.object({
-    ok: z.boolean(),
-    status: z.string(),
-    reason: z.string().optional(),
-    timedOut: z.boolean(),
-    durationMs: z.number().nonnegative(),
-    agentCalls: z.array(diagnosticRecordSchema),
-    omittedAgentCalls: z.number().int().nonnegative(),
-    checkpoints: z.array(diagnosticRecordSchema),
-    omittedCheckpoints: z.number().int().nonnegative(),
-    phasesVisited: z.array(z.string()),
-    harnessOptions: z.array(harnessDiagnosticSchema),
-    omittedHarnesses: z.number().int().nonnegative(),
-  }).optional(),
-  warnings: z.array(z.string()),
-  omittedWarnings: z.number().int().nonnegative(),
-});
 const configModelDiagnosticSchema = z.object({
   backendId: z.string(),
   probed: z.boolean(),
@@ -310,6 +274,28 @@ const configModelDiagnosticSchema = z.object({
   matchCount: z.number().int().nonnegative(),
   omittedMatches: z.number().int().nonnegative(),
 });
+
+const setupRequestSchema = z.object({
+    id: z.string().uuid(), kind: z.enum(["backend-approval", "agent-configuration"]),
+    title: z.string(), message: z.string(), requestedSchema: z.object({
+      type: z.literal("object"), properties: z.record(z.string(), z.unknown()),
+      required: z.array(z.string()), additionalProperties: z.literal(false).optional(),
+    }),
+}).strict();
+const setupSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("preparing") }).strict(),
+  z.object({ state: z.literal("input-required"), request: setupRequestSchema }).strict(),
+]);
+const continuationSchema = z.object({
+  generation: z.number().int().positive(),
+  replayedPrefix: z.number().int().nonnegative(),
+  resolvedCheckpoints: z.array(z.object({
+    callIndex: z.number().int().nonnegative(),
+    outcome: z.enum(["accepted", "same", "different"]),
+    decision: z.unknown(),
+    ignored: z.unknown().optional(),
+  }).strict()).optional(),
+}).strict();
 
 const inspectionRequired = [
   "workflowName",
@@ -324,6 +310,7 @@ const terminalStatuses = ["paused", "completed", "failed", "aborted"] as const;
 const nonterminalStatuses = ["pending", "running"] as const;
 const commonOutputFields = ["runId", "status", "scriptUri", "resultUri", "eventsUri", "limits"] as const;
 const runOutputRequired = ["runId", "status", "scriptUri"] as const;
+const acceptanceFields = ["runId", "status", "scriptUri", "eventsUri", "limits", "action", "accepted", "requestId", "duplicate", "continuation", "setup", "scriptSource"] as const;
 const executionDetailFields = [
   "result",
   "tokenUsage",
@@ -344,7 +331,6 @@ const inspectionFields = [
 const discoveryOutputFields = [
   "action",
   "ok",
-  "validation",
   "harnessOptions",
   "omittedHarnesses",
   "models",
@@ -375,13 +361,13 @@ const stopControlSchema = z.object({
 const variantOutputFields = [
   ...executionDetailFields,
   "scriptSource",
+  "accepted", "requestId", "duplicate", "continuation", "setup", "setupId",
   ...inspectionFields,
   "outcome",
   "stopped",
   "alreadyTerminal",
   "control",
   "pendingPermissions",
-  "interaction",
   "permissionResponse",
   "latestActivity",
   ...resultRetrievalFields,
@@ -397,6 +383,11 @@ function forbidsOutside(allowed: readonly string[]) {
   return forbidsRequired(...new Set(variantOutputFields.filter((field) => !allowedFields.has(field))));
 }
 
+function forbidsExactOutside(allowed: readonly string[]) {
+  const allowedFields = new Set(allowed);
+  return forbidsRequired(...new Set([...commonOutputFields, ...variantOutputFields].filter((field) => !allowedFields.has(field))));
+}
+
 function hasOnlyExactFields(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   const allowedFields = new Set<string>(allowed);
   return Object.entries(value).every(([field, fieldValue]) =>
@@ -410,20 +401,24 @@ function hasOnlyFields(value: Record<string, unknown>, allowed: readonly string[
 }
 
 /**
- * The SDK's registerTool runtime accepts an arbitrary Zod schema in its types, but 1.29.0
- * only publishes and validates object schemas. Keep an object schema for interoperability,
- * attach the exact branch constraints as JSON Schema metadata, and mirror them at runtime.
+ * Keep the SDK-facing output rooted in an object schema. Exact branch constraints are
+ * published as JSON Schema metadata and enforced by the matching runtime refinements.
  */
 export const workflowToolOutputShape = z
   .object({
-    action: z.enum(["run", "config", "result"]).optional(),
+    action: z.enum(["run", "resume", "setup-response", "config", "result"]).optional(),
     ok: z.boolean().optional(),
-    validation: validationSummarySchema.optional(),
+    accepted: z.literal(true).optional(),
+    requestId: workflowToolInputShape.requestId.optional(),
+    duplicate: z.boolean().optional(),
+    continuation: continuationSchema.optional(),
+    setupId: z.string().uuid().optional(),
+    setup: setupSchema.optional(),
     harnessOptions: z.array(harnessDiagnosticSchema).optional(),
     omittedHarnesses: z.number().int().nonnegative().optional(),
     models: z.array(configModelDiagnosticSchema).optional(),
     runId: z.string().optional(),
-    status: z.enum(["rejected", "pending", "running", "paused", "completed", "failed", "aborted"]).optional(),
+    status: z.enum(["pending", "running", "paused", "completed", "failed", "aborted"]).optional(),
     ...executionDetailsShape,
     scriptSource: scriptSourceSchema.optional(),
     scriptUri: z.string().optional(),
@@ -443,7 +438,6 @@ export const workflowToolOutputShape = z
     alreadyTerminal: z.boolean().optional(),
     control: stopControlSchema.optional(),
     pendingPermissions: z.array(pendingPermissionSchema).optional(),
-    interaction: permissionInteractionSchema.optional(),
     permissionResponse: permissionAcknowledgementSchema.optional(),
     mimeType: z.literal("application/json").optional(),
     encoding: z.literal("utf-8").optional(),
@@ -452,7 +446,7 @@ export const workflowToolOutputShape = z
     endOffset: z.number().int().nonnegative().optional(),
     hasMore: z.boolean().optional(),
     chunk: z.string().optional(),
-  })
+  }).strict()
   .superRefine((value, context) => {
     const has = (field: keyof typeof value) => value[field] !== undefined;
     const inspectionComplete = inspectionRequired.every((field) => has(field));
@@ -473,20 +467,19 @@ export const workflowToolOutputShape = z
         has("omittedHarnesses") &&
         has("models") &&
         hasOnlyExactFields(value, ["action", "ok", "harnessOptions", "omittedHarnesses", "models"]);
-    } else if (value.action === "run") {
-      valid =
-        value.status === "rejected" &&
-        has("validation") &&
-        hasOnlyExactFields(value, ["action", "status", "validation"]);
-    } else if (has("scriptSource")) {
-      valid = runCommonComplete && has("eventsUri") && has("limits") && (value.status === "running"
-        ? hasOnlyFields(value, ["scriptSource", "pendingPermissions", "interaction"])
-        : terminal && hasOnlyFields(value, ["scriptSource", ...executionDetailFields]));
+    } else if (value.action === "run" || value.action === "resume") {
+      valid = runCommonComplete && has("eventsUri") && has("limits") && has("scriptSource") &&
+        value.accepted === true && has("requestId") && has("duplicate") &&
+        (value.action === "resume" ? has("continuation") : !has("continuation")) &&
+        hasOnlyExactFields(value, acceptanceFields);
+    } else if (value.action === "setup-response") {
+      valid = runCommonComplete && has("setupId") &&
+        hasOnlyFields(value, ["action", "setupId", "setup"]);
     } else if (has("permissionResponse")) {
       valid =
         runCommonComplete &&
         inspectionComplete &&
-        hasOnlyFields(value, [...inspectionFields, "pendingPermissions", "interaction", "permissionResponse"]);
+        hasOnlyFields(value, [...inspectionFields, "pendingPermissions", "permissionResponse"]);
     } else if (has("control")) {
       valid =
         runCommonComplete &&
@@ -507,7 +500,7 @@ export const workflowToolOutputShape = z
       valid =
         runCommonComplete &&
         inspectionComplete &&
-        hasOnlyFields(value, [...inspectionFields, "tokenUsage", "outcome", "pendingPermissions", "interaction"]) &&
+        hasOnlyFields(value, [...inspectionFields, "tokenUsage", "outcome", "pendingPermissions", "setup"]) &&
         (terminal ? has("outcome") : !has("outcome"));
     }
     if (has("resultUri") && value.status !== "completed") valid = false;
@@ -527,82 +520,33 @@ export const workflowToolOutputShape = z
         title: "Workflow result retrieval",
         required: ["action", "runId", "status", "resultUri", ...resultRetrievalFields],
         properties: { action: { const: "result" }, status: { const: "completed" } },
-        ...forbidsRequired(
-          "ok",
-          "validation",
-          "harnessOptions",
-          "omittedHarnesses",
-          "models",
-          "scriptUri",
-          "scriptSource",
-          "limits",
-          ...executionDetailFields,
-          ...inspectionFields,
-          "outcome",
-          "stopped",
-          "alreadyTerminal",
-          "control",
-          "pendingPermissions",
-          "interaction",
-          "permissionResponse",
-        ),
+        ...forbidsExactOutside(["action", "runId", "status", "resultUri", "eventsUri", ...resultRetrievalFields]),
       },
       {
         title: "Workflow config discovery",
         required: ["action", "ok", "harnessOptions", "omittedHarnesses", "models"],
         properties: { action: { const: "config" } },
-        ...forbidsRequired(
-          "validation",
-          "runId",
-          "status",
-          "scriptUri",
-          "eventsUri",
-          "scriptSource",
-          ...executionDetailFields,
-          ...inspectionFields,
-          "outcome",
-          "stopped",
-          "alreadyTerminal",
-          "control",
-        ),
+        ...forbidsExactOutside(["action", "ok", "harnessOptions", "omittedHarnesses", "models"]),
       },
       {
-        title: "Workflow validation rejection",
-        required: ["action", "status", "validation"],
-        properties: { action: { const: "run" }, status: { const: "rejected" } },
-        ...forbidsRequired(
-          "ok",
-          "harnessOptions",
-          "omittedHarnesses",
-          "models",
-          "runId",
-          "scriptUri",
-          "eventsUri",
-          "scriptSource",
-          ...executionDetailFields,
-          ...inspectionFields,
-          "outcome",
-          "stopped",
-          "alreadyTerminal",
-          "control",
-        ),
+        title: "Workflow operation acceptance",
+        required: [...runOutputRequired, "action", "accepted", "requestId", "duplicate", "eventsUri", "scriptSource", "limits"],
+        properties: { action: { enum: ["run", "resume"] }, accepted: { const: true } },
+        ...forbidsExactOutside(acceptanceFields),
+        if: { properties: { action: { const: "resume" } } },
+        then: { required: ["continuation"] },
+        else: forbidsRequired("continuation"),
       },
       {
-        title: "Workflow execution",
-        required: [...runOutputRequired, "eventsUri", "scriptSource", "limits"],
-        properties: { status: { enum: terminalStatuses } },
-        ...forbidsOutside(["scriptSource", ...executionDetailFields]),
-      },
-      {
-        title: "Workflow background admission",
-        required: [...runOutputRequired, "eventsUri", "scriptSource", "limits"],
-        properties: { status: { const: "running" } },
-        ...forbidsOutside(["scriptSource", "pendingPermissions", "interaction"]),
+        title: "Workflow setup response acknowledgement",
+        required: [...runOutputRequired, "action", "setupId"],
+        properties: { action: { const: "setup-response" } },
+        ...forbidsOutside(["action", "setupId", "setup"]),
       },
       {
         title: "Workflow status",
         required: [...runOutputRequired, ...inspectionRequired],
-        ...forbidsOutside([...inspectionFields, "tokenUsage", "outcome", "pendingPermissions", "interaction"]),
+        ...forbidsOutside([...inspectionFields, "tokenUsage", "outcome", "pendingPermissions", "setup"]),
         anyOf: [
           {
             required: ["outcome"],
@@ -617,7 +561,7 @@ export const workflowToolOutputShape = z
       {
         title: "Workflow permission response acknowledgement",
         required: [...runOutputRequired, ...inspectionRequired, "permissionResponse"],
-        ...forbidsOutside([...inspectionFields, "pendingPermissions", "interaction", "permissionResponse"]),
+        ...forbidsOutside([...inspectionFields, "pendingPermissions", "permissionResponse"]),
       },
       {
         title: "Workflow stop acknowledgement",
@@ -686,7 +630,6 @@ export interface WorkflowScriptResourceFields {
 export interface WorkflowExecutionScriptResourceFields {
   scriptSource: WorkflowScriptSource;
   scriptUri: string;
-  resultUri?: string;
   eventsUri: string;
 }
 
@@ -707,28 +650,33 @@ export interface WorkflowExecutionOutcome<T = unknown> {
   checkpointsTaken?: WorkflowRunResult["checkpointsTaken"];
 }
 
-export type WorkflowExecutionToolResult<T = unknown> = WorkflowExecutionOutcome<T> &
-  WorkflowExecutionScriptResourceFields & { limits: WorkflowRunLimits };
-
-export interface WorkflowPermissionInteraction {
-  permissionRequests: "may-block";
-  collectWith: ["run", "resume"];
-  respondWith: "permissions-response";
-  elicitation: "available" | "unavailable";
+interface WorkflowOperationAcceptedBase extends WorkflowExecutionScriptResourceFields {
+  accepted: true;
+  requestId: string;
+  duplicate: boolean;
+  runId: string;
+  status: WorkflowRunStatus["status"];
+  limits: WorkflowRunLimits;
+  setup?: z.infer<typeof setupSchema>;
 }
 
-export interface WorkflowBackgroundAccepted extends WorkflowExecutionScriptResourceFields {
+export type WorkflowOperationAccepted = WorkflowOperationAcceptedBase & (
+  | { action: "run"; continuation?: never }
+  | { action: "resume"; continuation: WorkflowContinuationResult }
+);
+
+export interface WorkflowSetupResponseResult extends WorkflowScriptResourceFields {
+  action: "setup-response";
   runId: string;
-  status: "running";
-  limits: WorkflowRunLimits;
-  pendingPermissions?: z.infer<typeof pendingPermissionSchema>[];
-  interaction?: WorkflowPermissionInteraction;
+  setupId: string;
+  status: WorkflowRunStatus["status"];
+  setup?: z.infer<typeof setupSchema>;
 }
 
 export interface WorkflowRunObservation extends WorkflowRunStatus, WorkflowScriptResourceFields {
   latestActivity?: WorkflowRunLatestActivity[];
   pendingPermissions?: z.infer<typeof pendingPermissionSchema>[];
-  interaction?: WorkflowPermissionInteraction;
+  setup?: z.infer<typeof setupSchema>;
   permissionResponse?: z.infer<typeof permissionAcknowledgementSchema>;
 }
 
@@ -736,7 +684,7 @@ export interface WorkflowStatusToolResult<T = unknown> extends WorkflowRunObserv
   /** Cumulative usage observed for live calls in this execution; absent before any is known. */
   tokenUsage?: TokenUsage;
   pendingPermissions?: z.infer<typeof pendingPermissionSchema>[];
-  interaction?: WorkflowPermissionInteraction;
+  setup?: z.infer<typeof setupSchema>;
   /** Present exactly when status is paused/completed/failed/aborted. */
   outcome?: WorkflowExecutionOutcome<T>;
 }
@@ -766,16 +714,6 @@ export interface WorkflowConfigToolResult {
   models: Array<Record<string, unknown>>;
 }
 
-export interface WorkflowValidationRejected {
-  action: "run";
-  status: "rejected";
-  validation: {
-    ok: false;
-    exitCode: 1 | 2;
-    [key: string]: unknown;
-  };
-}
-
 export interface WorkflowPermissionResponseResult extends WorkflowRunStatus, WorkflowScriptResourceFields {
   latestActivity?: WorkflowRunLatestActivity[];
   pendingPermissions?: z.infer<typeof pendingPermissionSchema>[];
@@ -800,9 +738,8 @@ export interface WorkflowStopPendingResult extends WorkflowRunStatus, WorkflowSc
 export type WorkflowToolResult<T = unknown> =
   | WorkflowResultRetrieval
   | WorkflowConfigToolResult
-  | WorkflowValidationRejected
-  | WorkflowExecutionToolResult<T>
-  | WorkflowBackgroundAccepted
+  | WorkflowOperationAccepted
+  | WorkflowSetupResponseResult
   | WorkflowStatusToolResult<T>
   | WorkflowPermissionResponseResult
   | WorkflowStopResult
@@ -810,8 +747,7 @@ export type WorkflowToolResult<T = unknown> =
 
 export function toWorkflowExecutionOutcome<T>(
   run: WorkflowRunResult<T>,
-  resources: Pick<WorkflowExecutionScriptResourceFields, "scriptUri" | "resultUri"> &
-    Partial<Pick<WorkflowExecutionScriptResourceFields, "eventsUri">>,
+  resources: WorkflowScriptResourceFields,
 ): WorkflowExecutionOutcome<T> {
   if (run.status === "pending" || run.status === "running") {
     throw new TypeError(`Workflow execution result must be terminal, received ${run.status}`);
@@ -833,21 +769,5 @@ export function toWorkflowExecutionOutcome<T>(
     ...(run.status === "completed" && resources.resultUri !== undefined
       ? { resultUri: resources.resultUri }
       : {}),
-  };
-}
-
-export function toWorkflowToolResult<T>(
-  run: WorkflowRunResult<T>,
-  resources: WorkflowExecutionScriptResourceFields,
-): WorkflowExecutionToolResult<T> {
-  const outcome = toWorkflowExecutionOutcome(run, resources);
-  if (outcome.limits === undefined) {
-    throw new TypeError("Current workflow execution result is missing resolved run limits");
-  }
-  return {
-    ...outcome,
-    limits: outcome.limits,
-    scriptSource: resources.scriptSource,
-    eventsUri: resources.eventsUri,
   };
 }

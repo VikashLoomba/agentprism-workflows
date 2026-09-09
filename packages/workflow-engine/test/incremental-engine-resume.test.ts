@@ -11,7 +11,7 @@ import type {
   WorkflowCallRecord,
   WorkflowResumeCallDecision,
 } from "@automatalabs/shared-types";
-import { WorkflowErrorCode } from "../src/errors.js";
+import { WorkflowError, WorkflowErrorCode } from "../src/errors.js";
 import {
   cloneResumeCandidate,
   normalizeResumeSeed,
@@ -468,7 +468,7 @@ return { first, second }`, "nested-positional"), {
 describe("PreparedResume checkpoint integration", () => {
   it("replays a moved proven host decision and re-journals its current index", async () => {
     const recording = await record(source(`
-return await checkpoint("approve", { kind: "confirm", default: false, timeoutMs: 0 })`), {
+return await checkpoint("approve", { kind: "confirm", timeoutMs: 50 })`), {
       confirm: async () => ({ approved: true }),
     });
     const commits: PersistedResumeSeed[] = [];
@@ -476,7 +476,7 @@ return await checkpoint("approve", { kind: "confirm", default: false, timeoutMs:
     let confirms = 0;
     const result = await runWorkflow(source(`
 await agent("inserted", { label: "inserted", resume: { filesystem: "read-only" } })
-return await checkpoint("approve", { kind: "confirm", default: false, timeoutMs: 0 })`), {
+return await checkpoint("approve", { kind: "confirm", timeoutMs: 50 })`), {
       runId: "checkpoint-target",
       agent: { async run() { return "inserted"; } },
       confirm: async () => { confirms += 1; return false; },
@@ -506,15 +506,15 @@ return await checkpoint("approve", { kind: "confirm", default: false, timeoutMs:
     assert.equal(commits.at(-1)?.candidates.length, 0);
   });
 
-  it("keeps later candidates after either a live host or headless checkpoint", async () => {
+  it("keeps later candidates after an explicit answer and while an unanswered checkpoint pauses", async () => {
     const recording = await record(source(`
-const decision = await checkpoint("source-decision", { default: false })
+const decision = await checkpoint("source-decision", {})
 const later = await agent("later", { label: "later", resume: { filesystem: "read-only" } })
 return { decision, later }`), { confirm: async () => true });
 
     const confirmCommits: PersistedResumeSeed[] = [];
     const confirmResult = await runWorkflow(source(`
-const decision = await checkpoint("changed-decision", { default: false })
+const decision = await checkpoint("changed-decision", {})
 const later = await agent("later", { label: "later", resume: { filesystem: "read-only" } })
 return { decision, later }`), {
       runId: "confirm-barrier-target",
@@ -529,24 +529,22 @@ return { decision, later }`), {
       decision.action === "live" ? decision.reason : decision.action), ["not-recorded", "replayed"]);
     assert.equal(confirmCommits.at(-1)?.candidates.length, 1);
 
-    const headlessCommits: PersistedResumeSeed[] = [];
-    let headlessRunnerCalls = 0;
-    const headlessResult = await runWorkflow(source(`
-const decision = await checkpoint("changed-decision", { default: "fresh" })
+    const waitingCommits: PersistedResumeSeed[] = [];
+    const waitingSeed = seedFor(recording);
+    let waitingRunnerCalls = 0;
+    await assert.rejects(runWorkflow(source(`
+const decision = await checkpoint("changed-decision")
 const later = await agent("later", { label: "later", resume: { filesystem: "read-only" } })
 return { decision, later }`), {
-      runId: "headless-open-target",
-      agent: { async run() { headlessRunnerCalls += 1; return "must-not-run"; } },
-      preparedResume: identityPrepared(seedFor(recording), headlessCommits),
+      runId: "waiting-target",
+      agent: { async run() { waitingRunnerCalls += 1; return "must-not-run"; } },
+      preparedResume: identityPrepared(waitingSeed, waitingCommits),
       persistLogs: false,
-    });
-    assert.deepEqual(JSON.parse(JSON.stringify(headlessResult.result)), {
-      decision: "fresh",
-      later: "later",
-    });
-    assert.equal(headlessRunnerCalls, 0);
-    assert.deepEqual(headlessResult.resumeReport?.calls.map((decision) => decision.action), ["live", "replayed"]);
-    assert.equal(headlessCommits.at(-1)?.candidates.length, 1);
+    }), (error: unknown) => error instanceof WorkflowError && error.code === WorkflowErrorCode.CHECKPOINT_REQUIRED);
+    assert.equal(waitingRunnerCalls, 0);
+    assert.deepEqual(waitingCommits, [], "waiting consumes no retained candidates");
+    assert.equal(waitingSeed.candidates.length, 2);
+
   });
 
   it("serves a shifted positional injection and closes the prefix immediately after it", async () => {
@@ -555,7 +553,7 @@ return { decision, later }`), {
     await assert.rejects(
       runWorkflow(source(`
 await agent("prefix", { label: "prefix", resume: { filesystem: "read-only" } })
-return await checkpoint("pending", { headless: "pause", default: false })`), {
+return await checkpoint("pending", {})`), {
         runId: "paused-source",
         agent: { async run() { return "prefix"; } },
         persistLogs: false,
@@ -570,6 +568,7 @@ return await checkpoint("pending", { headless: "pause", default: false })`), {
     assert.equal(pending.kind, "checkpoint");
     assert.ok(pending.path && pending.inputsHash);
     const injection: PersistedCheckpointInjection = {
+      checkpointDecision: "explicit-v1",
       sourceRunId: "paused-source",
       recordedIndex: 1,
       hash: pending.hash,
@@ -595,7 +594,7 @@ return await checkpoint("pending", { headless: "pause", default: false })`), {
       checkpoint: { seed: injectionSeed, commitSeed: (remaining) => commits.push(remaining) },
     };
     const result = await runWorkflow(source(`
-const decision = await checkpoint("pending", { headless: "pause", default: false })
+const decision = await checkpoint("pending", {})
 const suffix = await agent("suffix", { label: "suffix", resume: { filesystem: "read-only" } })
 return { decision, suffix }`), {
       runId: "positional-injection-target",

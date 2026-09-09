@@ -42,13 +42,13 @@ reach the host; keep evidence concise and never put credentials or other secrets
 
 | option | type | meaning |
 |---|---|---|
-| `kind` | `"confirm" \| "input" \| "select"` | Reply shape: boolean-ish / free text / one of `choices`. Affects the journal hash and the host UI widget. |
+| `kind` | `"confirm" \| "input" \| "select"` | Reply shape: boolean / free text / one of `choices`. Affects the journal hash and the host UI widget. |
 | `choices` | `string[]` | For `kind: "select"`. |
-| `default` | `unknown` | Reply taken in the default headless mode — journaled like a real reply. Defaults to `true`. |
-| `headless` | `"default" \| "abort" \| "pause"` | No live channel: `"default"` takes `default ?? true`, `"abort"` aborts, and `"pause"` creates a persisted `checkpoint_required` pause. Default `"default"`. |
-| `timeoutMs` | `number` | Deadline for the interactive prompt. |
+| `timeoutMs` | positive finite `number` | Deadline for an SDK host's live prompt; expiry leaves the checkpoint unanswered and pauses. |
 
-The host supplies the live human channel (elicitation in the MCP server; `ExecOptions.confirm` in the SDK), and that channel wins even when `headless:"pause"` is declared. A durable pause carries non-secret `checkpointContext`; MCP continues the same run with `checkpointReplies:{ [context.callIndex]: decision }`. The first strict-JSON decision stored under the run lease is authoritative forever: repeats are idempotent and conflicts are ignored. Detached runs never pause for a checkpoint unless the author opts into `"pause"`.
+Every unanswered checkpoint pauses with non-secret `checkpointContext`. MCP exposes the pending question through status/monitor and accepts a separate bounded `{ action:"resume", requestId, runId, checkpointReplies:{ [context.callIndex]: decision } }`. An SDK host may collect an explicit answer with `ExecOptions.confirm`; a missing callback, `undefined`, non-JSON value, rejection, or interaction timeout pauses. Panel closure cannot answer or cancel a checkpoint. Explicit stop/cancellation remains available.
+
+Replies must be strict JSON and are returned verbatim, including explicit `false`, `null`, or an empty string. The first decision stored under the run lease is authoritative forever: repeats are idempotent and conflicts are ignored. The only authored options are `kind`, `choices`, and `timeoutMs`; retired `headless` and `default` fields are rejected, including the former opt-in `headless:"pause"`.
 
 ## Error codes (`WorkflowError.code`)
 
@@ -61,7 +61,7 @@ The host supplies the live human channel (elicitation in the MCP server; `ExecOp
 | `PROVIDER_USAGE_LIMIT` | no | Quota/rate wall — the run **pauses** (journaled, resumable), with the provider's reset hint. |
 | `AGENT_LIMIT_EXCEEDED` | no | `maxAgents` cap hit. |
 | `AUTH_REQUIRED` | no | Backend needs authentication. `WorkflowManager` returns a resumable pause with `reason: "auth_required"` and redacted `authContext`; a direct runner throws. The host completes auth before resuming/retrying. |
-| `CHECKPOINT_REQUIRED` | no | `headless: "pause"` reached without a live channel. `WorkflowManager` returns `reason: "checkpoint_required"` plus non-secret `checkpointContext`; resume with `checkpointReplies` or live confirm. |
+| `CHECKPOINT_REQUIRED` | no | No explicit answer is available. `WorkflowManager` returns `reason: "checkpoint_required"` plus non-secret `checkpointContext`; answer through `checkpointReplies` or an SDK live confirm. Catching the signal inside the script cannot bypass the gate. |
 | `SCRIPT_VALIDATION_ERROR` | no | Script failed parse/validation (bad meta, nondeterministic API, bad `meta.backends` shape). |
 | `SCRIPT_ERROR` | no | The script itself crashed (uncaught throw, floated rejection). |
 | `WORKFLOW_ABORTED` | — | Real cancellation (pause/stop/host signal) — never used for crashes. |

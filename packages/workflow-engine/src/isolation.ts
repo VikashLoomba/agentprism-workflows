@@ -1,3 +1,4 @@
+import { assertExplicitCheckpointProvenance } from "./checkpoint-provenance.js";
 import type {
   AgentResult,
   AgentRunner,
@@ -326,7 +327,7 @@ function validateCallStructure(recording: PersistedRunState, row: unknown, posit
   if (!["result", "null", "error"].includes(String(row.outcome))) {
     corrupt(recording, "calls[].outcome", index);
   }
-  if (!["runner", "journal-replay", "confirm", "headless", "engine"].includes(String(row.origin))) {
+  if (!["runner", "journal-replay", "confirm", "engine"].includes(String(row.origin))) {
     corrupt(recording, "calls[].origin", index);
   }
   if (row.aborted !== undefined && row.aborted !== true) corrupt(recording, "calls[].aborted", index);
@@ -404,7 +405,7 @@ function validateCallStructure(recording: PersistedRunState, row: unknown, posit
     return;
   }
 
-  if (row.kind === "checkpoint" && (row.origin === "confirm" || row.origin === "headless")) {
+  if (row.kind === "checkpoint" && row.origin === "confirm") {
     if (
       (row.outcome !== "result" && row.outcome !== "error") ||
       row.attempts !== undefined ||
@@ -413,9 +414,6 @@ function validateCallStructure(recording: PersistedRunState, row: unknown, posit
       row.provenance !== undefined
     ) {
       corrupt(recording, "checkpoint row", index);
-    }
-    if (row.origin === "headless" && row.outcome === "error" && isRecord(row.error) && row.error.form !== "workflow-error") {
-      corrupt(recording, "checkpoint headless error", index);
     }
     return;
   }
@@ -437,10 +435,10 @@ function validateCallStructure(recording: PersistedRunState, row: unknown, posit
   if (row.kind === "checkpoint" && row.origin === "engine") {
     if (
       row.outcome !== "error" ||
-      row.aborted !== true ||
       !isRecord(row.error) ||
       row.error.form !== "workflow-error" ||
-      row.error.code !== WorkflowErrorCode.WORKFLOW_ABORTED ||
+      !((row.error.code === WorkflowErrorCode.WORKFLOW_ABORTED && row.aborted === true) ||
+        (row.error.code === WorkflowErrorCode.CHECKPOINT_REQUIRED && row.aborted === undefined)) ||
       row.provenance !== undefined
     ) {
       corrupt(recording, "checkpoint engine row", index);
@@ -452,6 +450,7 @@ function validateCallStructure(recording: PersistedRunState, row: unknown, posit
 }
 
 function validateStructure(recording: PersistedRunState): void {
+  assertExplicitCheckpointProvenance(recording);
   if (!isRecord(recording)) corrupt(undefined, "recording");
   if (!isNonEmptyString(recording.runId)) corrupt(recording, "runId");
   if (!isNonEmptyString(recording.script)) corrupt(recording, "script");

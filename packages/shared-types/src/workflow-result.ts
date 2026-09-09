@@ -142,7 +142,7 @@ export interface WorkflowRunFallback {
 }
 
 /** How a checkpoint() decision was obtained in this execution. */
-export type WorkflowCheckpointSource = "live" | "headless-default" | "journal-replay" | "injected";
+export type WorkflowCheckpointSource = "live" | "journal-replay" | "injected";
 
 /** One checkpoint() call that resolved during a workflow execution. */
 export interface WorkflowCheckpointTaken {
@@ -196,6 +196,8 @@ export type JournalCallMetadata =
     };
 
 export interface JournalEntry {
+  /** Required on checkpoint results; absent/older provenance cannot authorize replay. */
+  checkpointDecision?: "explicit-v1";
   index: number;
   /** sha256 of the call identity (prompt + model + tier + phase + agentType + agentDef + schema). */
   hash: string;
@@ -468,6 +470,8 @@ export type WorkflowReplayEligibility = WorkflowReplayEligibilityBase &
  *  transition — including calls that never journal (failures, caught throws,
  *  engine-side deaths, aborts). What the journal is to results, this is to structure. */
 export interface WorkflowCallRecord {
+  /** Required on journaled checkpoint results, including replayed explicit decisions. */
+  checkpointDecision?: "explicit-v1";
   /** Same space as JournalEntry.index. */
   index: number;
   kind: "agent" | "checkpoint";
@@ -484,7 +488,7 @@ export interface WorkflowCallRecord {
    *  resolved null; "error" — a throw propagated into the script (catchable there). */
   outcome: "result" | "null" | "error";
   /** Which mechanism terminated the call. */
-  origin: "runner" | "journal-replay" | "confirm" | "headless" | "engine";
+  origin: "runner" | "journal-replay" | "confirm" | "engine";
   /** REQUIRED on outcome "null"/"error", forbidden on "result": the projection of
    *  the terminal error/thrown value. */
   error?: WorkflowRecordedError;

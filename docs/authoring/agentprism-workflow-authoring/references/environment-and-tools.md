@@ -23,7 +23,7 @@ The run's base `cwd` is the USER'S checkout — the working copy they launched t
 Any process that speaks ACP over stdio can serve `agent()` calls — an in-house browser-QA agent, an image generator, a domain-specific executor. Two ways in:
 
 1. **Host-registered** (preferred): the embedder passes `createAcpRunner({ backends: { browser: { command: "/abs/browser-acp" } } })`; the script just routes with `model: "browser"`.
-2. **Script-declared**: the script itself declares the backend in `meta.backends` — but declarations are **inert until the host approves them** (an elicitation in the MCP server; `allowScriptBackends` in the SDK), because they spawn commands on the host machine. Don't rely on them silently working.
+2. **Script-declared**: the script declares the backend in `meta.backends`, and declarations are **inert until the host approves them**. MCP accepts an inspectable run, exposes a durable setup request, and accepts its exact reply through `setup-response`; SDK hosts use `allowScriptBackends`. These declarations spawn commands on the host machine. Don't rely on them silently working.
 
 ```js
 export const meta = {

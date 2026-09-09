@@ -1,6 +1,6 @@
 # Journal replay contract
 
-**Status:** current · **Date:** 2026-09-01 · **Motivation:** issues #271 and #427
+**Status:** current · **Date:** 2026-09-08 · **Motivation:** issues #271 and #427
 
 This contract supersedes the filesystem-safety and purity rules in
 [`incremental-resume-spec.md`](incremental-resume-spec.md). The engine replays recorded workflow
@@ -48,7 +48,7 @@ journal compatibility but is not emitted by current new-run source admission.
 
 ## World neutrality
 
-All completed matching calls are eligible, including writers, readers, worktree calls, headless
+All completed matching calls are eligible, including writers, readers, worktree calls, explicitly answered
 checkpoint results, and calls recorded before or after live calls, nested workflows, worktree
 degradation, or host checkpoint callbacks. A live call never clears unrelated candidates. A
 nested workflow still executes live because child calls are not part of the parent's journal, but
@@ -66,10 +66,11 @@ earlier intelligence could make the world safer.
 
 ## Checkpoints and continuation
 
-Completed checkpoint results follow the same identity/fingerprint rule regardless of whether the
-source decision came from a host callback or headless default. A durable `checkpointReplies` value
-is more constrained because it is a new human decision, not a completed source result: exact call
-sites may consume it after a live prefix, while a moved unique match is accepted only while prior
+Completed checkpoint results follow the same identity/fingerprint rule after their explicit-answer
+provenance is validated. Every reusable decision records `checkpointDecision:"explicit-v1"` in its
+journal row, call record, and retained injection. Decisions from host callbacks and explicit
+`checkpointReplies` satisfy this contract. A durable new `checkpointReplies` value is more constrained
+than a completed source result: exact call sites may consume it after a live prefix, while a moved unique match is accepted only while prior
 journal correspondence remains intact. Changed checkpoint inputs or a different same-text branch
 leave the reply unapplied and the checkpoint live.
 
@@ -80,8 +81,12 @@ agree. A failed continuation gate starts that call fresh without invalidating la
 
 ## Compatibility
 
-Marker-less and old input-format recordings retain their legacy positional bridge. Explicit
-`resumePolicy: "positional"` still requests index/prefix correspondence, but new-format positional
+Historical automatic checkpoint outcomes, missing or unsupported checkpoint provenance, and
+pending checkpoints carrying retired `default` or `headless` policy fields fail with
+`checkpoint-provenance-incompatible` before execution, reply classification, or replay admission.
+They remain readable for inspection; there is no guessed migration or fallback to weaker checkpoint
+semantics. Checkpoint-free marker-less and old agent input-format recordings retain their legacy
+positional bridge. Explicit `resumePolicy: "positional"` still requests index/prefix correspondence, but new-format positional
 rows require structural identity and equal input fingerprints—not safety markers or world-state
-agreement. Historical public enum literals remain exported so old journals and consumers continue
+agreement. Historical replay strategy and fallback enum literals remain exported so old journals and consumers continue
 to parse; their presence does not imply that current code emits or acts on them.

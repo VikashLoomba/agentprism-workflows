@@ -44,7 +44,7 @@ This is a pnpm monorepo of ten `@automatalabs/*` packages:
 - `acp-server`: connection-pinned ACP proxy and backend-discovery server.
 - `workflows`: the public SDK facade composing the engine and ACP runner.
 - `repl-engine`: persistent QuickJS REPL orchestration over the same backend stack.
-- `mcp-server`: MCP composition root exposing `workflow`, `repl`, and their SEP-2640 authoring skills.
+- `mcp-server`: MCP composition root exposing `workflow`, `repl`, the Apps-capable `workflow_monitor`, and SEP-2640 authoring skills.
 - `pi-acp`: in-process pi ACP server.
 - `codex-acp`: published fork maintained as a non-squashed upstream subtree.
 - `agentprism-otel`: optional observability bridge.

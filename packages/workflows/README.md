@@ -12,7 +12,7 @@ or a registered custom ACP agent — driving the actual subprocess to completion
 This package is the **canonical SDK** that the stdio MCP server
 [`@automatalabs/mcp-server`](https://www.npmjs.com/package/@automatalabs/mcp-server) is built on.
 Its CLI can also delegate to a build-time embedded copy of that server with the `mcp` subcommand,
-so an MCP host can expose the `workflow` and `repl` tools without a separate package install. The
+so an MCP host can expose `workflow`, `workflow_monitor`, and `repl` without a separate package install. The
 standalone MCP server package remains independently published, while programs embedding the runner
 continue to use this package's workflow/runner APIs.
 
@@ -291,17 +291,34 @@ console.log(next.runId, next.replayEligibility, next.resumeReport);
 ```
 
 `runSync(script, args?, exec?)` always resolves to a terminal `WorkflowRunResult`. A run **pauses**
-(rather than fails) on a provider usage limit, ACP authentication requirement, or an explicitly
-durable checkpoint. An auth pause carries `reason: "auth_required"` plus a non-secret `authContext`;
-complete auth on an auth-capable runner before resuming. A checkpoint with a live `ExecOptions.confirm`
-resolves immediately; without one, the default mode still takes `default ?? true` and
-`headless: "abort"` aborts. Only `headless: "pause"` returns `reason: "checkpoint_required"` plus
-`checkpointContext`; resume with `checkpointReplies: { [context.callIndex]: decision }` (or a live
-`confirm`). The injected answer is journaled and replayed, so a detached run never pauses for a
-checkpoint unless the author opts in. `checkpointReplies` works with the default `"auto"` policy;
+on a provider usage limit, ACP authentication requirement, or any unanswered checkpoint. An auth
+pause carries `reason:"auth_required"` plus non-secret `authContext`; complete auth on an
+auth-capable runner before resuming. A checkpoint can collect an explicit answer through
+`ExecOptions.confirm`. No callback, `undefined`, non-JSON replies, rejection, or interaction timeout leaves it
+unanswered and returns `reason:"checkpoint_required"` plus `checkpointContext`. Resume with
+`checkpointReplies:{ [context.callIndex]: decision }` or a live `confirm`. The first answer is
+journaled and replayed across cold continuation. Retired authored `headless` and `default` fields
+are rejected; panel closure cannot answer or abort the run. Explicit cancellation remains
+available, including while a callback is waiting. `checkpointReplies` works with the default `"auto"` policy;
 it does not require `resumePolicy: "positional"` or any other particular policy. The supplied JSON
 decision is returned verbatim from `checkpoint()` (`kind: "confirm"` therefore normally receives a
 boolean).
+
+The SDK retains promise-based `runDynamicWorkflow`, `runSync`, and `startInBackground` APIs, plus
+its explicit host `executionAdmission` barrier. MCP uses separate bounded Run/Resume controls and
+durable setup; no SDK callback is an MCP execution-mode selector. Strict `continueRun()` requires
+format-2 canonical admission with an agent-only occurrence map. Checkpoints never shift that map's
+indexes. Checkpoint input fingerprints are format 2, and journaled checkpoint results, result call
+records, and reply injections carry `checkpointDecision:"explicit-v1"`. Historical automatic or
+ambiguous checkpoint records cannot authorize continuation/replay/isolation: they fail with
+`checkpoint-provenance-incompatible` and require a fresh run. Historical reads remain supported.
+
+Host-owned durable setup uses the manager's `prepareRun`, `claimPreparedRun`, `updatePreparation`,
+and `admitPreparedRun` methods. `settlePreparedRun(runId, "failed" | "aborted", error,
+{ responses?, expectedRevision? })` can atomically record terminal setup responses: `responses`
+maps exact request IDs to canonical response fingerprints, and `expectedRevision` guards the
+observed preparation revision. Receipt and terminal status commit in one mandatory save; a failed
+save preserves the pending question and permits the exact retry.
 
 Resume guarantees journal/script replay integrity and checkpoint-reply targeting only. It never
 assumes or guarantees that the filesystem, external systems, agent output semantics, or any other
@@ -335,7 +352,7 @@ engine plumbing; the public SDK accepts no continuation option.
 
 Every terminal result may also carry `fallbacks` (including `kind: "continuation"` notices that
 record a reattached `resume`/`load` method or an exact skip reason) and `checkpointsTaken` (one
-resolved checkpoint per call with the journaled decision and `live` / `headless-default` /
+resolved checkpoint per call with the journaled decision and `live` /
 `journal-replay` / `injected` source). They are absent when empty, persist for cold reads, never
 enter replay hashes, and are not part of `WorkflowRunStatus` inspection.
 
@@ -369,7 +386,7 @@ even without terminal-environment capture. Sources with an input-fingerprint for
 `inputs-format-legacy` positional bridge. That bridge also accepts ancestor-scoped rows carried by a
 ≤0.23 resume hop when the ancestor run still exists in the same persistence directory; nested and deleted-run scopes stay live. Engine
 package versions are persisted and surfaced as diagnostics but never gate replay. Every new-run
-resume exposes `WorkflowReplayEligibility` on the foreground result and inspection status: strategy,
+resume exposes `WorkflowReplayEligibility` on the SDK result and inspection status: strategy,
 an admission-time upper bound and the observed replayable prefix, counts, the first non-replay when known, source/current
 engine and input-format versions, non-gating runtime/environment provenance changes, and operational changes.
 
@@ -627,7 +644,7 @@ ships no runtime code).
 | `completenessCheck(args, results)` | Ask a critic what is still missing. |
 | `retry(thunk, options?)` | Bounded retry until `until(result)` holds. |
 | `gate(thunk, validator, options?)` | Validate-and-feed-back loop returning `{ ok, value, verdict, attempts }`; `verdict` is the raw last validator return on either pass or exhaustion. |
-| `checkpoint(text, options?)` | Deterministic, journaled human gate: live confirm, headless default/abort, or opt-in durable `headless: "pause"`. |
+| `checkpoint(text, options?)` | Deterministic, journaled human gate: an explicit live/replayed reply resolves; every unanswered checkpoint pauses. Options: `kind`, `choices`, `timeoutMs`. |
 | `phase(title)` | Open a named phase. |
 | `log(message)` | Append a line to the run log. |
 | `args` | The input bag passed in via `{ args }`. |
@@ -657,8 +674,9 @@ authenticate, select its model, or open a session contributes one warning and `p
 that target's configuration checks are skipped, so probe failure alone never invalidates the script.
 There is no cached catalog. Programmatic hosts may set `probeConfig:false` for a mock routing-discovery
 pass that intentionally skips all no-prompt config checks; the CLI and ordinary validation keep them enabled.
-A mock live confirm answers checkpoints with `default ?? true`, so `headless: "pause"`
-dry-runs cleanly; `headless: "abort"` warns because a truly unattended run would abort.
+Validation simulates `true` for confirm checkpoints, sample text for input, and the first offered
+choice for select. It uses `journaling:false`; simulated answers are never persisted or consumed
+as approval for live execution. A later live run still pauses for an explicit answer.
 Script-declared `meta.backends` are treated as approved (with a warning that real runs require
 approval). The report lists every agent call with its backend attribution, `mode`, and `configOptions`
 echo, every checkpoint, the full mode/option table for every routed backend/model target (even when no call authors
@@ -736,7 +754,7 @@ report.dryRun?.agentCalls; // calls include mockAnswer: { glob, sequenceIndex?, 
 report.dryRun?.harnessOptions;
 // [{ backendId, model?, probed, modes?: SessionModeState | null, options?: SessionConfigOption[], error?: string }]
 report.dryRun?.mockAnswers;// normalized rule counters + item-level unused records
-report.warnings;           // approval reminders, phase mismatches, headless-abort checkpoints, …
+report.warnings;           // approval reminders, phase mismatches, probe failures, …
 ```
 
 ---
@@ -817,8 +835,26 @@ hosts (Claude Code `--transport http`, Codex `config.toml` `url`), which can ski
 entirely. See the [`@automatalabs/mcp-server` README](../mcp-server#the-workflow-daemon) for
 the daemon's full contract (discovery, project routing, idle shutdown, security posture).
 
-The bundled server exposes **two** model-facing tools — `workflow` and **`repl`** — and no auth
-tools. The `repl` tool is a persistent QuickJS-in-WASM JavaScript REPL, **one VM per `projectDir`**
+The bundled server exposes `workflow`, the separate `workflow_monitor` view entry on App-capable
+hosts, and `repl`; it has no auth tools. `workflow` has the strict
+config/run/resume/setup-response/status/result/permissions-response/stop lifecycle. Run and Resume
+require `requestId` and return bounded durable acknowledgements before execution completes. Retry
+the same ID and identical arguments after a lost acknowledgement; conflicting reuse fails. A new
+operation needs a fresh ID. Bounded source checks reject malformed input before acceptance;
+mock/probe failures and declined setup remain inspectable under the accepted run ID. Setup replies
+use its exact `setupId`; checkpoint and permission answers use separate bounded actions. No inline
+MCP interaction or transport request-state token owns workflow execution.
+
+Every workflow request is bounded at 45 seconds; autonomous preparation is bounded at 120 seconds
+per stage, excluding durable human waiting. Each project allows four active runs, including setup.
+Only `workflow_monitor` advertises the shared static UI resource. Its multi-run view survives a
+host replacing panels; non-App clients use Status, Result, and the same controls. Required-input
+and terminal notifications use available host capabilities with duplicate suppression; routine
+activity remains quiet. Panel closure and request timeout never stop an accepted run. Explicit
+Stop is durable; cold recovery preserves the source, setup receipts, checkpoint answers, and
+continuation retry identities. See the [lifecycle reference](../../docs/authoring/agentprism-workflow-authoring/references/run-lifecycle.md).
+
+The `repl` tool is a persistent QuickJS-in-WASM JavaScript REPL, **one VM per `projectDir`**
 (the same per-project model as `workflow`), for live, stateful subagent orchestration: workspace
 state (bindings, pending subagent calls, checkpoints, logged values) persists in the VM across tool
 calls and daemon restarts through the per-project `repl/` store, and drains when the project's last
@@ -1016,7 +1052,7 @@ reads supporting references lazily through MCP resources. The concise canonical 
   MCP-wired image producer.
 - **[`@automatalabs/mcp-server`](https://www.npmjs.com/package/@automatalabs/mcp-server)** — the
   stdio MCP server built on this SDK. It wraps the same engine + ACP backend behind the `workflow`
-  and `repl` tools (bin: `agentprism-workflow`; no auth tools) for any MCP host. Use it when you want
+  and `repl` tools, with a separate `workflow_monitor` view (bin: `agentprism-workflow`; no auth tools). Use it when you want
   the **MCP-tool route** instead of embedding the runner in code.
 
 ## License

@@ -613,7 +613,6 @@ function projectCheckpointContext(
     prompt: projectText(context.prompt, state),
     kind: context.kind,
     ...(choices === undefined ? {} : { choices }),
-    ...(context.default === undefined ? {} : { default: projectValue(context.default, state) }),
     ...(context.timeoutMs === undefined ? {} : { timeoutMs: context.timeoutMs }),
   };
 }

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { runAndObserve, waitForRun } from "./_harness.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -170,7 +172,7 @@ test("whole-run stop exposes a durable pending operation when an external owner 
   }
 });
 
-test("stop durably aborts a background run, publishes stopped, and retains its resource", async () => {
+test("stop durably aborts a asynchronous run, publishes stopped, and retains its resource", async () => {
   const dir = mkdtempSync(join(tmpdir(), "agentprism-mcp-stop-loop-"));
   const scriptPath = join(dir, "stop-loop.workflow.js");
   const original = [
@@ -185,7 +187,7 @@ test("stop durably aborts a background run, publishes stopped, and retains its r
   try {
     const accepted = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", scriptPath, background: true },
+      arguments: { action: "run", requestId: randomUUID(), scriptPath },
     });
     const runId = runIdOf(accepted);
     assert.deepEqual(links(accepted).map((link) => link.uri), [
@@ -249,7 +251,7 @@ test("stop with callIndex cancels one agent, keeps the run live, and treats labe
     const accepted = await client.callTool({
       name: "workflow",
       arguments: {
-        action: "run",
+        action: "run", requestId: randomUUID(),
         script: [
           'export const meta = { name: "narrow-stop", description: "cancel one branch" };',
           "const values = await parallel([",
@@ -258,7 +260,6 @@ test("stop with callIndex cancels one agent, keeps the run live, and treats labe
           "]);",
           "return { values };",
         ].join("\n"),
-        background: true,
       },
     });
     const runId = runIdOf(accepted);
@@ -362,7 +363,7 @@ test("stop with callIndex reports scoped ambiguity and leaves whole-run stop beh
     const accepted = await connection.client.callTool({
       name: "workflow",
       arguments: {
-        action: "run",
+        action: "run", requestId: randomUUID(),
         script: [
           'export const meta = { name: "cancel-ambiguity", description: "duplicate indexes" };',
           "return await parallel([",
@@ -370,7 +371,6 @@ test("stop with callIndex reports scoped ambiguity and leaves whole-run stop beh
           '  () => workflow("child"),',
           "]);",
         ].join("\n"),
-        background: true,
       },
     });
     const runId = runIdOf(accepted);
@@ -406,7 +406,7 @@ test("stop with callIndex reports scoped ambiguity and leaves whole-run stop beh
   }
 });
 
-test("four stopped background runs immediately free every registry slot", async () => {
+test("four stopped asynchronous runs immediately free every registry slot", async () => {
   const pending: Array<(value: string) => void> = [];
   let calls = 0;
   const runner = makeRunner(
@@ -426,7 +426,7 @@ test("four stopped background runs immediately free every registry slot", async 
     for (let index = 0; index < 4; index++) {
       const accepted = await client.callTool({
         name: "workflow",
-        arguments: { action: "run", script, background: true },
+        arguments: { action: "run", requestId: randomUUID(), script },
       });
       assert.equal(accepted.isError, false);
       runIds.push(runIdOf(accepted));
@@ -441,10 +441,10 @@ test("four stopped background runs immediately free every registry slot", async 
 
     const fifth = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", script, background: true },
+      arguments: { action: "run", requestId: randomUUID(), script },
     });
     assert.equal(fifth.isError, false);
-    assert.equal(structured(fifth)?.status, "running");
+    assert.equal(structured(fifth)?.accepted, true);
     await waitUntil(() => calls === 5, "the fifth run should start before stopped backends wind down");
   } finally {
     for (const resolve of pending) resolve("cleanup");
@@ -463,16 +463,15 @@ test("stop refuses a final acknowledgement when the terminal snapshot save fails
     const accepted = await first.client.callTool({
       name: "workflow",
       arguments: {
-        action: "run",
+        action: "run", requestId: randomUUID(),
         script: [
           'export const meta = { name: "stop-save-fault", description: "fault" };',
           'return await agent("block");',
         ].join("\n"),
-        background: true,
       },
     });
     const runId = runIdOf(accepted);
-    await waitUntil(() => controlled.calls.length === 1, "the background runner should start");
+    await waitUntil(() => controlled.calls.length === 1, "the asynchronous runner should start");
     store.setSaveFailure(true);
 
     const stopped = await first.client.callTool({
@@ -539,16 +538,15 @@ test("stop refuses a final acknowledgement when the stopped event append fails",
     const accepted = await first.client.callTool({
       name: "workflow",
       arguments: {
-        action: "run",
+        action: "run", requestId: randomUUID(),
         script: [
           'export const meta = { name: "stop-event-fault", description: "fault" };',
           'return await agent("block");',
         ].join("\n"),
-        background: true,
       },
     });
     const runId = runIdOf(accepted);
-    await waitUntil(() => controlled.calls.length === 1, "the background runner should start");
+    await waitUntil(() => controlled.calls.length === 1, "the asynchronous runner should start");
 
     const stopped = await first.client.callTool({
       name: "workflow",
@@ -588,10 +586,7 @@ test("stop is retry-safe for terminal runs and cold-stops an orphaned persisted 
   const firstConnection = await connect(okRunner());
   let completedRunId: string;
   try {
-    const completed = await firstConnection.client.callTool({
-      name: "workflow",
-      arguments: { action: "run", script: NO_AGENT_SCRIPT },
-    });
+    const completed = await runAndObserve(firstConnection.client, { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT });
     completedRunId = runIdOf(completed);
     const repeated = await firstConnection.client.callTool({
       name: "workflow",
@@ -650,19 +645,16 @@ test("stop is retry-safe for terminal runs and cold-stops an orphaned persisted 
 test("stop clears durable checkpoint context on a paused live run", async () => {
   const { client, dispose } = await connect(okRunner());
   try {
-    const paused = await client.callTool({
-      name: "workflow",
-      arguments: {
-        action: "run",
+    const paused = await runAndObserve(client, {
+        action: "run", requestId: randomUUID(),
         script: [
           'export const meta = { name: "paused-stop", description: "paused stop" };',
-          'return await checkpoint("approve", { headless: "pause" });',
+          'return await checkpoint("approve", {});',
         ].join("\n"),
-      },
-    });
+      });
     const runId = runIdOf(paused);
     assert.equal(structured(paused)?.status, "paused");
-    assert.ok(structured(paused)?.checkpointContext);
+    assert.ok((structured(paused)?.outcome as Record<string, unknown>)?.checkpointContext);
 
     const stopped = await client.callTool({ name: "workflow", arguments: { action: "stop", runId } });
     assert.equal(structured(stopped)?.status, "aborted");

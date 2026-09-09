@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { runAndObserve, waitForRun } from "./_harness.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -121,12 +123,12 @@ test("initialize advertises full resources capabilities and scriptPath snapshots
     const unreadablePath = join(dir, "missing.workflow.js");
     const unreadable = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", scriptPath: unreadablePath },
+      arguments: { action: "run", requestId: randomUUID(), scriptPath: unreadablePath },
     });
     assert.equal(unreadable.isError, true);
     assert.match(
       String((unreadable.content as Array<{ text?: string }>)[0]?.text),
-      new RegExp(`unable to read scriptPath .*missing\\.workflow\\.js.*ENOENT`),
+      /ENOENT.*missing\.workflow\.js/,
     );
     assert.equal(
       (await client.listResources()).resources.length,
@@ -135,7 +137,7 @@ test("initialize advertises full resources capabilities and scriptPath snapshots
     );
     const result = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", scriptPath },
+      arguments: { action: "run", requestId: randomUUID(), scriptPath },
     });
     const runId = String(structured(result)?.runId);
     const uri = `workflow://runs/${runId}/script`;
@@ -144,7 +146,6 @@ test("initialize advertises full resources capabilities and scriptPath snapshots
     assert.equal(structured(result)?.scriptUri, uri);
     assert.equal(structured(result)?.eventsUri, `workflow://runs/${runId}/events`);
     assert.deepEqual(resourceLinks(result).map((link) => link.uri), [
-      `workflow://runs/${runId}/result`,
       uri,
       `workflow://runs/${runId}/events`,
     ]);
@@ -169,9 +170,11 @@ test("admission readback preserves authored args and the original persisted scri
   try {
     const result = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", script, args },
+      arguments: { action: "run", requestId: randomUUID(), script, args },
     });
-    assert.deepEqual(structured(result)?.result, args);
+    assert.equal(structured(result)?.result, undefined);
+    const observed = await waitForRun(client, String(structured(result)?.runId));
+    assert.deepEqual((structured(observed)?.outcome as Record<string, unknown>)?.result, args);
     const runId = String(structured(result)?.runId);
     const file = persistedRunFile(runId);
     assert.ok(file);
@@ -206,7 +209,7 @@ test("readback rejects a transient initial save failure before execution can res
     const result = await client.callTool({
       name: "workflow",
       arguments: {
-        action: "run",
+        action: "run", requestId: randomUUID(),
         script: [
           'export const meta = { name: "failed-admission", description: "must not execute" };',
           'return await agent("must not start");',
@@ -251,10 +254,13 @@ test("a failed terminal snapshot save never advertises exact-result availability
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
   try {
-    const completed = await client.callTool({ name: "workflow", arguments: { action: "run", script: NO_AGENT_SCRIPT } });
+    const completed = await client.callTool({ name: "workflow", arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT } });
     const runId = String(structured(completed)?.runId);
-    assert.equal(structured(completed)?.status, "completed");
-    assert.equal(structured(completed)?.resultUri, undefined);
+    assert.equal(structured(completed)?.accepted, true);
+    await waitUntil(() => manager.getRun(runId)?.executionSettled === true, "failed final save must settle live execution");
+    const observed = await client.callTool({ name: "workflow", arguments: { action: "status", runId } });
+    assert.equal(structured(observed)?.status, "completed");
+    assert.equal(structured(observed)?.resultUri, undefined);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(listChanged, 1, "only durable admission changes the list; the unsaved result does not");
 
@@ -278,71 +284,34 @@ test("a failed terminal snapshot save never advertises exact-result availability
   }
 });
 
-test("failed foreground admission cannot enter the VM or abandon a checkpoint elicitation", async () => {
+test("a failed initial save cannot execute a checkpoint or leave a transport form pending", async () => {
   const root = mkdtempSync(join(tmpdir(), "agentprism-mcp-checkpoint-admission-"));
-  let failSaves = false;
-  const fault = saveFaultPersistence(root, () => failSaves);
+  const fault = saveFaultPersistence(root, () => true);
   const runner = okRunner();
   const manager = new WorkflowManager({ cwd: root, agent: runner, persistence: fault.persistence });
   const server = createWorkflowServer(runner, { manager });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client(
-    { name: "checkpoint-admission-client", version: "0.0.0" },
-    { capabilities: { elicitation: {} } },
-  );
-  let priming = true;
-  let elicitationRequests = 0;
-  let activeElicitations = 0;
-  let cancelledElicitations = 0;
-  client.setRequestHandler('elicitation/create', (_request, ctx): ElicitResult | Promise<ElicitResult> => {
-    elicitationRequests++;
-    if (priming) return { action: "accept", content: { approve: true } };
-    activeElicitations++;
-    return new Promise<ElicitResult>((resolve) => {
-      ctx.mcpReq.signal.addEventListener("abort", () => {
-        activeElicitations--;
-        cancelledElicitations++;
-        resolve({ action: "cancel" });
-      }, { once: true });
-    });
-  });
+  const client = new Client({ name: "checkpoint-admission-client", version: "0.0.0" }, { capabilities: { elicitation: {} } });
+  let elicitations = 0;
+  client.setRequestHandler("elicitation/create", async () => { elicitations++; return { action: "decline" }; });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-  const checkpointScript = [
-    'export const meta = { name: "admission-checkpoint", description: "pre-VM admission" };',
-    'return await checkpoint("Ship?", { kind: "confirm" });',
-  ].join("\n");
   try {
-    const primed = await client.callTool({ name: "workflow", arguments: { action: "run", script: checkpointScript } });
-    assert.equal(primed.isError, false);
-    assert.equal(elicitationRequests, 1);
-
-    priming = false;
-    failSaves = true;
-    const failed = await client.callTool({ name: "workflow", arguments: { action: "run", script: checkpointScript } });
+    const failed = await client.callTool({ name: "workflow", arguments: { action: "run", requestId: randomUUID(),
+      script: 'export const meta = { name: "checkpoint", description: "pre-VM admission" }; return checkpoint("Ship?");' } });
     assert.equal(failed.isError, true);
     assert.equal(failed.structuredContent, undefined);
     assert.equal(resourceLinks(failed).length, 0);
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(elicitationRequests, 1, "authored checkpoint code must not run before durable readback");
-    assert.equal(activeElicitations, 0, "the failed tool call must leave no elicitation unsettled");
-    assert.equal(cancelledElicitations, 0, "the pre-VM latch should prevent a request from needing cancellation");
-
-    const failedRunId = fault.acquiredRunIds.at(-1);
-    assert.ok(failedRunId);
-    assert.equal(manager.getRun(failedRunId), undefined);
-    assert.equal(fault.durable.load(failedRunId), null);
-    const lease = fault.durable.acquireRunLease(failedRunId);
-    assert.ok(lease, "failed checkpoint admission must release its lease");
+    assert.equal(elicitations, 0);
+    const runId = fault.acquiredRunIds.at(-1)!;
+    assert.equal(manager.getRun(runId), undefined);
+    assert.equal(fault.durable.load(runId), null);
+    const lease = fault.durable.acquireRunLease(runId);
+    assert.ok(lease, "failed acceptance releases its lease");
     fault.durable.releaseRunLease(lease);
-  } finally {
-    await client.close();
-    await server.close();
-    rmSync(root, { recursive: true, force: true });
-  }
+  } finally { await client.close(); await server.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("persistent foreground admission failure never starts the runner and leaves no run, resource, or lease", async () => {
+test("persistent acceptance failure never starts the runner and leaves no run, resource, or lease", async () => {
   const root = mkdtempSync(join(tmpdir(), "agentprism-mcp-persistent-foreground-admission-"));
   const fault = saveFaultPersistence(root, () => true);
   let runnerCalls = 0;
@@ -361,7 +330,7 @@ test("persistent foreground admission failure never starts the runner and leaves
     const result = await client.callTool({
       name: "workflow",
       arguments: {
-        action: "run",
+        action: "run", requestId: randomUUID(),
         script: [
           'export const meta = { name: "failed-admission", description: "must not execute" };',
           'return await agent("must not start");',
@@ -413,7 +382,7 @@ test("persistent admission save failure returns no URI and cleans the run, resou
     await client.listTools();
     const result = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: NO_AGENT_SCRIPT, background: true },
+      arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT },
     });
     assert.equal(result.isError, true);
     assert.equal(result.structuredContent, undefined);
@@ -461,11 +430,11 @@ test("concurrent inline and path results report source without persisting it int
   try {
     const inlinePromise = client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: TWO_AGENT_SCRIPT },
+      arguments: { action: "run", requestId: randomUUID(), script: TWO_AGENT_SCRIPT },
     });
     const pathPromise = client.callTool({
       name: "workflow",
-      arguments: { action: "run", scriptPath },
+      arguments: { action: "run", requestId: randomUUID(), scriptPath },
     });
     await waitUntil(() => pending.length === 2, "both identical admissions should execute concurrently");
     pending.splice(0).forEach((resolve) => resolve());
@@ -477,14 +446,8 @@ test("concurrent inline and path results report source without persisting it int
     assert.equal(structured(pathResult)?.scriptSource, "path");
     const inlineRunId = String(structured(inlineResult)?.runId);
     const pathRunId = String(structured(pathResult)?.runId);
-    const inlineAwait = await client.callTool({
-      name: "workflow",
-      arguments: { action: "status", runId: inlineRunId },
-    });
-    const pathAwait = await client.callTool({
-      name: "workflow",
-      arguments: { action: "status", runId: pathRunId },
-    });
+    const inlineAwait = await waitForRun(client, inlineRunId);
+    const pathAwait = await waitForRun(client, pathRunId);
     assert.equal((structured(inlineAwait)?.outcome as Record<string, unknown>).scriptSource, undefined);
     assert.equal((structured(pathAwait)?.outcome as Record<string, unknown>).scriptSource, undefined);
   } finally {
@@ -669,7 +632,7 @@ test("resource listing/completion are bounded to 50 newest; subscribe, deletion,
   try {
     const admitted = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: NO_AGENT_SCRIPT },
+      arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT },
     });
     const runId = String(structured(admitted)?.runId);
     const uri = `workflow://runs/${runId}/script`;
@@ -697,7 +660,7 @@ test("resource listing/completion are bounded to 50 newest; subscribe, deletion,
 test("a fresh MCP session can retrieve a checkpoint script and continue that exact run", async () => {
   const script = [
     'export const meta = { name: "resource-checkpoint", description: "cross-session recovery" };',
-    'const decision = await checkpoint("ship?", { headless: "pause" });',
+    'const decision = await checkpoint("ship?", {});',
     "return { decision };",
   ].join("\n");
   const first = await connect(okRunner());
@@ -706,7 +669,7 @@ test("a fresh MCP session can retrieve a checkpoint script and continue that exa
   try {
     const accepted = await first.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script, background: true },
+      arguments: { action: "run", requestId: randomUUID(), script },
     });
     runId = String(structured(accepted)?.runId);
     await waitUntil(async () => structured(await first.client.callTool({
@@ -731,13 +694,14 @@ test("a fresh MCP session can retrieve a checkpoint script and continue that exa
     const resumed = await second.client.callTool({
       name: "workflow",
       arguments: {
-        action: "resume",
+        action: "resume", requestId: randomUUID(),
         runId: runId!,
         checkpointReplies: { 0: true },
       },
     });
-    assert.equal(structured(resumed)?.status, "completed");
-    assert.equal(JSON.stringify(structured(resumed)?.result), JSON.stringify({ decision: true }));
+    assert.equal(structured(resumed)?.accepted, true);
+    const completed = await waitForRun(second.client, runId!);
+    assert.equal(JSON.stringify((structured(completed)?.outcome as Record<string, unknown>)?.result), JSON.stringify({ decision: true }));
     assert.equal(structured(resumed)?.scriptSource, "stored");
     const resumedRunId = String(structured(resumed)?.runId);
     assert.equal(resumedRunId, runId);
@@ -761,9 +725,10 @@ test("cold status does not infer an admission-only script source", async () => {
   try {
     const result = await first.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: NO_AGENT_SCRIPT },
+      arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT },
     });
     runId = String(structured(result)?.runId);
+    await waitForRun(first.client, runId);
   } finally {
     await first.dispose();
   }

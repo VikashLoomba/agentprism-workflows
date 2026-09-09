@@ -26,6 +26,7 @@ export {
   type CheckpointCallContext,
   type SharedRuntime,
 } from "./workflow.js";
+export { assertExplicitCheckpointDecision, assertExplicitCheckpointProvenance } from "./checkpoint-provenance.js";
 
 // ── Run manager + persistence ──
 export {
@@ -38,6 +39,13 @@ export {
   type WorkflowContinuationStart,
   type PersistedRunStopResult,
 } from "./workflow-manager.js";
+export {
+  MAX_WORKFLOW_CONTINUATION_OPERATIONS,
+  MAX_WORKFLOW_PREPARATION_BYTES,
+  type WorkflowOperationIdentity,
+  type WorkflowPreparation,
+  type PersistedWorkflowContinuationOperation,
+} from "./workflow-preparation.js";
 export {
   createRunPersistence,
   generateRunId,

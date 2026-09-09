@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 // createDaemon() integration: real HTTP on loopback, real SDK clients. Proves the daemon
 // invariants the migration exists for — sessions are cheap, project-agnostic, and
 // disposable; every run names its project via the required projectDir argument; runId
@@ -8,22 +9,24 @@ import { readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { okRunner, structured, textOf, persistedRunFile, NO_AGENT_SCRIPT, ONE_AGENT_SCRIPT, TEST_HOME } from "../_harness.js";
+import { okRunner, structured, textOf, waitForRun, persistedRunFile, NO_AGENT_SCRIPT, ONE_AGENT_SCRIPT, TEST_HOME } from "../_harness.js";
 import { connectHttp, gatedRunner, makeProjectDir, startDaemon } from "../_http-harness.js";
 import { createDaemon } from "../../src/daemon/http-daemon.js";
 import { SESSION_IDLE_TTL_MS } from "../../src/daemon/constants.js";
 
-test("initialize + foreground workflow call over real Streamable HTTP", async () => {
+test("initialize + durable asynchronous workflow acceptance over real Streamable HTTP", async () => {
   const daemon = await startDaemon(okRunner());
   const projectDir = makeProjectDir("basic-project");
   try {
     const session = await connectHttp(daemon.url, { listTools: true });
     const result = await session.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: NO_AGENT_SCRIPT, projectDir },
+      arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT, projectDir },
     });
     assert.equal(result.isError ?? false, false, textOf(result));
-    assert.equal(structured(result)?.status, "completed");
+    assert.equal(structured(result)?.accepted, true);
+    assert.equal(structured(result)?.status, "pending");
+    assert.equal(structured(await waitForRun(session.client, String(structured(result)?.runId)))?.status, "completed");
 
     const health = await fetch(`http://127.0.0.1:${daemon.port}/healthz`);
     assert.equal(health.status, 200);
@@ -41,7 +44,7 @@ test("run without projectDir is rejected with a clear InvalidParams error", asyn
   const daemon = await startDaemon(okRunner());
   try {
     const session = await connectHttp(daemon.url);
-    const result = await session.client.callTool({ name: "workflow", arguments: { action: "run", script: NO_AGENT_SCRIPT } });
+    const result = await session.client.callTool({ name: "workflow", arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT } });
     assert.equal(result.isError, true);
     assert.match(textOf(result), /run requires projectDir/);
     await session.dispose();
@@ -56,7 +59,7 @@ test("a nonexistent projectDir is rejected before any engine state is created", 
     const session = await connectHttp(daemon.url);
     const result = await session.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: NO_AGENT_SCRIPT, projectDir: join(TEST_HOME, "does-not-exist") },
+      arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT, projectDir: join(TEST_HOME, "does-not-exist") },
     });
     assert.equal(result.isError, true);
     assert.match(textOf(result), /projectDir does not exist/);
@@ -76,7 +79,7 @@ test("background run started in one session is observed from another — runId a
     const b = await connectHttp(daemon.url);
     const started = await a.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: ONE_AGENT_SCRIPT, background: true, projectDir },
+      arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT, projectDir },
     });
     assert.equal(started.isError ?? false, false, textOf(started));
     const runId = structured(started)?.runId as string;
@@ -85,10 +88,7 @@ test("background run started in one session is observed from another — runId a
 
     release();
     // Session B never named the project: await routes by locating the runId's store.
-    const awaited = await b.client.callTool({
-      name: "workflow",
-      arguments: { action: "status", runId },
-    });
+    const awaited = await waitForRun(b.client, runId);
     assert.equal(awaited.isError ?? false, false, textOf(awaited));
     assert.equal(structured(awaited)?.status, "completed");
     await a.dispose();
@@ -106,14 +106,16 @@ test("one session runs two projects; runs persist under distinct project keys", 
     const session = await connectHttp(daemon.url);
     const resultA = await session.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: NO_AGENT_SCRIPT, projectDir: projectA },
+      arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT, projectDir: projectA },
     });
     const resultB = await session.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: NO_AGENT_SCRIPT, projectDir: projectB },
+      arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT, projectDir: projectB },
     });
     const runA = structured(resultA)?.runId as string;
     const runB = structured(resultB)?.runId as string;
+    await waitForRun(session.client, runA);
+    await waitForRun(session.client, runB);
     const fileA = persistedRunFile(runA);
     const fileB = persistedRunFile(runB);
     assert.ok(fileA && fileB);
@@ -138,10 +140,11 @@ test("a fresh daemon locates a prior daemon's run on disk via the project manife
     const session = await connectHttp(first.url);
     const result = await session.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: NO_AGENT_SCRIPT, projectDir },
+      arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT, projectDir },
     });
     runId = structured(result)?.runId as string;
     assert.ok(runId);
+    await waitForRun(session.client, runId);
     await session.dispose();
   } finally {
     await first.close();
@@ -171,7 +174,7 @@ test("idle eviction closes a dead client's session; its background run survives 
     const a = await connectHttp(daemon.url);
     const started = await a.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: ONE_AGENT_SCRIPT, background: true, projectDir },
+      arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT, projectDir },
     });
     const runId = structured(started)?.runId as string;
     assert.ok(runId);
@@ -204,10 +207,7 @@ test("idle eviction closes a dead client's session; its background run survives 
     // The run was never tied to the session: release the gate and await it from a new session.
     release();
     const b = await connectHttp(daemon.url);
-    const awaited = await b.client.callTool({
-      name: "workflow",
-      arguments: { action: "status", runId },
-    });
+    const awaited = await waitForRun(b.client, runId);
     assert.equal(structured(awaited)?.status, "completed", textOf(awaited));
     await b.dispose();
   } finally {
@@ -215,7 +215,7 @@ test("idle eviction closes a dead client's session; its background run survives 
   }
 });
 
-test("MAX_BACKGROUND_RUNS caps per project across sessions", async () => {
+test("MAX_ACTIVE_RUNS caps per project across sessions", async () => {
   const { runner, release } = gatedRunner();
   const projectDir = makeProjectDir("cap-project");
   const otherProject = makeProjectDir("cap-other");
@@ -227,32 +227,29 @@ test("MAX_BACKGROUND_RUNS caps per project across sessions", async () => {
     for (const session of [a, a, b, b]) {
       const started = await session.client.callTool({
         name: "workflow",
-        arguments: { action: "run", script: ONE_AGENT_SCRIPT, background: true, projectDir },
+        arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT, projectDir },
       });
       assert.equal(started.isError ?? false, false, textOf(started));
       runIds.push(structured(started)?.runId as string);
     }
     const fifth = await b.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: ONE_AGENT_SCRIPT, background: true, projectDir },
+      arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT, projectDir },
     });
     assert.equal(fifth.isError, true);
-    assert.match(textOf(fifth), /Background workflow limit reached/);
+    assert.match(textOf(fifth), /Workflow limit reached/);
 
     // The cap is per project: a different project still admits.
     const other = await b.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: ONE_AGENT_SCRIPT, background: true, projectDir: otherProject },
+      arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT, projectDir: otherProject },
     });
     assert.equal(other.isError ?? false, false, textOf(other));
     runIds.push(structured(other)?.runId as string);
 
     release();
     for (const runId of runIds) {
-      const awaited = await a.client.callTool({
-        name: "workflow",
-        arguments: { action: "status", runId },
-      });
+      const awaited = await waitForRun(a.client, runId);
       assert.equal(structured(awaited)?.status, "completed", textOf(awaited));
     }
     await a.dispose();

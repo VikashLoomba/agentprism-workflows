@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 // R0 acceptance (docs/roadmap/workflow-permission-model.md §R0): the daemon HTTP face must stay
 // responsive while its event-serving path drains a large journal. Two production daemon respawns
 // traced to watchEvents re-parsing the whole journal once per record yielded — a measured
@@ -14,7 +15,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { structured, textOf, NO_AGENT_SCRIPT, ONE_AGENT_SCRIPT } from "../_harness.js";
+import { structured, textOf, waitForRun, NO_AGENT_SCRIPT, ONE_AGENT_SCRIPT } from "../_harness.js";
 import { connectHttp, gatedRunner, makeProjectDir, startDaemon, waitUntil } from "../_http-harness.js";
 
 const HEALTHZ_BUDGET_MS = 2_000;
@@ -51,11 +52,12 @@ test(
       // save cadence lags its append cadence.
       const created = await session.client.callTool({
         name: "workflow",
-        arguments: { action: "run", script: NO_AGENT_SCRIPT, projectDir },
+        arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT, projectDir },
       });
       assert.equal(created.isError ?? false, false, textOf(created));
       const runId = structured(created)?.runId as string;
       assert.ok(runId);
+      await waitForRun(session.client, runId);
 
       const context = daemon.projects.storeFor(runId);
       assert.ok(context, "the growable run must resolve to a project store");
@@ -81,12 +83,13 @@ test(
       // the event path is under load.
       const inflight = await session.client.callTool({
         name: "workflow",
-        arguments: { action: "run", script: ONE_AGENT_SCRIPT, background: true, projectDir },
+        arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT, projectDir },
       });
       assert.equal(inflight.isError ?? false, false, textOf(inflight));
       const inflightRunId = structured(inflight)?.runId as string;
       assert.ok(inflightRunId);
-      await waitUntil(() => daemon.activeRunCount() === 1, "the gated run should be running");
+      await waitForRun(session.client, inflightRunId, (state) => state.status === "running");
+      assert.equal(daemon.activeRunCount(), 1, "the gated run owns live execution");
       // A real events subscription over the grown run (arms the daemon's watcher/notification path).
       await session.client.subscribeResource({ uri: `workflow://runs/${runId}/events` });
 

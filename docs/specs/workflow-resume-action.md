@@ -10,11 +10,11 @@ The model-facing `workflow` tool continues one already-admitted run in place:
 interface WorkflowResumeToolInput {
   action: "resume";
   runId: string;
+  requestId: string;
   maxAgents?: number;
   concurrency?: number;
   agentRetries?: number;
   checkpointReplies?: Record<number, unknown>;
-  background?: boolean;
 }
 ```
 
@@ -25,18 +25,26 @@ checkpoint decisions, and eligible interrupted ACP session state. The same event
 from its durable cursor and provider usage is added to the run's existing total.
 
 `maxAgents`, `concurrency`, and `agentRetries` are runtime controls for the continuing execution;
-they do not change logical inputs or agent routing. `background:true` returns after the continuation
-has been durably admitted under the same run lease. Foreground waits for the same run to settle.
+they do not change logical inputs or agent routing. Every accepted resume returns after the
+continuation and its operation receipt are durably admitted under the same run lease. It includes
+`accepted:true`, `requestId`, `duplicate`, and the canonical `continuation` receipt. Execution
+continues independently of the MCP request; callers inspect `status` or read `result` after completion.
+
+`requestId` identifies one resume operation. An identical retry returns the original acceptance and
+continuation generation even if execution has since reached another checkpoint or completed. Reusing
+that ID with changed arguments fails. A deliberate later continuation uses a fresh request ID.
+The continuation receipt and any first checkpoint answer commit together before acknowledgement.
 
 The MCP schema accepts no replacement script, arguments, provider selection, or source-run
 selector. The Run action accepts explicit new content only and cannot name a prior run.
 
 ## Canonical admission
 
-Before the first live call, the host atomically persists a versioned admission snapshot containing
+Before the first live call, the host atomically persists a format-2 admission snapshot containing
 the canonical effective occurrence-indexed model/mode/config selection, host-pinned default model,
-approved script backend map, selection hash, source, and admission timestamp. Raw form fields are
-never persisted. A continued run uses that snapshot without probing or eliciting again.
+approved script backend map, selection hash, source, and admission timestamp. The canonical admission
+contains effective configuration rather than raw form responses; pending setup separately stores its
+exact schema/catalog and immutable response receipts. A continued run uses that snapshot without probing or opening new configuration setup.
 
 Strict occurrence coverage remains active for the life of the run. If execution reaches an agent
 occurrence that admission did not cover, the occurrence is durably recorded and the run fails
@@ -61,21 +69,25 @@ the run's current observation (the same shape as `status`, including the pending
 Completed and aborted runs are terminal.
 
 Only a newly accepted answer for the pending checkpoint moves the run past that pause. An
-idempotent repeat or an ignored conflict for an already-journaled checkpoint is reported but never
-substitutes for the missing decision, and it never lets a later checkpoint fall back to its
-authored default. A foreground resume from a form-capable client elicits the pending checkpoint
-directly (and every later checkpoint the continuation reaches) through the same `inputRequired`
-lifecycle a fresh run uses; the client's retry re-enters as `resume` with `checkpointReplies` for
-that call, merged with any replies the original resume carried. A retry that names a checkpoint
-the run is no longer paused at continues with the caller's original replies so the response
-reports the durable decision or the checkpoint that is now pending.
+idempotent repeat or ignored conflict for an already-journaled checkpoint never substitutes for the
+answer to a later checkpoint. `checkpoint()` accepts no `default` or `headless` option; `timeoutMs`
+is advisory and never creates a decision. A missing, declined, cancelled, or invalid answer leaves
+its checkpoint unanswered. The MCP request never opens an elicitation or remains pending for input.
+The App or another caller submits an explicit later `resume` with `checkpointReplies`.
+
+Every reusable checkpoint journal entry, successful call record, and retained injection records
+`checkpointDecision:"explicit-v1"`. Continuation rejects historical automatic decisions, missing or
+unsupported decision provenance, and pending checkpoints with retired answer policies before reuse
+or reply classification. Such artifacts remain inspectable but require a fresh Run for execution.
 
 ## Protocol and verification
 
 The stateful legacy 2025 transport and stateless `2026-07-28` transport expose this identical
-lifecycle through one implementation. Their elicitation fulfillment mechanics differ, but their
-workflow schema and same-ID behavior do not.
+lifecycle through one implementation. Both acknowledge bounded operations and use the same durable
+`setup-response`, `permissions-response`, and `resume` with `checkpointReplies`. Workflow `requestState` and
+`inputResponses` are rejected; no transport-specific input loop is retained.
 
 Focused coverage pins stable run IDs, immutable script/args/config, cumulative usage, exact journal
 prefix replay, cold continuation, admission failures, lease races, first-answer checkpoint
-durability, idempotent repeats, ignored conflicts, and both protocol eras.
+durability, explicit-decision provenance, idempotent operation retries across later generations,
+ignored checkpoint conflicts, and both protocol eras.

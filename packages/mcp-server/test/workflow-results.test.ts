@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { runAndObserve, waitForRun } from "./_harness.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -48,7 +50,7 @@ async function waitUntil(predicate: () => boolean, message: string): Promise<voi
   assert.fail(message);
 }
 
-test("completed foreground and status expose a distinct durable result resource to content-first clients", async () => {
+test("completed status exposes a distinct durable result resource to content-first clients", async () => {
   const authored = { marker: "EXACT-WORKFLOW-RESULT", nested: { answer: 42 } };
   const serialized = JSON.stringify(authored);
   const script = [
@@ -57,7 +59,7 @@ test("completed foreground and status expose a distinct durable result resource 
   ].join("\n");
   const { client, dispose } = await connect(okRunner(), { listTools: true });
   try {
-    const completed = await client.callTool({ name: "workflow", arguments: { action: "run", script } });
+    const completed = await runAndObserve(client, { action: "run", requestId: randomUUID(), script });
     const runId = String(structured(completed)?.runId);
     const scriptUri = `workflow://runs/${runId}/script`;
     const resultUri = `workflow://runs/${runId}/result`;
@@ -107,16 +109,13 @@ test("completed foreground and status expose a distinct durable result resource 
 test("JSON null remains exact while completed undefined results fail closed", async () => {
   const { client, dispose } = await connect(okRunner(), { listTools: true });
   try {
-    const nullResult = await client.callTool({
-      name: "workflow",
-      arguments: {
-        action: "run",
+    const nullResult = await runAndObserve(client, {
+        action: "run", requestId: randomUUID(),
         script: [
           'export const meta = { name: "null-result", description: "null is JSON" };',
           "return null;",
         ].join("\n"),
-      },
-    });
+      });
     const nullRunId = String(structured(nullResult)?.runId);
     const nullUri = `workflow://runs/${nullRunId}/result`;
     assert.equal(structured(nullResult)?.resultUri, nullUri);
@@ -127,16 +126,13 @@ test("JSON null remains exact while completed undefined results fail closed", as
     });
     assert.equal(structured(nullPage)?.chunk, "null");
 
-    const noValue = await client.callTool({
-      name: "workflow",
-      arguments: {
-        action: "run",
+    const noValue = await runAndObserve(client, {
+        action: "run", requestId: randomUUID(),
         script: [
           'export const meta = { name: "undefined-result", description: "no JSON value" };',
           "return undefined;",
         ].join("\n"),
-      },
-    });
+      });
     const noValueRunId = String(structured(noValue)?.runId);
     const noValueUri = `workflow://runs/${noValueRunId}/result`;
     assert.equal(structured(noValue)?.status, "completed");
@@ -169,10 +165,7 @@ test("large exact results stay out of summary text and page losslessly on UTF-8 
   ].join("\n");
   const { client, dispose } = await connect(okRunner(), { listTools: true });
   try {
-    const completed = await client.callTool({
-      name: "workflow",
-      arguments: { action: "run", script, args: authored },
-    });
+    const completed = await runAndObserve(client, { action: "run", requestId: randomUUID(), script, args: authored });
     const runId = String(structured(completed)?.runId);
     const resultUri = `workflow://runs/${runId}/result`;
     const eventsUri = `workflow://runs/${runId}/events`;
@@ -243,7 +236,7 @@ test("exact result retrieval survives restart and fails closed for every unavail
   const first = await connect(okRunner());
   let completedRunId: string;
   try {
-    const completed = await first.client.callTool({ name: "workflow", arguments: { action: "run", script: restartScript } });
+    const completed = await runAndObserve(first.client, { action: "run", requestId: randomUUID(), script: restartScript });
     completedRunId = String(structured(completed)?.runId);
   } finally {
     await first.dispose();
@@ -278,7 +271,7 @@ test("exact result retrieval survives restart and fails closed for every unavail
   try {
     const accepted = await running.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: ONE_AGENT_SCRIPT, background: true },
+      arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT },
     });
     const runId = String(structured(accepted)?.runId);
     await waitUntil(() => releaseRunning !== undefined, "background agent should start");
@@ -302,19 +295,15 @@ test("exact result retrieval survives restart and fails closed for every unavail
     const accepted = await paused.client.callTool({
       name: "workflow",
       arguments: {
-        action: "run",
+        action: "run", requestId: randomUUID(),
         script: [
           'export const meta = { name: "paused-result", description: "no result yet" };',
-          'return await checkpoint("continue?", { headless: "pause" });',
+          'return await checkpoint("continue?");',
         ].join("\n"),
-        background: true,
       },
     });
     const runId = String(structured(accepted)?.runId);
-    const terminal = await paused.client.callTool({
-      name: "workflow",
-      arguments: { action: "status", runId },
-    });
+    const terminal = await waitForRun(paused.client, runId);
     assert.equal(structured(terminal)?.status, "paused");
     const unavailable = await paused.client.callTool({
       name: "workflow",
@@ -344,7 +333,7 @@ test("exact result retrieval survives restart and fails closed for every unavail
     { recoverable: false },
   )));
   try {
-    const terminal = await failed.client.callTool({ name: "workflow", arguments: { action: "run", script: ONE_AGENT_SCRIPT } });
+    const terminal = await runAndObserve(failed.client, { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT });
     const runId = String(structured(terminal)?.runId);
     assert.equal(structured(terminal)?.status, "failed");
     const unavailable = await failed.client.callTool({
@@ -360,10 +349,7 @@ test("exact result retrieval survives restart and fails closed for every unavail
   const corruptSource = await connect(okRunner());
   let corruptRunId: string;
   try {
-    const completed = await corruptSource.client.callTool({
-      name: "workflow",
-      arguments: { action: "run", script: restartScript },
-    });
+    const completed = await runAndObserve(corruptSource.client, { action: "run", requestId: randomUUID(), script: restartScript });
     corruptRunId = String(structured(completed)?.runId);
   } finally {
     await corruptSource.dispose();
@@ -396,7 +382,7 @@ test("exact result retrieval survives restart and fails closed for every unavail
   const client = new Client({ name: "result-delete", version: "0.0.0" }, { capabilities: {} });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
-    const completed = await client.callTool({ name: "workflow", arguments: { action: "run", script: restartScript } });
+    const completed = await runAndObserve(client, { action: "run", requestId: randomUUID(), script: restartScript });
     const runId = String(structured(completed)?.runId);
     assert.equal(manager.deleteRun(runId), true);
     const deleted = await client.callTool({

@@ -286,13 +286,18 @@ test("auth, MCP, and authoring docs retain the implemented contracts", () => {
     assert.ok(mcpReadme.includes(contract), `MCP README must document ${contract}`);
   }
   assert.ok(
-    mcpReadme.includes("config/run/resume/status/result/permissions-response/stop"),
+    mcpReadme.includes("config/run/resume/setup-response/status/result/permissions-response/stop"),
     "MCP README must name the complete strict workflow action lifecycle",
   );
   assert.match(mcpReadme, /continue(?:s| that) the exact run ID/i);
   // Backend auth belongs to the agents' own CLI credential stores (auth/provider management lives
   // in the SDK runner APIs). Retired MCP tool names must not resurface in current-state docs.
   const apiDocs = readRepoFile("docs/api.md");
+  for (const [path, text] of [["packages/mcp-server/README.md", mcpReadme], ["docs/api.md", apiDocs]] as const) {
+    assert.ok(text.includes("workflow_monitor"), `${path} must document the separate workflow_monitor view entry`);
+    assert.ok(text.includes("setup-response"), `${path} must document durable setup responses`);
+    assert.ok(text.includes("requestId"), `${path} must document lifecycle retry identity`);
+  }
   for (const retired of [
     "workflow_auth_status",
     "workflow_authenticate",

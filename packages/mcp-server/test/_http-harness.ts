@@ -64,7 +64,7 @@ export async function connectHttp(
     { name: "mcp-http-test", version: "0.0.0" },
     {
       capabilities: {
-        ...uiClientCapabilities(opts.uiCapability ?? "matching"),
+        ...uiClientCapabilities(opts.uiCapability ?? "absent"),
         ...(opts.elicit ? { elicitation: { form: {} } } : {}),
       },
       // Pin the era explicitly so a test named "legacy" or "modern" can never drift with an

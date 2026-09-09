@@ -169,7 +169,7 @@ describe("WorkflowManager PR3 state", () => {
     try {
       const workflow = script(
         `args.count++
-const answer = await checkpoint('continue', { headless: 'pause' })
+const answer = await checkpoint('continue', { })
 return { count: args.count, answer }`,
         "resume-args",
       );

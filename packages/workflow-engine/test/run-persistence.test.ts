@@ -423,11 +423,11 @@ test(
     });
 
     const script = `export const meta = { name: 'journal_events', description: 'journal events' }
-const approved = await checkpoint('continue?', { default: 'yes' })
+const approved = await checkpoint('continue?')
 const a = await agent('first', { label: 'first' })
 const b = await agent('second', { label: 'second' })
 return { approved, a, b }`;
-    const result = await manager.runSync(script);
+    const result = await manager.runSync(script, undefined, { confirm: async () => "yes" });
 
     assert.equal(result.status, "completed");
     assert.deepEqual(

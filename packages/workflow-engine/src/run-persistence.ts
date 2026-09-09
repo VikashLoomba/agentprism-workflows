@@ -35,12 +35,17 @@ import type {
   WorkflowRunFallback,
   WorkflowRunLimits,
 } from "@automatalabs/shared-types";
-import type { WorkflowErrorCode } from "./errors.js";
+import { WorkflowError, WorkflowErrorCode } from "./errors.js";
 import type { WorkflowAgentConfiguration } from "./workflow.js";
 import type { ReplayReport } from "./isolation.js";
 import type { RunEnvironmentIdentity } from "./run-environment.js";
 import { withRunEventsUsingFs, type RunEventPersistence } from "./run-event-persistence.js";
 import { workflowProjectPaths } from "./workflow-paths.js";
+import type {
+  PersistedWorkflowContinuationOperation,
+  WorkflowOperationIdentity,
+  WorkflowPreparation,
+} from "./workflow-preparation.js";
 
 export type RunStatus = "pending" | "running" | "paused" | "completed" | "failed" | "aborted";
 
@@ -81,15 +86,15 @@ export interface PersistedResumeFormat {
   terminalEnvironment?: RunEnvironmentIdentity;
 }
 
-/** Immutable host-owned provider selection captured in the run's first durable save. */
+/** Immutable host-owned provider selection captured before the run's first live execution. */
 export interface PersistedRunAdmission {
-  format: 1;
+  format: 2;
   strict: true;
   agentConfigurations: Readonly<Record<number, WorkflowAgentConfiguration>>;
   defaultModel?: string;
   scriptBackends?: Record<string, WorkflowBackendConfig>;
   selectionHash: string;
-  source: "mcp-elicitation" | "mcp-routing" | "host";
+  source: "mcp-setup" | "mcp-routing" | "host";
   recordedAt: string;
   /** A live occurrence not covered by the admitted map permanently closes continuation. */
   uncoveredOccurrence?: {
@@ -118,6 +123,7 @@ export interface PersistedResumeCallBlocker {
 }
 
 export interface PersistedCheckpointInjection {
+  checkpointDecision: "explicit-v1";
   sourceRunId: string;
   recordedIndex: number;
   hash: string;
@@ -146,6 +152,8 @@ export interface PersistedRunLineageTombstone {
   runId: string;
   sourceRunId?: string;
   deletedAt: string;
+  /** Content-free acceptance identity prevents a lost-response retry from recreating deleted work. */
+  acceptanceOperation?: WorkflowOperationIdentity;
 }
 
 export interface PersistedRunState {
@@ -172,6 +180,15 @@ export interface PersistedRunState {
   environment?: RunEnvironmentIdentity;
   /** Required by same-ID continuation; deliberately absent on pre-contract runs. */
   admission?: PersistedRunAdmission;
+  /** Immutable initial acceptance identity, committed together with the pending run. */
+  acceptanceOperation?: WorkflowOperationIdentity;
+  /** Host-owned preparation survives request/session/process loss before execution admission. */
+  preparation?: WorkflowPreparation;
+  preparationRevision?: number;
+  /** Accepted host setup response hashes survive removal of the preparation envelope. */
+  setupResponses?: Record<string, string>;
+  /** Durable accepted continuation identities; these entries are never silently evicted. */
+  continuationOperations?: PersistedWorkflowContinuationOperation[];
   continuation?: WorkflowContinuationResult;
   resume?: PersistedResumeFormat;
   /** Immediate run named by resumeFromRunId, written once by the engine at admission. */
@@ -251,6 +268,8 @@ export interface RunPersistence {
   save(state: PersistedRunState): void;
   /** Load a persisted run by ID. */
   load(runId: string): PersistedRunState | null;
+  /** Detect an existing but unreadable identity without treating corrupt acceptance as new work. */
+  hasRunArtifact?(runId: string): boolean;
   /** List all persisted runs. */
   list(): PersistedRunState[];
   /** Delete a persisted run. */
@@ -382,12 +401,22 @@ export function createRunPersistence(
     // Try the primary, then the .bak — so a corrupt primary doesn't lose the run.
     for (const path of candidateRunPaths(runId)) {
       for (const candidate of [path, `${path}.bak`]) {
+        let state: PersistedRunState;
         try {
           if (!_existsSync(candidate)) continue;
-          return JSON.parse(_readFileSync(candidate, "utf-8")) as PersistedRunState;
+          state = JSON.parse(_readFileSync(candidate, "utf-8")) as PersistedRunState;
         } catch {
           // corrupt candidate -> fall through to the next candidate
+          continue;
         }
+        if (candidate !== path && (state.acceptanceOperation !== undefined || state.continuationOperations !== undefined)) {
+          throw new WorkflowError(
+            `run ${runId} cannot recover acceptance or continuation from an older backup; the current operation record is unreadable`,
+            WorkflowErrorCode.PERSISTENCE_ERROR,
+            { recoverable: false },
+          );
+        }
+        return state;
       }
     }
     return null;
@@ -478,6 +507,11 @@ export function createRunPersistence(
       return loadState(runId);
     },
 
+    hasRunArtifact(runId: string): boolean {
+      return candidateRunPaths(runId).some((path) => _existsSync(path) || _existsSync(`${path}.bak`)) ||
+        candidateLineagePaths(runId).some((path) => _existsSync(path));
+    },
+
     list(): PersistedRunState[] {
       const byRunId = new Map<string, PersistedRunState>();
       for (const dir of [runsDir, legacyRunsDir]) {
@@ -511,6 +545,7 @@ export function createRunPersistence(
             runId,
             ...(sourceRunId ? { sourceRunId } : {}),
             deletedAt: new Date().toISOString(),
+            ...(state.acceptanceOperation ? { acceptanceOperation: state.acceptanceOperation } : {}),
           };
           const path = primaryLineagePath(runId);
           _writeFileSync(`${path}.tmp`, JSON.stringify(tombstone, null, 2));
@@ -581,6 +616,7 @@ export function createRunPersistence(
             runId,
             ...(value.sourceRunId === undefined ? {} : { sourceRunId: value.sourceRunId }),
             deletedAt: value.deletedAt,
+            ...(value.acceptanceOperation ? { acceptanceOperation: value.acceptanceOperation } : {}),
           };
         } catch {
           // corrupt candidate -> fall through to the next candidate

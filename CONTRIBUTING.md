@@ -30,7 +30,7 @@ pnpm typecheck      # pnpm -r exec tsc --noEmit
 | `packages/workflow-engine` | The deterministic engine (realm, parallel/pipeline, journal/resume, budget, worktree). |
 | `packages/acp-agents` | ACP client + Claude/Codex/OpenCode/pi/custom backends (the `AgentRunner` implementation, pooling, auth/session lifecycle). |
 | `packages/acp-server` | Connection-pinned ACP V1 proxy over stdio, Streamable HTTP, or WebSocket, with extension-negotiated backend discovery (bin `agentprism-acp-server`). |
-| `packages/mcp-server` | The stdio MCP server / composition root (bin `agentprism-workflow`; the `workflow` and `repl` tools — no auth tools). |
+| `packages/mcp-server` | The stdio MCP server / composition root (bin `agentprism-workflow`; the `workflow` and `repl` tools plus the Apps-capable `workflow_monitor` launcher — no auth tools). |
 | `packages/workflows` | The importable SDK facade. |
 | `packages/agentprism-otel` | Optional OpenTelemetry bridge for `WorkflowManager` events. |
 | `packages/repl-engine` | The REPL orchestrator engine: persistent JS REPL in a QuickJS-in-WASM VM (workspace lifecycle, eval + job drain, per-VM memory limits, per-eval interrupts). |

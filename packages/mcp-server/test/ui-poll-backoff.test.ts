@@ -108,7 +108,7 @@ test("polling calls the app-only tool with cursor arguments and folds structured
   assert.equal(model.nodes.get(0)?.label, "finder");
 });
 
-test("switching among concurrent runs uses only app-only run/event tools, never model-facing status", async () => {
+test("event paging and project navigation use app-only tools with each requested run", async () => {
   const calls: Array<{ name: string; arguments?: Record<string, unknown> }> = [];
   const runs = [
     {

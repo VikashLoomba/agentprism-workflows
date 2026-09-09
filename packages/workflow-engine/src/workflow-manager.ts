@@ -92,6 +92,19 @@ import {
   LiveAgentObservability,
   type WorkflowAgentActivity,
 } from "./agent-live-observability.js";
+import {
+  acceptedWorkflowRunId,
+  assertWorkflowOperationMatches,
+  captureWorkflowOperation,
+  captureWorkflowPreparation,
+  mergeWorkflowSetupResponses,
+  MAX_WORKFLOW_CONTINUATION_OPERATIONS,
+  MAX_WORKFLOW_PREPARATION_BYTES,
+  type PersistedWorkflowContinuationOperation,
+  type WorkflowOperationIdentity,
+  type WorkflowPreparation,
+} from "./workflow-preparation.js";
+import { assertExplicitCheckpointProvenance } from "./checkpoint-provenance.js";
 
 const ENGINE_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
@@ -132,6 +145,11 @@ export interface ManagedRun {
   };
   environment?: RunEnvironmentIdentity;
   admission?: PersistedRunAdmission;
+  acceptanceOperation?: WorkflowOperationIdentity;
+  preparation?: WorkflowPreparation;
+  preparationRevision?: number;
+  setupResponses?: Record<string, string>;
+  continuationOperations?: PersistedWorkflowContinuationOperation[];
   continuation?: WorkflowContinuationResult;
   sameRunContinuation?: true;
   resume?: PersistedResumeFormat;
@@ -261,6 +279,8 @@ export type WorkflowContinuationStart =
       accepted: true;
       runId: string;
       continuation: WorkflowContinuationResult;
+      /** This is recovery of an earlier acknowledgement, not a newly started execution. */
+      duplicate?: true;
       promise: Promise<WorkflowRunResult>;
     };
 
@@ -277,6 +297,8 @@ interface RegisteredAgentAttempt extends WorkflowAgentAttemptControl {
 
 /** Per-execution options shared by sync, background, and resume runs. */
 export interface ExecOptions {
+  /** Durable caller retry identity used by prepared acceptance and strict same-run continuation. */
+  operation?: WorkflowOperationIdentity;
   /** Caller-minted run id. Collision checks happen under the run lease. */
   runId?: string;
   /** Marks this run as an isolation execution from its initial save onward. */
@@ -349,8 +371,6 @@ export interface ExecOptions {
     options: CheckpointOptions,
     context?: CheckpointCallContext,
   ) => Promise<unknown>;
-  /** Force every checkpoint to pause durably for an out-of-band host reply. */
-  pauseOnCheckpoint?: boolean;
   /** Called synchronously when workflow() allocates a unique child-run ordinal. */
   onNestedWorkflow?: (ordinal: number, childRunId: string) => void;
   /**
@@ -687,11 +707,14 @@ export class WorkflowManager extends EventEmitter {
   private reconcileListedRun(candidate: PersistedRunState): PersistedRunState | null {
     if (
       !this.journaling ||
-      this.runs.has(candidate.runId) ||
+      this.getRun(candidate.runId) !== undefined ||
       (candidate.status !== "pending" && candidate.status !== "running")
     ) {
       return candidate;
     }
+    // Acceptance is not execution. Its host-owned preparation driver can reclaim the same
+    // pending record after a restart; it must never enter interrupted journal continuation.
+    if (candidate.status === "pending" && candidate.preparation !== undefined) return candidate;
 
     let lease: RunLease | null;
     try {
@@ -705,7 +728,7 @@ export class WorkflowManager extends EventEmitter {
       const current = this.persistence.load(candidate.runId);
       if (!current) return null;
       if (
-        this.runs.has(candidate.runId) ||
+        this.getRun(candidate.runId) !== undefined ||
         (current.status !== "pending" && current.status !== "running")
       ) {
         return current;
@@ -1248,6 +1271,7 @@ export class WorkflowManager extends EventEmitter {
     source: PersistedRunState,
     exec: ExecOptions,
   ): ManagerResumeExecution {
+    assertExplicitCheckpointProvenance(source);
     const requestedPolicy = exec.resumePolicy ?? "auto";
     const admission = admitResumeSource({
       source,
@@ -1320,6 +1344,7 @@ export class WorkflowManager extends EventEmitter {
         hash: source.checkpointContext?.hash ?? "",
         result: admission.legacyCheckpointReply.decision,
         kind: "checkpoint",
+        checkpointDecision: "explicit-v1",
         scope: managed.runId,
         call: { kind: "checkpoint", label: "checkpoint", phase: source.currentPhase },
       });
@@ -1409,6 +1434,277 @@ export class WorkflowManager extends EventEmitter {
     }
   }
 
+  /** Look up an accepted operation before reading mutable source paths or reserving capacity. */
+  findAcceptedRun(operation: WorkflowOperationIdentity): PersistedRunState | undefined {
+    const captured = captureWorkflowOperation(operation);
+    const runId = acceptedWorkflowRunId(this.cwd, captured);
+    const persisted = this.persistence.load(runId);
+    if (persisted) {
+      assertWorkflowOperationMatches(persisted.acceptanceOperation, captured);
+      return persisted;
+    }
+    const deleted = this.persistence.loadLineageTombstone?.(runId);
+    if (deleted) {
+      if (deleted.acceptanceOperation) assertWorkflowOperationMatches(deleted.acceptanceOperation, captured);
+      throw this.scriptValidationError(
+        `workflow operation "${captured.id}" refers to a deleted run; use a fresh request identity for new work`,
+      );
+    }
+    if (this.persistence.hasRunArtifact?.(runId)) {
+      throw this.persistenceError(`workflow acceptance ${runId} exists but is unreadable; it cannot be recreated from a retry`);
+    }
+    return undefined;
+  }
+
+  /** Durably accept immutable inputs without evaluating script control flow or opening an agent. */
+  prepareRun(
+    script: string,
+    args: unknown,
+    exec: ExecOptions & { operation: WorkflowOperationIdentity; preparation: WorkflowPreparation },
+  ): { runId: string; created: boolean } {
+    const operation = captureWorkflowOperation(exec.operation);
+    const existing = this.findAcceptedRun(operation);
+    if (existing) return { runId: existing.runId, created: false };
+    if (!this.resolveJournaling(exec)) throw this.scriptValidationError("prepared runs require durable journaling");
+    if (
+      exec.runId !== undefined || exec.resumeFromRunId !== undefined || exec.resumePolicy !== undefined ||
+      exec.resumeJournal !== undefined || exec.resumeCalls !== undefined || exec.checkpointReplies !== undefined ||
+      exec.executionMode !== undefined || exec.agentConfigurations !== undefined ||
+      exec.requireAgentConfiguration !== undefined || exec.agentConfigurationSource !== undefined ||
+      exec.scriptBackends !== undefined || exec.defaultModel !== undefined
+    ) {
+      throw this.scriptValidationError("prepared acceptance accepts new immutable inputs and runtime limits only");
+    }
+    const preparation = captureWorkflowPreparation(exec.preparation);
+    if (typeof script !== "string" || script.length === 0 || Buffer.byteLength(script, "utf8") > MAX_WORKFLOW_PREPARATION_BYTES) {
+      throw this.scriptValidationError(`prepared source must contain 1..${MAX_WORKFLOW_PREPARATION_BYTES} UTF-8 bytes`);
+    }
+    const capturedArgs = snapshotArgs(args);
+    if (!capturedArgs.ok) throw this.scriptValidationError("prepared run args must be strict JSON");
+    if (capturedArgs.clone !== undefined && Buffer.byteLength(JSON.stringify(capturedArgs.clone), "utf8") > MAX_WORKFLOW_PREPARATION_BYTES) {
+      throw this.scriptValidationError(`prepared args exceed ${MAX_WORKFLOW_PREPARATION_BYTES} bytes`);
+    }
+    const runId = acceptedWorkflowRunId(this.cwd, operation);
+    const lease = this.persistence.acquireRunLease(runId);
+    if (!lease) {
+      const accepted = this.findAcceptedRun(operation);
+      if (accepted) return { runId, created: false };
+      throw this.persistenceError(`workflow acceptance "${operation.id}" is owned elsewhere; retry the same request identity`);
+    }
+    try {
+      const accepted = this.findAcceptedRun(operation);
+      if (accepted) {
+        this.persistence.releaseRunLease(lease);
+        return { runId, created: false };
+      }
+      const managed = this.createManaged(script, capturedArgs.clone, true, exec, true, { runId, lease }, true);
+      managed.acceptanceOperation = operation;
+      managed.preparation = preparation;
+      managed.preparationRevision = 0;
+      managed.setupResponses = mergeWorkflowSetupResponses(undefined, preparation.responses);
+      this.persistRunOrThrow(managed);
+      this.runs.set(runId, managed);
+      return { runId, created: true };
+    } catch (error) {
+      this.persistence.releaseRunLease(lease);
+      throw error;
+    }
+  }
+
+  /** Claim pending host preparation after a real owner exit; never steal a live lease. */
+  claimPreparedRun(runId: string): ManagedRun | undefined {
+    const active = this.runs.get(runId);
+    if (active) {
+      if (active.status !== "pending" || active.preparation === undefined || !active.lease) return undefined;
+      if (this.persistence.validateRunLease?.(active.lease) === false) return undefined;
+      return active;
+    }
+    const lease = this.persistence.acquireRunLease(runId);
+    if (!lease) return undefined;
+    try {
+      const persisted = this.persistence.load(runId);
+      if (!persisted || persisted.status !== "pending" || persisted.preparation === undefined) {
+        this.persistence.releaseRunLease(lease);
+        return undefined;
+      }
+      const operation = captureWorkflowOperation(persisted.acceptanceOperation!);
+      if (acceptedWorkflowRunId(this.cwd, operation) !== runId) {
+        throw this.scriptValidationError("prepared run acceptance identity does not match its project/run ID");
+      }
+      if (!Number.isSafeInteger(persisted.preparationRevision) || persisted.preparationRevision! < 0) {
+        throw this.scriptValidationError("prepared run has an incompatible preparation revision");
+      }
+      if (persisted.admission || persisted.journal?.length || persisted.calls?.length || persisted.agents.length) {
+        throw this.scriptValidationError("pending preparation contains execution state and cannot be admitted");
+      }
+      const preparation = captureWorkflowPreparation(persisted.preparation);
+      const managed = this.createManaged(persisted.script, persisted.args, true, {
+        cwd: persisted.cwd,
+        maxAgents: persisted.limits?.maxAgents,
+        concurrency: persisted.limits?.concurrency,
+        agentRetries: persisted.limits?.agentRetries,
+      }, true, { runId, lease }, true);
+      if (!managed.argsSnapshotOk || persisted.argsUnreplayable) {
+        throw this.scriptValidationError("prepared run args are not a faithful strict-JSON snapshot");
+      }
+      managed.startedAt = new Date(persisted.startedAt);
+      managed.effectiveCwd = persisted.effectiveCwd ?? persisted.cwd ?? this.cwd;
+      managed.mainModel = persisted.mainModel;
+      managed.agentsDir = persisted.agentsDir;
+      managed.environment = persisted.environment;
+      managed.acceptanceOperation = operation;
+      managed.preparation = preparation;
+      managed.preparationRevision = persisted.preparationRevision;
+      managed.setupResponses = mergeWorkflowSetupResponses(persisted.setupResponses, preparation.responses);
+      const publication = this.prepareEventPublicationState(persisted, lease);
+      managed.eventStreamId = publication.eventStreamId;
+      managed.eventSeq = publication.eventSeq;
+      managed.eventLogIncomplete = publication.eventLogIncomplete;
+      this.runs.set(runId, managed);
+      return managed;
+    } catch (error) {
+      this.persistence.releaseRunLease(lease);
+      throw error;
+    }
+  }
+
+  private requirePreparedRun(runId: string, expectedRevision?: number): ManagedRun {
+    const managed = this.claimPreparedRun(runId);
+    if (!managed || managed.controller.signal.aborted) {
+      throw this.scriptValidationError(`run ${runId} is not owned pending preparation`);
+    }
+    if (expectedRevision !== undefined && managed.preparationRevision !== expectedRevision) {
+      throw this.scriptValidationError(`run ${runId} preparation changed; reload its current pending request`);
+    }
+    return managed;
+  }
+
+  /** Save one host setup transition, guarded by its caller's observed revision. */
+  updatePreparation(runId: string, preparation: WorkflowPreparation, expectedRevision?: number): ManagedRun {
+    const captured = captureWorkflowPreparation(preparation);
+    const managed = this.requirePreparedRun(runId, expectedRevision);
+    const priorPreparation = managed.preparation;
+    const priorRevision = managed.preparationRevision;
+    const priorResponses = managed.setupResponses;
+    const responses = mergeWorkflowSetupResponses(priorResponses, captured.responses);
+    managed.preparation = captured;
+    managed.preparationRevision = (priorRevision ?? 0) + 1;
+    managed.setupResponses = responses;
+    try {
+      this.persistRunOrThrow(managed);
+      return managed;
+    } catch (error) {
+      managed.preparation = priorPreparation;
+      managed.preparationRevision = priorRevision;
+      managed.setupResponses = priorResponses;
+      throw error;
+    }
+  }
+
+  /** Atomically admit canonical configuration on the accepted ID, then start live execution. */
+  admitPreparedRun(runId: string, exec: ExecOptions): { runId: string; promise: Promise<WorkflowRunResult> } {
+    const managed = this.requirePreparedRun(runId);
+    const meta = parseWorkflowScript(managed.script).meta;
+    if (
+      (exec.runId !== undefined && exec.runId !== runId) ||
+      (exec.cwd !== undefined && exec.cwd !== managed.effectiveCwd) ||
+      exec.resumeFromRunId !== undefined || exec.resumePolicy !== undefined || exec.resumeJournal !== undefined ||
+      exec.resumeCalls !== undefined || exec.checkpointReplies !== undefined || exec.executionMode !== undefined ||
+      exec.journaling === false || exec.requireAgentConfiguration !== true
+    ) {
+      throw this.scriptValidationError("prepared admission requires canonical configuration and preserves accepted inputs");
+    }
+    if (exec.operation) assertWorkflowOperationMatches(managed.acceptanceOperation, captureWorkflowOperation(exec.operation));
+    const admission = createRunAdmission(exec, new Date().toISOString());
+    if (!admission) throw this.scriptValidationError("prepared admission requires canonical configuration");
+    const previous = {
+      preparation: managed.preparation,
+      preparationRevision: managed.preparationRevision,
+      admission: managed.admission,
+      defaultModel: managed.defaultModel,
+      limits: managed.limits,
+      environment: managed.environment,
+    };
+    managed.admission = admission;
+    managed.meta = meta;
+    managed.snapshot.name = meta.name;
+    managed.snapshot.description = meta.description;
+    managed.snapshot.phases = meta.phases?.map((phase) => phase.title) ?? [];
+    managed.defaultModel = admission.defaultModel;
+    managed.limits = resolveWorkflowRunLimits({
+      maxAgents: exec.maxAgents ?? managed.limits?.maxAgents,
+      concurrency: exec.concurrency ?? managed.limits?.concurrency,
+      agentRetries: exec.agentRetries ?? managed.limits?.agentRetries,
+    });
+    managed.environment = captureRunEnvironment(managed.effectiveCwd, managed.environmentKey);
+    managed.preparation = undefined;
+    managed.preparationRevision = undefined;
+    managed.status = "running";
+    try {
+      this.persistRunOrThrow(managed);
+    } catch (error) {
+      Object.assign(managed, previous);
+      managed.status = "pending";
+      throw error;
+    }
+    const promise = this.executeRun(managed, managed.script, {
+      ...exec,
+      maxAgents: managed.limits?.maxAgents,
+      concurrency: managed.limits?.concurrency,
+      agentRetries: managed.limits?.agentRetries,
+    });
+    promise.catch(() => {});
+    return { runId, promise };
+  }
+
+  /** A setup failure/decline remains an inspectable terminal run, with no workflow evaluation. */
+  settlePreparedRun(
+    runId: string,
+    status: "failed" | "aborted",
+    error: WorkflowError | string,
+    options: { responses?: Record<string, string>; expectedRevision?: number } = {},
+  ): boolean {
+    const managed = this.claimPreparedRun(runId);
+    if (!managed) return false;
+    if (options.expectedRevision !== undefined && managed.preparationRevision !== options.expectedRevision) {
+      throw this.scriptValidationError(`run ${runId} preparation changed; reload its current pending request`);
+    }
+    const responses = mergeWorkflowSetupResponses(managed.setupResponses, options.responses);
+    const failure = error instanceof WorkflowError ? error : new WorkflowError(
+      error, status === "failed" ? WorkflowErrorCode.SCRIPT_VALIDATION_ERROR : WorkflowErrorCode.WORKFLOW_ABORTED,
+      { recoverable: false },
+    );
+    const previous = { status: managed.status, error: managed.error,
+      executionSettled: managed.executionSettled, setupResponses: managed.setupResponses };
+    managed.status = status;
+    managed.error = failure;
+    managed.executionSettled = true;
+    // The receipt and terminal state share the first mandatory durable write. A successful
+    // reply can never leave behind pending setup that recovery might execute or ask again.
+    managed.setupResponses = responses;
+    try {
+      this.persistRunOrThrow(managed);
+    } catch (saveError) {
+      managed.status = previous.status;
+      managed.error = previous.error;
+      managed.executionSettled = previous.executionSettled;
+      managed.setupResponses = previous.setupResponses;
+      throw saveError;
+    }
+    managed.controller.abort(failure);
+    managed.result = this.composeResult(managed, failure);
+    const event = status === "aborted"
+      ? this.createRunEvent("stopped", { runId, scope: runId })
+      : this.createRunEvent("error", { runId, scope: runId, error: failure, errorRecord: projectRecordedError(failure) });
+    this.publishRunEvent(managed, event, () => this.persistRun(managed), {
+      afterLive: () => {
+        this.persistRun(managed);
+        this.releaseRunLease(managed);
+      },
+    });
+    return true;
+  }
+
   /**
    * Start a workflow in the background.
    * Returns immediately with a run ID; the workflow executes asynchronously.
@@ -1473,8 +1769,15 @@ export class WorkflowManager extends EventEmitter {
     exec: ExecOptions,
     background: boolean,
     identity: { runId: string; lease: RunLease },
+    preparing = false,
   ): ManagedRun {
-    const parsed = parseWorkflowScript(script);
+    let meta: WorkflowMeta;
+    try {
+      meta = parseWorkflowScript(script).meta;
+    } catch (error) {
+      if (!preparing) throw error;
+      meta = { name: "Workflow setup", description: "Accepted workflow awaiting validation." };
+    }
     const capturedArgs = snapshotArgs(args);
     const effectiveCwd = exec.cwd ?? this.cwd;
     const startedAt = new Date();
@@ -1482,11 +1785,11 @@ export class WorkflowManager extends EventEmitter {
     return {
       runId: identity.runId,
       cwd: exec.cwd,
-      status: "running",
+      status: preparing ? "pending" : "running",
       snapshot: {
-        name: parsed.meta.name,
-        description: parsed.meta.description,
-        phases: parsed.meta.phases?.map((p) => p.title) ?? [],
+        name: meta.name,
+        description: meta.description,
+        phases: meta.phases?.map((p) => p.title) ?? [],
         logs: [],
         agents: [],
         agentCount: 0,
@@ -1500,14 +1803,14 @@ export class WorkflowManager extends EventEmitter {
       args: capturedArgs.ok ? capturedArgs.clone : args,
       argsSnapshotOk: capturedArgs.ok,
       ...(!capturedArgs.ok ? { argsUnreplayable: true as const } : {}),
-      meta: parsed.meta,
+      meta,
       journal: [],
       fallbacks: [],
       checkpointsTaken: [],
       calls: [],
       effectiveCwd,
       runtime: runtimeIdentity(),
-      environment: captureRunEnvironment(effectiveCwd, exec.environmentKey ?? this.environmentKey),
+      environment: preparing ? undefined : captureRunEnvironment(effectiveCwd, exec.environmentKey ?? this.environmentKey),
       ...(admission ? { admission } : {}),
       ...(journaling ? { resume: { format: "identity-v1" as const } } : {}),
       resumeActivity: 0,
@@ -1761,7 +2064,6 @@ export class WorkflowManager extends EventEmitter {
       concurrency,
       agentRetries,
       confirm,
-      pauseOnCheckpoint,
       onNestedWorkflow,
       scriptBackends,
     } = exec;
@@ -1819,7 +2121,6 @@ export class WorkflowManager extends EventEmitter {
         agentRetries: resolvedAgentRetries,
         maxAgents,
         confirm,
-        pauseOnCheckpoint,
         onNestedWorkflow: (ordinal, childRunId) => {
           managed.nestedWorkflows = true;
           onNestedWorkflow?.(ordinal, childRunId);
@@ -2419,7 +2720,7 @@ export class WorkflowManager extends EventEmitter {
   }
 
   private prepareTerminalResumeState(managed: ManagedRun): void {
-    if (managed.status === "running") return;
+    if (managed.status === "running" || managed.status === "pending" || managed.preparation !== undefined) return;
     if (managed.newRunResume) {
       managed.calls = latestRows(managed.calls.filter((row) => row.scope === managed.runId));
       const resultRows = new Map(
@@ -2494,6 +2795,10 @@ export class WorkflowManager extends EventEmitter {
       ...(managed.resumeReport ? { resumeReport: managed.resumeReport } : {}),
       ...(managed.replayEligibility ? { replayEligibility: managed.replayEligibility } : {}),
       ...(managed.admission ? { admission: managed.admission } : {}),
+      ...(managed.acceptanceOperation ? { acceptanceOperation: managed.acceptanceOperation } : {}),
+      ...(managed.preparation ? { preparation: managed.preparation, preparationRevision: managed.preparationRevision } : {}),
+      ...(managed.setupResponses ? { setupResponses: managed.setupResponses } : {}),
+      ...(managed.continuationOperations ? { continuationOperations: managed.continuationOperations } : {}),
       ...(managed.continuation ? { continuation: managed.continuation } : {}),
       mainModel: managed.mainModel,
       defaultModel: managed.defaultModel,
@@ -2673,11 +2978,68 @@ export class WorkflowManager extends EventEmitter {
     return this.continueRunInternal(runId, exec, true);
   }
 
+  private continuationOperationRetry(
+    persisted: PersistedRunState,
+    operation: WorkflowOperationIdentity | undefined,
+  ): WorkflowContinuationStart | undefined {
+    assertExplicitCheckpointProvenance(persisted);
+    if (!operation) return undefined;
+    if (persisted.acceptanceOperation?.id === operation.id) {
+      throw this.scriptValidationError(`workflow operation conflict: request identity "${operation.id}" already accepted this run`);
+    }
+    const operations = persisted.continuationOperations ?? [];
+    if (!Array.isArray(operations) || operations.length > MAX_WORKFLOW_CONTINUATION_OPERATIONS) {
+      throw this.scriptValidationError("workflow continuation operation history is incompatible");
+    }
+    const identities = new Set<string>();
+    for (const entry of operations) {
+      captureWorkflowOperation({ id: entry.id, fingerprint: entry.fingerprint });
+      if (
+        identities.has(entry.id) || !entry.continuation ||
+        !Number.isSafeInteger(entry.continuation.generation) || entry.continuation.generation < 1 ||
+        !Number.isSafeInteger(entry.continuation.replayedPrefix) || entry.continuation.replayedPrefix < 0 ||
+        !Number.isFinite(Date.parse(entry.acceptedAt))
+      ) throw this.scriptValidationError("workflow continuation operation history is incompatible");
+      identities.add(entry.id);
+    }
+    const recorded = operations.find((entry) => entry.id === operation.id);
+    if (!recorded) return undefined;
+    assertWorkflowOperationMatches({ id: recorded.id, fingerprint: recorded.fingerprint }, operation);
+    const continuation = cloneFrozenStrictJson(recorded.continuation);
+    if (!continuation.ok) throw this.scriptValidationError("workflow continuation acknowledgement is not strict JSON");
+    // A retry recovers acknowledgement only. Its already-resolved snapshot promise must not be
+    // mistaken for ownership of an executing generation; callers use duplicate to avoid tracking.
+    const snapshot: WorkflowRunResult = {
+      runId: persisted.runId,
+      status: persisted.status,
+      meta: { name: persisted.workflowName, description: "", phases: persisted.phases.map((title) => ({ title })) },
+      result: persisted.result,
+      phases: persisted.phases,
+      agentCount: persisted.agents.length,
+      durationMs: persisted.durationMs ?? Math.max(0, Date.now() - Date.parse(persisted.startedAt)),
+      logs: persisted.logs,
+      ...(persisted.tokenUsage ? { tokenUsage: { ...persisted.tokenUsage, cost: persisted.tokenUsage.cost ?? 0 } } : {}),
+      reason: persisted.reason ?? persisted.pauseReason,
+      authContext: persisted.authContext,
+      checkpointContext: persisted.checkpointContext,
+      continuation: persisted.continuation,
+      effectiveLimits: persisted.limits,
+    };
+    return {
+      accepted: true,
+      runId: persisted.runId,
+      continuation: continuation.clone as unknown as WorkflowContinuationResult,
+      duplicate: true,
+      promise: Promise.resolve(snapshot),
+    };
+  }
+
   private async continueRunInternal(
     runId: string,
     exec: ExecOptions,
     requireCanonicalAdmission: boolean,
   ): Promise<WorkflowContinuationStart> {
+    const operation = exec.operation === undefined ? undefined : captureWorkflowOperation(exec.operation);
     if (
       exec.resumeFromRunId !== undefined ||
       exec.resumePolicy !== undefined ||
@@ -2695,6 +3057,14 @@ export class WorkflowManager extends EventEmitter {
       throw this.scriptValidationError(
         "same-run continuation accepts only runtime controls; script, args, cwd, provider configuration, and replay inputs are immutable",
       );
+    }
+    const observed = this.persistence.load(runId);
+    if (observed) {
+      const retried = this.continuationOperationRetry(observed, operation);
+      if (retried) return retried;
+      if (observed.status === "pending" && observed.preparation !== undefined) {
+        return { accepted: false, reason: "not-continuable" };
+      }
     }
     // Guard: refuse to resume a run that is already running, or one that was
     // intentionally aborted (pause/stop/Esc). Paused and failed runs can restart.
@@ -2748,6 +3118,19 @@ export class WorkflowManager extends EventEmitter {
     if (!persisted) {
       this.persistence.releaseRunLease(lease);
       return { accepted: false, reason: "missing" };
+    }
+    try {
+      const retried = this.continuationOperationRetry(persisted, operation);
+      if (retried) {
+        this.persistence.releaseRunLease(lease);
+        return retried;
+      }
+      if (operation && (persisted.continuationOperations?.length ?? 0) >= MAX_WORKFLOW_CONTINUATION_OPERATIONS) {
+        throw this.scriptValidationError(`workflow continuation operation limit ${MAX_WORKFLOW_CONTINUATION_OPERATIONS} reached`);
+      }
+    } catch (error) {
+      this.persistence.releaseRunLease(lease);
+      throw error;
     }
     const checkpointReplies = classifyCheckpointReplies(persisted, exec.checkpointReplies, true);
     if (checkpointReplies.mismatch) {
@@ -2984,6 +3367,9 @@ export class WorkflowManager extends EventEmitter {
       runtime: runtimeIdentity(),
       environment: persisted.environment,
       admission: persisted.admission,
+      acceptanceOperation: persisted.acceptanceOperation,
+      continuationOperations: persisted.continuationOperations,
+      setupResponses: persisted.setupResponses,
       ...(persisted.legacyResume ? { legacyResume: true as const } : {}),
       ...(persisted.resume ? { resume: { format: "identity-v1" as const } } : {}),
       ...(persisted.resumeSourceRunId ? { resumeSourceRunId: persisted.resumeSourceRunId } : {}),
@@ -3019,6 +3405,23 @@ export class WorkflowManager extends EventEmitter {
       // synthetic answer now. A crash or later cold replay must never re-ask this checkpoint.
       managed.journal = managed.journal.filter((entry) => entry.index !== syntheticEntry.index);
       managed.journal.push(syntheticEntry);
+      // The journal and manifest must agree on explicit provenance in the same durable save;
+      // a crash before VM replay cannot leave an answered checkpoint claiming an error outcome.
+      const priorCall = managed.calls.find((call) => call.index === syntheticEntry.index && call.kind === "checkpoint");
+      const { error: _pendingError, aborted: _pendingAborted, ...callFacts } = priorCall ?? {
+        index: syntheticEntry.index,
+        kind: "checkpoint" as const,
+        hash: syntheticEntry.hash,
+        scope: runId,
+      };
+      const answeredCall: WorkflowCallRecord = deepFreeze({
+        ...callFacts,
+        outcome: "result",
+        origin: "confirm",
+        checkpointDecision: "explicit-v1",
+      });
+      managed.calls = managed.calls.filter((call) => call.index !== syntheticEntry.index);
+      managed.calls.push(answeredCall);
     }
     const continuation: WorkflowContinuationResult = deepFreeze({
       generation: (persisted.continuation?.generation ?? 0) + 1,
@@ -3028,6 +3431,17 @@ export class WorkflowManager extends EventEmitter {
         : { resolvedCheckpoints: checkpointReplies.resolutions }),
     });
     managed.continuation = continuation;
+    if (operation) {
+      const operations = [
+        ...(persisted.continuationOperations ?? []),
+        { ...operation, acceptedAt: new Date().toISOString(), continuation },
+      ];
+      if (Buffer.byteLength(JSON.stringify(operations), "utf8") > 4_194_304) {
+        this.persistence.releaseRunLease(lease);
+        throw this.scriptValidationError("workflow continuation operation history exceeds 4194304 bytes");
+      }
+      managed.continuationOperations = operations;
+    }
     try {
       this.persistRunOrThrow(managed);
     } catch (error) {
@@ -3053,7 +3467,6 @@ export class WorkflowManager extends EventEmitter {
       signal: exec.signal,
       onProgress: exec.onProgress,
       confirm: exec.confirm,
-      pauseOnCheckpoint: exec.pauseOnCheckpoint,
       onNestedWorkflow: exec.onNestedWorkflow,
       resumeJournal,
     }, checkpointReplies.accepted
@@ -3141,7 +3554,7 @@ export class WorkflowManager extends EventEmitter {
   activeExecutionCount(): number {
     let total = 0;
     for (const run of this.runs.values()) {
-      if (run.status === "running") total += 1;
+      if (run.status === "running" || (run.status === "pending" && run.preparation !== undefined)) total += 1;
     }
     return total;
   }
@@ -3151,6 +3564,9 @@ export class WorkflowManager extends EventEmitter {
    */
   stop(runId: string): boolean {
     const managed = this.runs.get(runId);
+    if (managed?.status === "pending" && managed.preparation) {
+      return this.settlePreparedRun(runId, "aborted", "Workflow setup was cancelled by the user.");
+    }
     if (!managed || (managed.status !== "running" && managed.status !== "paused")) return false;
 
     let pausedSnapshot: PersistedRunState | undefined;
@@ -3228,7 +3644,7 @@ export class WorkflowManager extends EventEmitter {
       if (current && (current.status === "completed" || current.status === "failed" || current.status === "aborted")) {
         return { outcome: "already-terminal", state: current };
       }
-      if (managed.status === "running" || managed.status === "paused") {
+      if (managed.status === "running" || managed.status === "paused" || (managed.status === "pending" && managed.preparation)) {
         if (!this.stop(runId)) return { outcome: "owned-elsewhere", ...(current ? { state: current } : {}) };
         return { outcome: "stopped", state: this.persistence.load(runId) ?? undefined };
       }
@@ -3296,15 +3712,25 @@ export class WorkflowManager extends EventEmitter {
   }
 
   /**
-   * Get status of a specific run.
+   * Get this manager's current run, retaining settled SDK history until another owner
+   * changes its durable generation or status. Cached history is not execution ownership.
    */
   getRun(runId: string): ManagedRun | undefined {
-    return this.runs.get(runId);
+    const managed = this.runs.get(runId);
+    if (!managed || !managed.journaling) return managed;
+    if (managed.lease && this.persistence.validateRunLease?.(managed.lease) !== false) return managed;
+    const persisted = this.persistence.load(runId);
+    if (!persisted) return managed;
+    if (
+      persisted.status !== managed.status ||
+      (persisted.continuation?.generation ?? 0) !== (managed.continuation?.generation ?? 0)
+    ) return undefined;
+    return managed;
   }
 
   /** Return a safe, bounded, live-first point-in-time run projection. */
   inspectRun(runId: string, options?: WorkflowRunInspectionOptions): WorkflowRunStatus | undefined {
-    const managed = this.runs.get(runId);
+    const managed = this.getRun(runId);
     if (managed) {
       return projectWorkflowRunStatus(
         {
@@ -3452,13 +3878,13 @@ function createRunAdmission(
     scriptBackends = captured.clone as unknown as Record<string, WorkflowBackendConfig>;
   }
   const selectionHash = hashWorkflowAdmissionSelection({
-    format: 1,
+    format: 2,
     agentConfigurations,
     ...(exec.defaultModel === undefined ? {} : { defaultModel: exec.defaultModel }),
     ...(scriptBackends === undefined ? {} : { scriptBackends }),
   });
   return deepFreeze({
-    format: 1 as const,
+    format: 2 as const,
     strict: true as const,
     agentConfigurations,
     ...(exec.defaultModel === undefined ? {} : { defaultModel: exec.defaultModel }),
@@ -3493,10 +3919,10 @@ function validatePersistedAdmission(state: PersistedRunState): WorkflowContinuat
   if (!admission) return "admission-missing";
   if (typeof admission !== "object" || Array.isArray(admission)) return "admission-invalid";
   if (admission.uncoveredOccurrence) return "admission-uncovered";
-  if (admission.format !== 1 || admission.strict !== true) return "admission-invalid";
+  if (admission.format !== 2 || admission.strict !== true) return "admission-invalid";
   if (
     !/^[0-9a-f]{64}$/.test(admission.selectionHash) ||
-    !["mcp-elicitation", "mcp-routing", "host"].includes(admission.source) ||
+    !["mcp-setup", "mcp-routing", "host"].includes(admission.source) ||
     typeof admission.recordedAt !== "string" ||
     !Number.isFinite(Date.parse(admission.recordedAt)) ||
     (admission.defaultModel !== undefined &&
@@ -3505,7 +3931,7 @@ function validatePersistedAdmission(state: PersistedRunState): WorkflowContinuat
   try {
     const canonical = canonicalizeWorkflowAgentConfigurations(admission.agentConfigurations);
     const selectionHash = hashWorkflowAdmissionSelection({
-      format: 1,
+      format: 2,
       agentConfigurations: canonical,
       ...(admission.defaultModel === undefined ? {} : { defaultModel: admission.defaultModel }),
       ...(admission.scriptBackends === undefined ? {} : { scriptBackends: admission.scriptBackends }),
@@ -3583,6 +4009,7 @@ function classifyCheckpointReplies(
       hash: pending.hash,
       result: captured.clone,
       kind: "checkpoint" as const,
+      checkpointDecision: "explicit-v1" as const,
       scope: state.runId,
       call: { kind: "checkpoint" as const, label: "checkpoint" as const, phase: state.currentPhase },
     });

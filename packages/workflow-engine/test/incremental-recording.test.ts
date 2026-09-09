@@ -314,67 +314,41 @@ return { safe, unsafe, empty }`),
 });
 
 describe("checkpoint input recording and byte compatibility", () => {
-  it("pins checkpoint fingerprints for omission, values, key ordering, and failures", () => {
+  it("versions the explicit-decision policy independently of the checkpoint prompt identity", () => {
     const digest = (canonical: string) => createHash("sha256").update(canonical).digest("hex");
-    assert.equal(CHECKPOINT_INPUTS_FORMAT, 1);
+    assert.equal(CHECKPOINT_INPUTS_FORMAT, 2);
     assert.equal(CALL_INPUTS_FORMAT, 2);
-    assert.equal(hashCheckpointInputs({}), digest("{}"));
-    assert.equal(
-      hashCheckpointInputs({ default: { z: 1, a: 2 } }),
-      digest('{"default":{"a":2,"z":1}}'),
-    );
-    assert.equal(hashCheckpointInputs({ headless: "pause" }), digest('{"headless":"pause"}'));
-    assert.equal(hashCheckpointInputs({ timeoutMs: 125 }), digest('{"timeoutMs":125}'));
-    assert.equal(
-      hashCheckpointInputs({ timeoutMs: 125, default: "yes", headless: "default" }),
-      digest('{"default":"yes","headless":"default","timeoutMs":125}'),
-    );
-    const cyclic: { self?: unknown } = {};
-    cyclic.self = cyclic;
-    assert.equal(hashCheckpointInputs({ default: cyclic }), undefined);
+    assert.equal(hashCheckpointInputs({}), digest('{"checkpointDecision":"explicit-v1"}'));
+    assert.equal(hashCheckpointInputs({ timeoutMs: 125 }), digest('{"checkpointDecision":"explicit-v1","timeoutMs":125}'));
+    assert.notEqual(hashCheckpointInputs({}), digest("{}"), "historical defaults cannot match current execution inputs");
   });
 
-  it("writes one captured fingerprint on every terminal checkpoint row", async () => {
+  it("captures option getters once and records fingerprints on resolved and waiting checkpoints", async () => {
     let seenOptions: unknown;
-    const result = await runWorkflow(
-      script(`
+    const result = await runWorkflow(script(`
 let reads = 0
 const options = {
-  get default() { reads++; return { accepted: true } },
-  get headless() { reads++; return "pause" },
+  get kind() { reads++; return "select" },
+  get choices() { reads++; return ["yes", "no"] },
   get timeoutMs() { reads++; return 50 },
 }
 await checkpoint("confirmed", options)
-return reads`),
-      {
-        agent: { async run() { return "unused"; } },
-        persistLogs: false,
-        confirm: async (_prompt, options) => {
-          seenOptions = options;
-          return options.default;
-        },
-      },
-    );
+return reads`), {
+      agent: { async run() { return "unused"; } }, persistLogs: false,
+      confirm: async (_prompt, options) => { seenOptions = options; return "yes"; },
+    });
     assert.equal(result.result, 3);
-    assert.deepEqual(
-      JSON.parse(JSON.stringify(seenOptions)),
-      { default: { accepted: true }, headless: "pause", timeoutMs: 50 },
-    );
-    assert.equal(result.calls?.[0].inputsHash, hashCheckpointInputs({
-      default: { accepted: true },
-      headless: "pause",
-      timeoutMs: 50,
-    }));
-    const paused = await runWorkflow(
-      script(`try { await checkpoint("paused", { default: "later", headless: "pause", timeoutMs: 75 }) } catch {}\nreturn "caught"`),
-      { agent: { async run() { return "unused"; } }, persistLogs: false },
-    );
-    assert.equal(paused.calls?.[0].inputsHash, hashCheckpointInputs({
-      default: "later",
-      headless: "pause",
-      timeoutMs: 75,
-    }));
-    assert.equal(paused.calls?.[0].error?.code, WorkflowErrorCode.CHECKPOINT_REQUIRED);
+    assert.deepEqual(JSON.parse(JSON.stringify(seenOptions)), { kind: "select", choices: ["yes", "no"], timeoutMs: 50 });
+    assert.equal(result.calls?.[0].inputsHash, hashCheckpointInputs({ timeoutMs: 50 }));
+    assert.equal(result.calls?.[0].checkpointDecision, "explicit-v1");
+    const waiting: WorkflowCallRecord[] = [];
+    await assert.rejects(runWorkflow(script(`try { await checkpoint("paused", { timeoutMs: 75 }) } catch {}
+return "caught"`), {
+      agent: { async run() { return "unused"; } }, persistLogs: false, onCallRecord: row => waiting.push(row),
+    }), (error: unknown) => error instanceof WorkflowError && error.code === WorkflowErrorCode.CHECKPOINT_REQUIRED);
+    assert.equal(waiting[0].inputsHash, hashCheckpointInputs({ timeoutMs: 75 }));
+    assert.equal(waiting[0].error?.code, WorkflowErrorCode.CHECKPOINT_REQUIRED);
+    assert.equal(waiting[0].checkpointDecision, undefined);
   });
 
   it("keeps agent hash and input bytes unchanged when the declaration is added", async () => {
@@ -420,7 +394,12 @@ describe("filesystem taint and quiescence accounting", () => {
       await run("confirm", `return await checkpoint("host")`, { confirm: async () => true }),
       1,
     );
-    assert.equal(await run("headless", `return await checkpoint("engine", { default: true })`), 0);
+    let waitingTaints = 0;
+    await assert.rejects(runWorkflow(script(`return await checkpoint("engine")`), {
+      agent: { async run() { return "unused"; } }, persistLogs: false,
+      onResumeFilesystemTainted: () => { waitingTaints++; },
+    }), (error: unknown) => error instanceof WorkflowError && error.code === WorkflowErrorCode.CHECKPOINT_REQUIRED);
+    assert.equal(waitingTaints, 0);
     const child = script(`return "child"`, "child");
     assert.equal(await run("nested", `return await workflow(${JSON.stringify(child)})`), 1);
     assert.equal(
@@ -440,11 +419,12 @@ describe("filesystem taint and quiescence accounting", () => {
     await runWorkflow(
       script(`
 await agent("settled", { resume: { filesystem: "read-only" } })
-await checkpoint("engine", { default: true })
+await checkpoint("engine")
 return "done"`),
       {
         agent: { async run() { return "ok"; } },
         persistLogs: false,
+        confirm: async () => true,
         onResumeActivity: (active) => activities.push(active),
         onResumeCallAllocated: (allocated) => allocations.push(allocated),
       },
@@ -558,10 +538,10 @@ describe("managed identity-v1 persistence", () => {
       assert.deepEqual(keyManager.getPersistence().load(zero.runId)?.resume?.terminalEnvironment, {
         key: "static-key",
       });
-      const headless = await keyManager.runSync(
-        script(`return await checkpoint("engine", { default: true })`, "headless-key"),
+      const waiting = await keyManager.runSync(
+        script(`return await checkpoint("engine")`, "waiting-key"),
       );
-      assert.deepEqual(keyManager.getPersistence().load(headless.runId)?.resume?.terminalEnvironment, {
+      assert.deepEqual(keyManager.getPersistence().load(waiting.runId)?.resume?.terminalEnvironment, {
         key: "static-key",
       });
 

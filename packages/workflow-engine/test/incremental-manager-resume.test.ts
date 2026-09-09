@@ -111,7 +111,7 @@ const second = await agent("prefix-two", {
   label: "prefix-two",
   resume: { filesystem: "read-only" },
 })
-const approval = await checkpoint("approve", { headless: "pause" })
+const approval = await checkpoint("approve", { })
 const after = await agent("after-checkpoint", {
   label: "after-checkpoint",
   resume: { filesystem: "read-only" },
@@ -352,7 +352,7 @@ describe("WorkflowManager resumeFromRunId admission", () => {
       const sourceRunId = await recordSafeSource(manager, ["one"]);
       const paused = await manager.runSync(workflow(`
 await agent("one", { label: "one", resume: { filesystem: "read-only" } })
-return await checkpoint("approve", { headless: "pause" })`, "legacy-ancestry"), undefined, {
+return await checkpoint("approve", { })`, "legacy-ancestry"), undefined, {
         runId: "legacy-ancestry",
         resumeFromRunId: sourceRunId,
       });
@@ -524,7 +524,7 @@ describe("WorkflowManager durable identity execution", () => {
       const sourceRunId = await recordSafeSource(manager, ["one", "two"]);
       const paused = await manager.runSync(workflow(`
 await agent("one", { label: "one", resume: { filesystem: "read-only" } })
-await checkpoint("approve", { headless: "pause" })
+await checkpoint("approve", { })
 return await agent("two", { label: "two", resume: { filesystem: "read-only" } })`, "paused-hop"), undefined, {
         runId: "paused-hop",
         resumeFromRunId: sourceRunId,
@@ -541,7 +541,7 @@ return await agent("two", { label: "two", resume: { filesystem: "read-only" } })
 
       const final = await manager.runSync(workflow(`
 const one = await agent("one", { label: "one", resume: { filesystem: "read-only" } })
-const approval = await checkpoint("approve", { headless: "pause" })
+const approval = await checkpoint("approve", { })
 const two = await agent("two", { label: "two", resume: { filesystem: "read-only" } })
 return { one, approval, two }`, "replied-hop"), undefined, {
         runId: "replied-hop",
@@ -657,12 +657,12 @@ return await agent("two", { label: "two", resume: { filesystem: "read-only" } })
 await agent("one", { label: "one", resume: { filesystem: "read-only" } })
 await checkpoint("original checkpoint")
 return await agent("tail", { label: "tail", resume: { filesystem: "read-only" } })`, "positional-checkpoint-source");
-      const source = await manager.runSync(sourceScript);
+      const source = await manager.runSync(sourceScript, undefined, { confirm: async () => true });
       assert.equal(source.status, "completed");
 
       const changedScript = workflow(`
 await agent("one", { label: "one", resume: { filesystem: "read-only" } })
-const approval = await checkpoint("changed checkpoint", { headless: "pause" })
+const approval = await checkpoint("changed checkpoint", { })
 const tail = await agent("tail", { label: "tail", resume: { filesystem: "read-only" } })
 return { approval, tail }`, "positional-checkpoint-target");
       const paused = await manager.runSync(changedScript, undefined, {

@@ -1,7 +1,7 @@
 # Content-addressed Incremental Resume
 
 > **Superseded in part (updated 2026-09-01):** The filesystem-purity, safety-marker, terminal-environment,
-> cache-closing, headless-checkpoint, crash-residue, and aborted-source gates in this historical specification are
+> cache-closing, crash-residue, and aborted-source gates in this historical specification are
 > no longer the product contract. See the current
 > [journal replay contract](journal-replay-contract.md). Identity/fingerprint and journal-integrity
 > sections remain useful implementation history.
@@ -11,7 +11,26 @@
 > The SDK `resumeFromRunId`/`resumePolicy` APIs described here remain available to embedding hosts;
 > the MCP schema neither advertises nor accepts them.
 
-**Date:** 2026-07-15
+## Checkpoint revision — 2026-09-08
+
+The [asynchronous cutover](async-workflow-app-cutover.md) requires explicit answers on all checkpoint
+execution paths. `default` and `headless` options are rejected. Missing, declined, cancelled,
+timed-out, or invalid answers leave a durable unanswered checkpoint; script catch blocks cannot
+turn that absence into completion. MCP submits answers through a later run-scoped resume, while SDK
+hosts may return an explicit answer from `confirm`.
+
+All reusable successful checkpoint journal rows, call records, and retained injections require
+`checkpointDecision:"explicit-v1"`. The same provenance gate runs before mainline replay, legacy
+manual-journal replay, same-run continuation, and isolation admission. Historical automatic answers,
+missing/unsupported provenance, and pending checkpoint contexts carrying retired policy fields fail
+with `checkpoint-provenance-incompatible`. They stay inspectable; no positional bridge or live
+fallback may silently authorize them. `CHECKPOINT_INPUTS_FORMAT` is 2, and the checkpoint input
+fingerprint includes the explicit decision contract plus advisory `timeoutMs`.
+
+The filesystem and cache-closing policies below remain historical as stated above. Checkpoint
+clauses have been revised to remove automatic-answer execution and compatibility paths.
+
+**Original design date:** 2026-07-15
 
 **References:** `packages/workflow-engine/src/workflow.ts`;
 `packages/workflow-engine/src/workflow-manager.ts`;
@@ -111,15 +130,14 @@ The implementation preserves these named invariants:
 5. **No stale downstream serve after unsafe live work.** Once the identity execution reaches an
    unproved persistent-tree live call, nested workflow, or live host checkpoint callback, every
    later agent and checkpoint call runs live. Cached/injected checkpoint decisions are invalidated
-   too: a human may have based a same-prompt decision on files changed by the live work. Recorded
-   headless outcomes are never candidates because `default`/`headless`/`timeoutMs` are not
-   checkpoint-hash inputs; absent a matching proven-host decision/injection, the current headless
-   branch executes fresh.
+   too: a human may have based a same-prompt decision on files changed by the live work. This
+   filesystem barrier is historical; the current journal contract permits later matching explicit
+   decisions. Unproven checkpoint outcomes fail the provenance gate before matching.
 6. **Self-contained resume hops.** A new managed run durably stores its prepared resume seed before
-   a background start is acknowledged, and every replay is re-journaled under the current index.
+   an SDK background start is acknowledged, and every replay is re-journaled under the current index.
 7. **Isolation stability.** `runIsolation`, `ReplayRunner`, `ReplayReport`, their preflight reason
-   arrays, target semantics, nested-workflow exclusion, and strict divergence behavior do not
-   change.
+   arrays, target semantics, nested-workflow exclusion, and strict divergence behavior remain;
+   the explicit checkpoint-provenance gate additionally rejects incompatible recordings.
 8. **Quiescent terminal identity.** A new-format source records a terminal environment only when
    every allocated agent/checkpoint/nested invocation, every worktree cleanup, and every underlying
    runner promise (including a signal-ignoring cancellation loser) has actually settled. A terminal script result alone
@@ -206,9 +224,9 @@ Rules:
   pre-isolation interruption, degraded, or external-base worktree records no safety marker.
 - A journal-replayed call carries the selected source row's safety marker only when the current
   authored inputs still assert the same safety class.
-- Checkpoint journal rows need no filesystem marker. Proven host-decision replays and injections
-  invoke no host code; engine-headless decisions run fresh but do not taint the workspace. Live
-  host callbacks are covered by the barrier in §2.9.
+- Checkpoint journal rows need no filesystem marker. Explicit-decision replays and injections
+  invoke no host code. Without an eligible explicit result or injection, the checkpoint asks its
+  host for an answer or remains pending. The filesystem callback barrier in §2.9 is historical.
 
 Persisted-marker validation is exact. Checkpoint rows must omit `resumeSafety`.
 `"declared-read-only"` requires an agent row whose resolved `isolation` is absent.
@@ -217,8 +235,7 @@ with `worktree: true`, or (b) an origin-`"journal-replay"` row with mainline `re
 whose `sourceResumeSafety` exactly equals the row marker. Every journal-replayed agent result in a
 non-legacy v1 source requires that provenance, marker, and equality; this is the self-contained
 proof that the consumed source marker was propagated. Manual journals are permanently legacy and
-cannot manufacture an identity-eligible hop. Engine/confirm/
-headless rows cannot carry `"isolated-worktree"`. A violated combination is malformed source
+cannot manufacture an identity-eligible hop. Engine/confirm rows cannot carry `"isolated-worktree"`. A violated combination is malformed source
 metadata (`"manifest-invalid"`), not an unsafe marker silently treated as valid.
 
 **What each safety class actually proves, and the non-contiguous-replay precondition.** Identity
@@ -506,7 +523,8 @@ For a new-format source, validate in this order:
    origin is `"runner"` or `"journal-replay"`; every other origin is invalid for an agent result.
    Every checkpoint result row has a non-empty NUL-free path, a lowercase SHA-256
    `inputsHash` produced by `hashCheckpointInputs()` (§2.7), and has an origin
-   of `"confirm"`, `"headless"`, or `"journal-replay"`. Every present safety marker
+   of `"confirm"` or `"journal-replay"`, with `checkpointDecision:"explicit-v1"` on both the
+   call record and paired journal entry. Every present safety marker
    is a known literal consistent
    with the row's outcome/origin/worktree fields. `replay` is present exactly on non-legacy
    origin-`"journal-replay"` result rows and absent on every other origin/outcome. A present
@@ -517,13 +535,11 @@ For a new-format source, validate in this order:
    fields and equality between `sourceResumeSafety` and `resumeSafety`; a checkpoint replay
    requires `checkpointHostDecision: true`. Frozen journal results retain the existing strict-JSON
    requirement.
-   A checkpoint result pair is copied into the identity candidate set only when it is a proven host
-   decision: source origin `"confirm"`, or origin `"journal-replay"` with
-   `replay.checkpointHostDecision === true`. Headless result rows remain valid records but are not
-   candidates because changing `default`, `headless`, or `timeoutMs` does not change
-   `hashCheckpoint()`. A host-decision candidate is servable only when its checkpoint input
-   fingerprint equals the current one. Safety is classified separately below so an otherwise-valid
-   unsafe recording can take the positional fallback.
+   A checkpoint result pair enters the identity candidate set only after explicit decision
+   provenance passes. An origin alone is insufficient evidence. Automatic or unproven checkpoint
+   results make the execution source incompatible; they cannot select a positional or live fallback.
+   An admissible explicit candidate is served only when its checkpoint input fingerprint equals
+   the current one. The filesystem-safety fallback policy described below is historical.
 8. If `resumeSeed` is present, its format and immediate source ID are valid; every candidate has
    non-empty `sourceRunId`, matching non-negative safe `recordedIndex`/entry/call indexes, equal
    explicit kind/hash, `outcome: "result"`, entry/call scopes both exactly equal to
@@ -555,15 +571,16 @@ Outcomes:
   `"forced-positional"`; else `nestedWorkflows` -> `"nested-workflows"`; else
   `!allAgentsSafe || !allCheckpointResultsHostDecisions || !allCallsRepresented` ->
   `"unsafe-recording"`.
-  Here `"unsafe-recording"` means "not eligible for non-contiguous identity serving": either an
-  unproved agent or a headless checkpoint outcome that v1 deliberately re-executes. A safety-proved
+  Here `"unsafe-recording"` described an unproved agent's ineligibility for non-contiguous identity
+  serving in the original filesystem-safety design. Checkpoint provenance failures now
+  reject the execution source before this historical fallback selection. A safety-proved
   non-result agent remains an explicit, non-replayable seed blocker. The pending-checkpoint
   exception uses the newly supplied host reply as the durable identity record for that row.
 - With a fallback reason, select `"positional-v1"`. Its eligibility is `"all-live"` when
   `nestedWorkflows` or `!filesystemStable`, otherwise `"safe-prefix"`. Thus a nested source or a
   source whose final modeled tree differs from the tree its leading readers observed serves no
   cached row; a stable unsafe source may serve only safety-marked/proven-host leading rows before
-  its first unproved agent or headless checkpoint.
+  its first unproved agent; this historical safety-prefix rule does not relax checkpoint provenance.
 - Without a fallback reason, `filesystemStable` selects `"identity-v1"`; inequality selects live
   with `"source-environment-drift"`.
 
@@ -782,7 +799,7 @@ best-effort `persistRun()` call is not sufficient for that anti-laundering bit: 
 same-ID positional result may be exposed until the bit is durable.
 
 Positional strategies copy the source journal and available root manifest under their existing
-indexes before background acknowledgement using that critical initial-save path. They create no
+indexes before SDK background acknowledgement using that critical initial-save path. They create no
 agent candidate seed. The sole exception is a new-format shifted checkpoint injection: persist an
 otherwise-empty `resumeSeed` containing that injection and consume it through the same critical
 `commitSeed` path.
@@ -810,26 +827,20 @@ export interface WorkflowCallRecord {
 
 function hashCheckpointInputs(options: CheckpointOptions): string | undefined {
   return hashCanonicalStrictJson({
-    ...(options.default !== undefined ? { default: options.default } : {}),
-    ...(options.headless !== undefined ? { headless: options.headless } : {}),
+    checkpointDecision: "explicit-v1",
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   });
 }
 ```
 
-The three values are read once for this computation and the same captured values govern the
-current confirm/headless branch; a getter or later mutation cannot make the fingerprint describe
-different options from those executed. `kind` and `choices` remain solely in `hashCheckpoint()`.
-Unset fields are omitted, so the new data follows the existing byte-compat rule. Failure to
-canonicalize (for example a cyclic/non-strict-JSON `default`) yields `undefined`: the checkpoint
-still executes live with its existing behavior, but it cannot consume a v1 candidate. This function
-does not alter `hashCheckpoint()`, `hashCallInputs()`, or `CALL_INPUTS_FORMAT`. When defined, the
-value is written as `inputsHash` on every terminal checkpoint call row, including the
-`CHECKPOINT_REQUIRED` error row used for an injection.
+The supported timeout is captured once and governs the host wait for that checkpoint. `kind` and
+`choices` remain in `hashCheckpoint()`. Unset timeout is omitted. Checkpoint input format 2 binds
+`explicit-v1`; the old format cannot authorize a checkpoint decision. Unknown options, including
+retired answer policies, fail script validation. The fingerprint is stored on every terminal
+checkpoint call row, including an unanswered `CHECKPOINT_REQUIRED` row used for a later injection.
+The agent-call fingerprint and hash bytes remain unchanged.
 
-This fingerprint is required even for origin-`"confirm"` rows. A host confirm path may use
-`default` to populate/fallback a decision and `timeoutMs` to decide when that fallback occurs, so
-host provenance alone does not prove equal inputs. For identity replay, a host confirm result is a
+Explicit provenance and input equality are both required: a host confirmation is a
 decision over the prompt, the documented `CheckpointOptions` values, and (if consulted) the
 admitted workspace. `CheckpointCallContext.callIndex`/`path` are correlation data only; a host
 whose decision semantics depend on either — or on the run-specific `scope` — must not use
@@ -897,8 +908,8 @@ exact `(checkpoint, path, hash)` first and require equal input hashes, then use 
 `(checkpoint, hash, inputsHash)` movement fallback. Missing/different inputs are
 `"inputs-missing"`/`"inputs-changed"`. Duplicate identities or duplicate content groups run through
 the live checkpoint channel. Pending injections participate in those same multiplicity groups;
-their source index does not disambiguate a repeated checkpoint site. Source headless rows are
-absent from both indexes and execute the current `default`/`headless` behavior fresh. Mainline
+their source index does not disambiguate a repeated checkpoint site. Historical automatic rows
+are rejected by the source-provenance gate before either index can be used. Mainline
 resume never uses isolation's path-only fallback: a different checkpoint/agent hash means changed
 content and must not be served.
 
@@ -951,12 +962,12 @@ mode is carried by `PreparedResume.eligibility`:
    A source agent
    without `resumeSafety` is intentionally the first miss even when its index/hash/input all match.
    Checkpoints require no filesystem marker, but their source row must be a proven host decision
-   under §2.5 rule 7 and its checkpoint input fingerprint must match; a changed `default`,
-   `headless`, or `timeoutMs` is the first miss. A headless row is also the first miss even when its
-   fingerprint matches. `"legacy"` retains hash-only matching because those facts/provenance may
-   not exist.
+   under §2.5 rule 7, carry `checkpointDecision:"explicit-v1"`, and have a matching checkpoint
+   input fingerprint. A changed `timeoutMs` misses; retired policy options are invalid. The
+   legacy agent path does not waive checkpoint provenance: a missing or unsupported checkpoint
+   marker fails before positional matching.
 4. Replay only while `currentIndex < firstMiss`.
-5. The first missing, changed, new, empty-agent, input-changed, unsafe-source, or unproved-headless
+5. The first missing, changed, new, empty-agent, input-changed, unsafe-source
    entry lowers `firstMiss` to the current index; every later agent/checkpoint runs live.
 6. A parent `workflow()` invocation synchronously lowers `firstMiss` to the current `callSeq` before
    entering its unseeded child, so no later parent call replays after live nested work.
@@ -1023,7 +1034,8 @@ let resumeDecisionTail: Promise<void>; // initially Promise.resolve()
   candidate/injection before child code starts.
 - Invoking the live host `confirm` callback closes the parent replay cache before calling host code.
   The same remove-and-commit rule runs before host code. A journal replay or durable injection does
-  not close it; an engine-only headless decision runs fresh and does not close it.
+  not close it. No engine-only automatic decision exists; an unanswered checkpoint pauses.
+  This callback-driven filesystem barrier is superseded by the current journal replay contract.
 - A script catching a live-call failure cannot reopen a closed cache.
 
 "After the first unsafe LIVE call" therefore means after its allocation-ordered decision, before
@@ -1108,28 +1120,19 @@ Preparation algorithm:
    `SCRIPT_VALIDATION_ERROR`.
 2. Strict-JSON clone the decision as today.
 3. For identity-v1 source data, find the source call row at that index and require
-   `kind: "checkpoint"`, `outcome: "error"`, origin `"headless"`, a recorded error code of
-   `CHECKPOINT_REQUIRED`, equal context hash, a non-empty NUL-free path, and a lowercase SHA-256
-   checkpoint `inputsHash`. Create
-   `PersistedCheckpointInjection` only when no other root checkpoint call row at another index,
-   regardless of outcome, and no retained checkpoint candidate/injection has the same
-   `(hash, inputsHash)`; do not insert it into an index map until the flattened seed is complete.
-   This content-key uniqueness requirement is deliberately stronger than exact-path uniqueness
-   because an injection permits call movement and the result-candidate seed does not otherwise
-   retain error/headless rows as occurrence blockers. A duplicate content key makes the reply
-   non-injectable, not malformed; the current checkpoint uses its live/headless channel. When a
-   reply was supplied, failure of the row/kind/outcome/origin/error/hash/path/input cross-check
-   itself is `"manifest-invalid"` and selects run-level live strategy. The injection copies the
-   source row's `inputsHash`.
-4. At current execution, match the injection by the checkpoint algorithm in §2.7. An inserted or
-   deleted earlier call may shift the current index; path/hash/input identity still supplies the
-   decision.
-5. If the current checkpoint's hash or input fingerprint changed, or correspondence is ambiguous,
-   do not inject. Use the live `confirm` callback or authored headless behavior. A headless pause
-   reports its new current index.
-6. For a legacy positional source lacking checkpoint identity facts, preserve today's synthetic
-   `JournalEntry` at the source index. Forced positional over a valid v1 source still uses rules
-   3–5 and may shift by identity.
+   `kind:"checkpoint"`, `outcome:"error"`, an unanswered `CHECKPOINT_REQUIRED` error, equal context
+   hash, a non-empty path, and a checkpoint input fingerprint. No result provenance may be claimed
+   by that unanswered row. A prepared injection binds the explicit new reply to the exact source
+   identity and records `checkpointDecision:"explicit-v1"`. Repeated checkpoint identities remain
+   ambiguous; neither call index nor omission of an error row may fabricate uniqueness.
+4. During execution, match the injection by the checkpoint identity and input rules. An inserted or
+   deleted earlier call may shift the current index when correspondence remains unambiguous.
+5. Changed or ambiguous identity leaves the reply unapplied. The current checkpoint asks its host
+   for an explicit answer or pauses with its current call index. It never falls back to an authored
+   automatic answer.
+6. Every execution path applies the same provenance gate before any legacy positional injection or
+   replay. A synthetic entry created from a newly submitted explicit reply records `explicit-v1`;
+   it does not bless an old or automatic recorded decision.
 
 Pause/failure flattening reapplies the same injection uniqueness rule against all promoted current
 checkpoint rows and retained candidate/injection rows. If a new same-content-key row appeared, the
@@ -1139,23 +1142,21 @@ reply into a unique one by forgetting the blocking row.
 
 In positional-v1 with a new-format injection, the engine attempts the injection before its
 ordinary index lookup only while `currentIndex < firstMiss`. If the call is already in the live
-suffix, the injection is not consumed and that checkpoint uses the live/headless channel. If an
-eligible injection does not correspond, normal positional lookup continues; the absent pending
+suffix, the injection is not consumed and that checkpoint uses the explicit host channel or remains
+unanswered. If an eligible injection does not correspond, normal positional lookup continues; the absent pending
 decision becomes that checkpoint's `"positional-miss"` and lowers `firstMiss`. If it corresponds
 at a shifted index, §2.8 closes the prefix immediately after the injected call; identity movement
 never realigns ordinary positional journal rows.
 
 When run-level strategy is `"live"`, a supplied source-index reply is validated but not injected:
 some required admission fact or environment gate failed. The current checkpoint therefore uses its
-live/headless channel and may pause again with a current index.
+explicit host channel or pauses again with a current index.
 
 An injected decision is journaled under the current index before return and appears in
 `checkpointsTaken` with source `"injected"`. An ordinary identity-replayed **host** decision uses
-`"journal-replay"`; both persist the host-decision provenance of §2.13. A source headless result is
-not an identity candidate by v1 policy even when its input fingerprint matches, so the current
-headless branch runs and journals its current decision normally. None of these engine-only paths
-closes or reopens the filesystem barrier. A live `confirm` callback closes the replay cache as
-specified in §2.9.
+`"journal-replay"`; both retain `checkpointDecision:"explicit-v1"` in their journal and call records.
+Historical automatic results cannot enter this path, regardless of fingerprint equality. The
+filesystem barrier in §2.9 is historical and does not govern current journal replay.
 
 ### 2.13 Observability
 
@@ -1289,8 +1290,9 @@ report so the runner-origin manifest shape does not acquire speculative source i
 Every identity/manager-prepared positional replay of a proven host checkpoint writes
 `replay.checkpointHostDecision: true`; an injected reply also writes `checkpointInjected: true`.
 Both fields are forbidden on agent rows, and `checkpointInjected` implies
-`checkpointHostDecision`. A headless replay possible only on the legacy positional path carries
-neither and cannot become an identity candidate on a later hop.
+`checkpointHostDecision`. These diagnostic replay flags do not replace the required
+`checkpointDecision:"explicit-v1"` marker on every successful checkpoint row and entry. The
+legacy positional path rejects unproven checkpoint decisions before reuse.
 Every identity/manager-prepared positional agent replay copies the selected source marker into both
 `resumeSafety` and `replay.sourceResumeSafety`; both values must agree with the current authored
 safety class. Runner-origin rows omit `sourceResumeSafety`. Legacy/manual replay rows may omit both
@@ -1349,7 +1351,7 @@ The same rule applies when B is a checkpoint with unchanged prompt/kind/choices.
 answered by inspecting `generated.json`, so an unsafe live A closes the **entire** replay cache;
 neither a recorded decision nor a prepared injection can bypass the barrier. Positional injections
 also remain below `firstMiss`. The current checkpoint therefore calls the host or executes its
-current headless policy.
+durable explicit-answer pause. This filesystem barrier is historical.
 
 #### Replayed writer, live downstream needs its artifact
 
@@ -1417,21 +1419,18 @@ includes its item/index normally has distinct hashes and matches independently.
 
 #### Unchanged checkpoint hash, changed host-decision inputs
 
-Recording: an SDK-hosted checkpoint has `default: false` and `timeoutMs: 0`. The confirm callback
-times out immediately and returns the authored default, so the row has origin `"confirm"` and
-decision `false`. The resumed script keeps the same prompt/kind/choices and call site but changes
-`default` to `true`; `hashCheckpoint()` is therefore unchanged, while a live confirm would return
-`true`.
+Recording: an SDK-hosted checkpoint receives an explicit `false` answer and has advisory
+`timeoutMs: 100`. The resumed script keeps the same prompt/kind/choices and call site but changes
+`timeoutMs` to 200. `hashCheckpoint()` is unchanged, while the input fingerprint differs.
 
-- The source row carries `hashCheckpointInputs({ default: false, timeoutMs: 0 })`; the current call
-  computes a different fingerprint.
-- Exact checkpoint matching fails with `"inputs-changed"`; positional safe-prefix treats the call
-  as its first miss; a pending injection likewise does not bind.
-- The current confirm/headless channel executes and produces the current decision. A later cached
-  checkpoint cannot cross an unsafe-live barrier in either strategy.
+- Both source journal and call record carry `checkpointDecision:"explicit-v1"`.
+- Exact matching requires equal input fingerprints; the changed timeout prevents this result or
+  an incompatible prepared injection from binding.
+- The current host must provide a new explicit answer, or the checkpoint remains pending.
+- Adding a retired `default` or `headless` option is a validation error, not another execution path.
 
-Thus origin `"confirm"` proves the result came through the host channel, not that the host saw the
-same unhashed options. Provenance and checkpoint input equality are both required.
+Explicit provenance proves the answer was supplied; fingerprint equality proves the host saw the
+same supported options. Neither can substitute for the other.
 
 ### 2.15 Shared machinery versus isolation-only behavior
 
@@ -1541,14 +1540,16 @@ bijection on the next hop.
 - **Byte compatibility:** existing `journal-hash.test.ts` passes unmodified; pinned
   `hashAgentCall`, `hashCheckpoint`, `hashCallInputs` bytes and `CALL_INPUTS_FORMAT` are unchanged
   whether `resume` is absent or set; new pinned `hashCheckpointInputs` bytes cover omission,
-  `default`, `headless`, key ordering, and `timeoutMs`, with
-  `CHECKPOINT_INPUTS_FORMAT === 1`; optional safety/report fields are omitted when unset; an old
-  persisted-run byte fixture loads without source rewrite and selects legacy, while new
+  `checkpointDecision:"explicit-v1"` and optional `timeoutMs`, with
+  `CHECKPOINT_INPUTS_FORMAT === 2`; retired policy keys are rejected. Optional safety/report fields
+  are omitted when unset; an old checkpoint-free persisted-run fixture loads without source rewrite
+  and selects legacy, while new
   initial/terminal JSON fixtures pin the marker, checkpoint-input format, and terminal-environment
   omission/presence rules.
-- **Format/admission matrix:** absent marker -> legacy positional; safe v1 -> identity; a v1 source
-  with an unsafe agent, headless checkpoint, or nested workflow selects
-  positional-v1 when its required terminal environment is present; legacy-resume -> positional-v1;
+- **Historical agent format/admission matrix:** absent marker -> legacy positional; safe v1 ->
+  identity; unsafe agent or nested workflow -> positional-v1 when the required terminal environment
+  was present; legacy-resume -> positional-v1. Checkpoint provenance incompatibility now fails
+  before any fallback; the following historical matrix applies only after that gate:
   unsupported/malformed/aborted/missing terminal env/cwd or
   runtime or checkpoint-input-format mismatch/environment mismatch/source drift/invalid retained
   seed/isolation recording ->
@@ -1577,8 +1578,8 @@ bijection on the next hop.
   side effects; source start/terminal drift makes positional fallback all-live; an unsafe writer
   that restores the tree is still the first safe-prefix miss; a current unsafe inserted call and a
   current nested workflow close all remaining agent/checkpoint candidates and injections
-  synchronously; a live host checkpoint callback does the same, while engine-headless checkpoints
-  run fresh without closing it; a cached/injected same-prompt checkpoint after an unsafe live writer
+  synchronously; a live host checkpoint callback did the same in the historical design. Current
+  unmatched checkpoints need explicit host input or pause; a cached/injected same-prompt checkpoint after an unsafe live writer
   cannot replay; positional nested invocation lowers
   `firstMiss` before the child; non-git safe runs
   retain the host key while every taint source omits terminal identity and resumes all-live;
@@ -1595,20 +1596,17 @@ bijection on the next hop.
   across multiple hops; injected reply keyed by source index reaches a shifted current checkpoint;
   a quiescent checkpoint pause with a unique validated reply remains identity-v1 and flattens its
   current rows plus inherited seed, while the same pause without an injectable reply falls back;
-  changed/ambiguous checkpoint does not inject; changing `default`, `headless`, or `timeoutMs`
-  makes an origin-`"confirm"` candidate live in both identity and safe-prefix positional modes;
-  the concrete host timeout/default case from §2.14 is pinned; a same-`(hash, inputsHash)` source row
-  of any outcome blocks injection and flattening retains that block; an earlier positional miss prevents even a
-  corresponding shifted injection, and a served shifted positional injection closes the prefix
-  immediately after itself; missing/non-canonicalizable checkpoint inputs cannot replay or inject;
-  headless source rows are excluded, and changing a default executes the new default fresh;
-  new-format safe-prefix treats headless as its
-  first miss, while legacy positional headless replay stays compatible but cannot be laundered into
-  identity; extra reply key rejects; source attribution is exact.
+  changed/ambiguous checkpoint does not inject; changing advisory `timeoutMs` changes the input
+  fingerprint, and retired policy fields fail validation. A repeated source content key blocks
+  ambiguous injection and flattening preserves that blocker. Missing or unsupported decision
+  provenance rejects mainline replay, retained seeds, legacy/manual journals, same-run continuation,
+  and isolation before execution. No historical automatic decision is replayed or reinterpreted.
+  Extra reply keys reject; source attribution remains exact; successful replay/injection preserves
+  `checkpointDecision:"explicit-v1"` in the current journal and manifest.
 - **Sessions:** identity replay rewrites current index/label/phase only, preserves session identity,
   does not mutate source, and re-journals the rebound record; live and isolation session tests
   unchanged.
-- **Persistence/crash:** background initial save contains the complete seed before acknowledgement;
+- **Persistence/crash:** SDK background initial save contains the complete seed before acknowledgement;
   source lease is held through snapshot/target save and always released; lease contention fails
   before target creation;
   selected/invalidated candidates are durably removed before script observation; completion drops
@@ -1648,8 +1646,9 @@ bijection on the next hop.
 
 - Discovery and runtime reject every SDK replay/fork field; only the strict same-ID `resume` branch
   accepts checkpoint replies.
-- Foreground and background continuation keep the exact run ID and use the manager's canonical
-  admission, journal, event stream, and cumulative usage.
+- MCP continuation always acknowledges a durable asynchronous operation with an explicit
+  `requestId`; it keeps the exact run ID and uses the manager's canonical admission, journal, event
+  stream, and cumulative usage. Identical retries cannot start later continuation generations.
 - Structured results omit SDK correspondence reports and expose bounded same-ID continuation
   telemetry only.
 - Authoring-doc generation/drift sentinels cover the same-ID rule.
@@ -1660,8 +1659,9 @@ bijection on the next hop.
   longest-prefix-only rule; document identity matching, input-fingerprint equality, unique-hash
   movement, ambiguity-to-live, terminal environment admission, safe-prefix/all-live positional
   eligibility, `resume.filesystem`, worktree behavior, budget debit, checkpoint reply source
-  indexes, checkpoint-options fingerprint equality, host-decision-only identity replay (headless
-  decisions run fresh), and the positional escape hatch. Also document the two author-visible
+  indexes, checkpoint-options fingerprint equality, and explicit-decision provenance on every
+  checkpoint execution path. The historical filesystem/positional policy above no longer defines
+  current authoring guidance. Also document the two author-visible
   all-live triggers that are calibration rather than error: a source containing any result row
   whose call path could not be captured (deep call stacks past the raw-frame cap, or a
   non-strict-JSON meta value) is source-wide `"manifest-invalid"` and resumes all-live; and a Node
@@ -1701,7 +1701,7 @@ in §4 rather than publishing an intermediate surface:
    reports. Engine tests construct the internal shape directly; no manager creates it yet.
 5. **PR5 — durable manager and SDK activation.** Manager-owned
    `resumeFromRunId`/`resumePolicy`, critical initial/commit persistence, pause/failure flattening,
-   public SDK exports/validation, and background durability. This is the first default-cache
+   public SDK exports/validation, and SDK background durability. This is the first default-cache
    behavior change and includes the 40-way fan-out, both filesystem counterexamples, and crash
    tests.
 6. **PR6 — MCP boundary.** Keep the SDK replay controls out of MCP and test the separate strict

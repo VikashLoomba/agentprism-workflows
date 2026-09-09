@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Local MCP Apps dev harness for the run-monitor panel. Serves the workflow server over
-// Streamable HTTP (one MCP server per session, ONE shared WorkflowManager so background
-// runs are visible across sessions) and auto-starts a stubbed demo background run whose
+// Streamable HTTP (one MCP server per session, ONE shared WorkflowManager so accepted
+// runs are visible across sessions) and auto-starts a stubbed SDK demo run whose
 // runId is printed at boot. Point the ext-apps basic-host at it:
 //
 //   pnpm --filter @automatalabs/mcp-server build && node scripts/dev-app-host.mjs
@@ -12,7 +12,9 @@
 //   #   { capabilities: { extensions: { "io.modelcontextprotocol/ui": {
 //   #       mimeTypes: ["text/html;profile=mcp-app"] } } } }
 //   SERVERS='["http://localhost:3001/mcp"]' npm run start   # open http://localhost:8080
-//   # call workflow with { action: "status", runId: "<printed id>" } to render the panel
+//   # call workflow_monitor with { runId: "<printed id>" } to open a monitor
+//   # call it again to retain another independent view in the reference host
+//   # workflow status/result/stop calls are separate controls and do not open panels
 //
 // The stub runner needs no agent backends or credentials; set AGENTPRISM_DEV_LIVE=1 to use
 // the real ACP runner instead (requires logged-in backends).
@@ -82,7 +84,7 @@ if (devCwd) {
   }
 } else {
   const started = manager.startInBackground(DEMO_SCRIPT, undefined, { agent: runner });
-  console.log(`demo background run started: runId=${started.runId} (runner: ${live ? "live acp" : "stub"})`);
+  console.log(`demo run started: runId=${started.runId} (runner: ${live ? "live acp" : "stub"})`);
   started.promise.then(
     (result) => console.log(`demo run ${started.runId} finished: ${result.status}`),
     (error) => console.log(`demo run ${started.runId} errored:`, error),

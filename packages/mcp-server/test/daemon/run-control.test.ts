@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,9 @@ import { DaemonRunControl } from "../../src/daemon/run-control.js";
 import { createOrReuseWholeStopIntent } from "../../src/daemon/run-control-store.js";
 import { DAEMON_NAME } from "../../src/daemon/constants.js";
 import { WorkflowPermissionBroker } from "../../src/workflow-permissions.js";
+import { workflowLifecycle } from "../../src/workflow-lifecycle.js";
+import { makeRunner, structured, waitForRun } from "../_harness.js";
+import { connectHttp, makeProjectDir, waitUntil } from "../_http-harness.js";
 import "../_harness.js";
 
 const SCRIPT = [
@@ -403,5 +407,59 @@ test("a successor-side controller resolves the lease owner and forwards whole-ru
     clearDaemonInfo(process.pid);
     await owner.close();
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a lost setup forwarding acknowledgement preserves one durable answer and one execution", async () => {
+  let calls = 0;
+  const runner = makeRunner(() => { calls++; return "once"; });
+  const owner = await createDaemon({ runner, port: 0, log: () => undefined });
+  const cwd = makeProjectDir("setup-lost-reply");
+  const session = await connectHttp(owner.url);
+  writeDaemonInfo({
+    name: DAEMON_NAME, version: "4.1.0", pid: process.pid, port: owner.port,
+    url: owner.url, startedAt: owner.startedAt, envFingerprint: envFingerprint(),
+    instanceId: owner.instanceId, controlUrl: owner.controlUrl, controlProtocol: 1,
+  });
+  try {
+    const accepted = await session.client.callTool({ name: "workflow", arguments: {
+      action: "run", requestId: randomUUID(), projectDir: cwd,
+      script: 'export const meta = { name: "setup-once", description: "lost setup reply", backends: { custom: { command: "fixture" } } }; return await agent("work", { model: "custom" });',
+    } });
+    const runId = String(structured(accepted)?.runId);
+    const waiting = structured(await waitForRun(session.client, runId, (state) =>
+      (state.setup as { state?: string })?.state === "input-required"));
+    const setup = waiting?.setup as { request: { id: string } };
+    const successorProjects = new WorkflowProjectRegistry(runner, { leaseOwnerId: "setup-successor" });
+    const successorManager = successorProjects.getOrCreate(cwd).manager;
+    let forwards = 0;
+    const router = new DaemonRunControl({
+      projects: successorProjects, ownPid: process.pid, ownInstanceId: "setup-successor",
+      key: loadOrCreateRunControlKey(),
+      respondSetup: (context, input) => workflowLifecycle(context, runner).respond(input),
+      fetch: async (input, init) => {
+        const response = await fetch(input, init);
+        forwards++;
+        assert.equal(response.status, 200);
+        await response.json();
+        throw new Error("forwarded acknowledgement deliberately lost after owner committed");
+      },
+    });
+    const answer = { action: "setup-response" as const, runId, setupId: setup.request.id,
+      response: { action: "accept" as const, content: { approve: true } } };
+    await assert.rejects(router.respondSetup(successorManager, answer), /identical setup response/);
+    await waitUntil(() => successorManager.getPersistence().load(runId)?.status === "completed", "owner execution after lost setup reply");
+    await router.respondSetup(successorManager, answer);
+    assert.equal(forwards, 1, "terminal receipt needs no forwarding or new admission");
+    assert.equal(calls, 1);
+    await assert.rejects(router.respondSetup(successorManager, {
+      ...answer, response: { action: "decline" },
+    }), /Conflicting response/);
+    assert.equal(calls, 1);
+    assert.equal(successorManager.getPersistence().load(runId)?.result, "once");
+  } finally {
+    await session.dispose();
+    clearDaemonInfo(process.pid);
+    await owner.close();
   }
 });

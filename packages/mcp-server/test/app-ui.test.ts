@@ -1,7 +1,9 @@
-// MCP Apps surface: the legacy server registers UI metadata, the app-only events tool, and the
-// ui:// resource only for clients advertising a well-formed extensions entry with the exact MIME.
+// MCP Apps surface: only workflow_monitor opens an App. Data/control tools stay view-free,
+// and Apps tools/resources require the exact negotiated MIME capability.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { randomUUID } from "node:crypto";
+import { readRunStatus } from "../ui/src/run-status.js";
 
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "../src/mcp-apps.js";
 
@@ -9,17 +11,30 @@ import {
   RUN_MONITOR_RESOURCE_URI,
   WORKFLOW_EVENTS_TOOL_NAME,
   WORKFLOW_RUNS_TOOL_NAME,
-} from "../src/index.js";
-import { ONE_AGENT_SCRIPT, connect, okRunner, structured, textOf } from "./_harness.js";
+  WORKFLOW_MONITOR_TOOL_NAME,
+  WORKFLOW_NOTIFICATIONS_TOOL_NAME,
+} from "../src/app-ui.js";
+import { ONE_AGENT_SCRIPT, NO_AGENT_SCRIPT, connect, okRunner, structured, textOf, waitForRun } from "./_harness.js";
 
 function runIdOf(res: Awaited<ReturnType<Awaited<ReturnType<typeof connect>>["client"]["callTool"]>>): string {
+  assert.equal(res.isError ?? false, false, textOf(res));
   const runId = structured(res)?.runId;
   assert.equal(typeof runId, "string");
   return runId as string;
 }
 
+async function acceptTestConfiguration(client: Awaited<ReturnType<typeof connect>>["client"], runId: string): Promise<void> {
+  const response = await waitForRun(client, runId, (status) => Boolean((status.setup as { request?: unknown } | undefined)?.request));
+  const request = (structured(response)?.setup as { request: { id: string; kind: string; requestedSchema: { properties: Record<string, { oneOf?: Array<{ const: string }> }>; required: string[] } } }).request;
+  assert.equal(request.kind, "agent-configuration");
+  assert.deepEqual(request.requestedSchema.required, ["agent_0_model"]);
+  assert.ok(request.requestedSchema.properties.agent_0_model?.oneOf?.some((choice) => choice.const === "claude"));
+  const accepted = await client.callTool({ name: "workflow", arguments: { action: "setup-response", runId, setupId: request.id, response: { action: "accept", content: { agent_0_model: "claude" } } } });
+  assert.equal(accepted.isError, false, textOf(accepted));
+}
+
 test("legacy initialize advertises this server's MCP Apps extension support", async () => {
-  const { client, dispose } = await connect(okRunner());
+  const { client, dispose } = await connect(okRunner(), { uiCapability: "matching" });
   try {
     const capabilities = client.getServerCapabilities();
     assert.deepEqual(capabilities?.extensions?.[EXTENSION_ID], {});
@@ -28,34 +43,26 @@ test("legacy initialize advertises this server's MCP Apps extension support", as
   }
 });
 
-test("workflow carries the panel resource in _meta.ui; workflow-events is app-only", async () => {
-  const { client, dispose } = await connect(okRunner());
+test("only workflow_monitor carries the panel resource; app-only support tools carry visibility only", async () => {
+  const { client, dispose } = await connect(okRunner(), { uiCapability: "matching" });
   try {
     const { tools } = await client.listTools();
     assert.deepEqual(
       tools.map((tool) => tool.name).sort(),
-      ["repl", "workflow", WORKFLOW_EVENTS_TOOL_NAME, WORKFLOW_RUNS_TOOL_NAME].sort(),
+      ["repl", "workflow", WORKFLOW_MONITOR_TOOL_NAME, WORKFLOW_EVENTS_TOOL_NAME, WORKFLOW_RUNS_TOOL_NAME, WORKFLOW_NOTIFICATIONS_TOOL_NAME].sort(),
     );
 
     const workflow = tools.find((tool) => tool.name === "workflow");
-    const workflowUi = (workflow?._meta as { ui?: { resourceUri?: string; visibility?: string[] } })?.ui;
-    assert.equal(workflowUi?.resourceUri, RUN_MONITOR_RESOURCE_URI);
-    assert.equal(workflowUi?.visibility, undefined, "workflow keeps default model+app visibility");
-    assert.equal(
-      (workflow?._meta as Record<string, unknown>)?.["ui/resourceUri"],
-      RUN_MONITOR_RESOURCE_URI,
-      "registerAppTool mirrors the legacy flat key for older hosts",
-    );
-
-    const events = tools.find((tool) => tool.name === WORKFLOW_EVENTS_TOOL_NAME);
-    const eventsUi = (events?._meta as { ui?: { resourceUri?: string; visibility?: string[] } })?.ui;
-    assert.equal(eventsUi?.resourceUri, RUN_MONITOR_RESOURCE_URI);
-    assert.deepEqual(eventsUi?.visibility, ["app"]);
-    const runs = tools.find((tool) => tool.name === WORKFLOW_RUNS_TOOL_NAME);
-    assert.deepEqual(
-      (runs?._meta as { ui?: { visibility?: string[] } } | undefined)?.ui?.visibility,
-      ["app"],
-    );
+    assert.equal(workflow?._meta, undefined, "every lifecycle action remains free of UI attachment");
+    const monitor = tools.find((tool) => tool.name === WORKFLOW_MONITOR_TOOL_NAME);
+    const monitorUi = (monitor?._meta as { ui?: { resourceUri?: string; visibility?: string[] } })?.ui;
+    assert.equal(monitorUi?.resourceUri, RUN_MONITOR_RESOURCE_URI);
+    assert.equal(monitorUi?.visibility, undefined, "monitor is visible to model and app");
+    assert.deepEqual(monitor?._meta, { ui: { resourceUri: RUN_MONITOR_RESOURCE_URI } });
+    for (const name of [WORKFLOW_EVENTS_TOOL_NAME, WORKFLOW_RUNS_TOOL_NAME, WORKFLOW_NOTIFICATIONS_TOOL_NAME]) {
+      const support = tools.find((tool) => tool.name === name);
+      assert.deepEqual(support?._meta, { ui: { visibility: ["app"] } }, `${name} does not open a view`);
+    }
 
     const resource = await client.readResource({ uri: RUN_MONITOR_RESOURCE_URI });
     const content = resource.contents[0] as { mimeType?: string; text?: string };
@@ -79,6 +86,8 @@ test("only the exact well-formed extensions capability receives the MCP Apps sur
     assert.ok(matchingWorkflow);
     assert.ok(matchingTools.some((tool) => tool.name === WORKFLOW_EVENTS_TOOL_NAME));
     assert.ok(matchingTools.some((tool) => tool.name === WORKFLOW_RUNS_TOOL_NAME));
+    assert.ok(matchingTools.some((tool) => tool.name === WORKFLOW_MONITOR_TOOL_NAME));
+    assert.ok(matchingTools.some((tool) => tool.name === WORKFLOW_NOTIFICATIONS_TOOL_NAME));
 
     const sharedFields = (tool: typeof matchingWorkflow) => ({
       title: tool.title,
@@ -119,7 +128,7 @@ test("only the exact well-formed extensions capability receives the MCP Apps sur
 });
 
 test("workflow-events is annotated read-only (metadata for hosts that gate on the hint)", async () => {
-  const { client, dispose } = await connect(okRunner());
+  const { client, dispose } = await connect(okRunner(), { uiCapability: "matching" });
   try {
     const { tools } = await client.listTools();
     const events = tools.find((tool) => tool.name === WORKFLOW_EVENTS_TOOL_NAME);
@@ -139,15 +148,53 @@ test("workflow-events is annotated read-only (metadata for hosts that gate on th
   }
 });
 
-test("workflow-events pages a background run's event log to terminal state", async () => {
-  const { client, dispose } = await connect(okRunner(), { listTools: true });
+test("the browser status projection reads explicit checkpoint controls from the real server outcome", async () => {
+  const { client, dispose } = await connect(okRunner(), { uiCapability: "matching" });
   try {
     const accepted = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: ONE_AGENT_SCRIPT, background: true },
+      arguments: {
+        action: "run",
+        requestId: randomUUID(),
+        script: 'export const meta = { name: "app-checkpoint", description: "Verify the monitor status seam" }; const answer = await checkpoint("Continue from this monitor?"); return { answer };',
+      },
     });
-    assert.equal(accepted.isError ?? false, false);
     const runId = runIdOf(accepted);
+    await waitForRun(client, runId, (status) => status.status === "paused");
+    const app = { callServerTool: (request: { name: string; arguments?: Record<string, unknown> }) => client.callTool(request) } as Parameters<typeof readRunStatus>[0];
+    const snapshot = await readRunStatus(app, runId);
+    assert.equal(snapshot.status, "paused");
+    assert.equal(snapshot.pauseReason, "checkpoint_required");
+    assert.equal(snapshot.checkpointContext?.callIndex, 0);
+    assert.equal(snapshot.checkpointContext?.kind, "confirm");
+    assert.equal(snapshot.checkpointContext?.prompt, "Continue from this monitor?");
+    assert.equal(typeof snapshot.checkpointContext?.hash, "string");
+    assert.deepEqual(snapshot.pendingPermissions, []);
+    const resumed = await client.callTool({ name: "workflow", arguments: {
+      action: "resume", runId, requestId: randomUUID(), checkpointReplies: { [snapshot.checkpointContext!.callIndex]: true },
+    } });
+    assert.equal(resumed.isError, false, textOf(resumed));
+    await waitForRun(client, runId, (status) => status.status === "completed");
+    const completed = await readRunStatus(app, runId);
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.checkpointContext, undefined);
+  } finally {
+    await dispose();
+  }
+});
+
+test("workflow-events pages an accepted asynchronous run to terminal state", async () => {
+  const { client, dispose } = await connect(okRunner(), { listTools: true, uiCapability: "matching" });
+  try {
+    const accepted = await client.callTool({
+      name: "workflow",
+      arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT },
+    });
+    assert.equal(accepted.isError ?? false, false, textOf(accepted));
+    const runId = runIdOf(accepted);
+    await acceptTestConfiguration(client, runId);
+    const settled = await waitForRun(client, runId);
+    assert.equal(structured(settled)?.status, "completed", textOf(settled));
 
     // Page the event log from 0 like the panel does: agentStart/agentEnd/complete all appear.
     const seenTypes = new Set<string>();
@@ -197,18 +244,20 @@ test("workflow-events pages a background run's event log to terminal state", asy
 });
 
 test("workflow-runs returns one bounded active/recent project dashboard", async () => {
-  const { client, dispose } = await connect(okRunner(), { listTools: true });
+  const { client, dispose } = await connect(okRunner(), { listTools: true, uiCapability: "matching" });
   try {
     const first = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: ONE_AGENT_SCRIPT },
+      arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT },
     });
     const firstRunId = runIdOf(first);
     const second = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: ONE_AGENT_SCRIPT },
+      arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT },
     });
     const secondRunId = runIdOf(second);
+    await Promise.all([acceptTestConfiguration(client, firstRunId), acceptTestConfiguration(client, secondRunId)]);
+    await Promise.all([waitForRun(client, firstRunId), waitForRun(client, secondRunId)]);
     const listed = await client.callTool({
       name: WORKFLOW_RUNS_TOOL_NAME,
       arguments: { anchorRunId: secondRunId, limit: 2 },
@@ -224,15 +273,15 @@ test("workflow-runs returns one bounded active/recent project dashboard", async 
 });
 
 test("workflow-runs keeps the panel's anchor run in a bounded listing", async () => {
-  const { client, dispose } = await connect(okRunner(), { listTools: true });
+  const { client, dispose } = await connect(okRunner(), { listTools: true, uiCapability: "matching" });
   try {
     const first = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: ONE_AGENT_SCRIPT },
+      arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT },
     });
     const firstRunId = runIdOf(first);
-    await client.callTool({ name: "workflow", arguments: { action: "run", script: ONE_AGENT_SCRIPT } });
-    await client.callTool({ name: "workflow", arguments: { action: "run", script: ONE_AGENT_SCRIPT } });
+    await client.callTool({ name: "workflow", arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT } });
+    await client.callTool({ name: "workflow", arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT } });
 
     const listed = await client.callTool({
       name: WORKFLOW_RUNS_TOOL_NAME,
@@ -247,7 +296,7 @@ test("workflow-runs keeps the panel's anchor run in a bounded listing", async ()
 });
 
 test("workflow-events returns a tool error for unknown runs", async () => {
-  const { client, dispose } = await connect(okRunner());
+  const { client, dispose } = await connect(okRunner(), { uiCapability: "matching" });
   try {
     const events = await client.callTool({
       name: WORKFLOW_EVENTS_TOOL_NAME,
@@ -258,4 +307,42 @@ test("workflow-events returns a tool error for unknown runs", async () => {
   } finally {
     await dispose();
   }
+});
+
+
+test("workflow_monitor requires a real accepted run and never starts execution", async () => {
+  const { client, dispose } = await connect(okRunner(), { uiCapability: "matching", listTools: true });
+  try {
+    const missing = await client.callTool({ name: WORKFLOW_MONITOR_TOOL_NAME, arguments: { runId: "missing-run" } });
+    assert.equal(missing.isError, true);
+    for (const input of [{}, { runId: "" }, { runId: "missing-run", action: "run" }]) {
+      const invalid = await client.callTool({ name: WORKFLOW_MONITOR_TOOL_NAME, arguments: input });
+      assert.equal(invalid.isError, true, "invalid monitor input is rejected");
+    }
+    const accepted = await client.callTool({ name: "workflow", arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT } });
+    const runId = runIdOf(accepted);
+    const monitor = await client.callTool({ name: WORKFLOW_MONITOR_TOOL_NAME, arguments: { runId } });
+    assert.equal(monitor.isError, false, textOf(monitor));
+    assert.equal(structured(monitor)?.runId, runId);
+    await waitForRun(client, runId);
+    const reopened = await client.callTool({ name: WORKFLOW_MONITOR_TOOL_NAME, arguments: { runId } });
+    assert.equal(structured(reopened)?.runId, runId);
+    assert.equal(structured(reopened)?.status, "completed");
+  } finally { await dispose(); }
+});
+
+test("incapable clients cannot invoke hidden Apps tools by guessing their names", async () => {
+  const { client, dispose } = await connect(okRunner(), { uiCapability: "absent" });
+  try {
+    for (const [name, args] of [
+      [WORKFLOW_MONITOR_TOOL_NAME, { runId: "missing-run" }],
+      [WORKFLOW_EVENTS_TOOL_NAME, { runId: "missing-run" }],
+      [WORKFLOW_RUNS_TOOL_NAME, { anchorRunId: "missing-run" }],
+      [WORKFLOW_NOTIFICATIONS_TOOL_NAME, { action: "claim", runId: "missing-run", eventId: "one", viewId: randomUUID() }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      assert.equal(result.isError, true, name);
+      assert.match(textOf(result), /MCP Apps support|not found|Invalid params/i);
+    }
+  } finally { await dispose(); }
 });

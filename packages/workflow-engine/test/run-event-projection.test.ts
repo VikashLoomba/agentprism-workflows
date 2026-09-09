@@ -99,7 +99,6 @@ function recordedError(): WorkflowRecordedError {
       prompt: allSecrets,
       kind: "select",
       choices: Array.from({ length: 22 }, (_, index) => `${allSecrets}-${index}`),
-      default: { api_token: "checkpoint-secret", text: allSecrets },
     },
     props: { authorization: "prop-secret", text: allSecrets },
     value: { cookie: "value-secret", text: allSecrets },
@@ -327,7 +326,7 @@ test("compact values enforce exact depth, array, key, and UTF-8 limits", () => {
   assert.deepEqual(projected.projection, { redacted: true, truncated: true });
 });
 
-test("automatic pause and error projections exclude the runtime error and bound checkpoint defaults", () => {
+test("automatic pause and error projections exclude the runtime error and retired checkpoint defaults", () => {
   const runtimeError = new WorkflowError(
     "raw-runtime-error-only-secret",
     WorkflowErrorCode.CHECKPOINT_REQUIRED,
@@ -371,7 +370,7 @@ test("automatic pause and error projections exclude the runtime error and bound 
   assert.equal(paused.event.type, "paused");
   if (paused.event.type === "paused" && paused.event.reason === "checkpoint_required") {
     assert.equal(paused.event.checkpointContext?.choices?.length, 20);
-    assert.equal(paused.event.checkpointContext?.default?.preview.includes("default-secret"), false);
+    assert.equal(Object.hasOwn(paused.event.checkpointContext!, "default"), false);
   }
   assert.deepEqual(paused.projection, { redacted: true, truncated: true });
 });

@@ -79,7 +79,7 @@ describe("WorkflowError.checkpointContext", () => {
       prompt: "Ship this release?",
       kind: "select",
       choices: ["ship", "hold"],
-      default: "hold",
+      timeoutMs: 30_000,
     };
     const error = new WorkflowError(
       'checkpoint "Ship this release?" awaits a human decision',

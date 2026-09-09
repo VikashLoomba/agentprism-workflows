@@ -46,6 +46,7 @@ const candidate: PersistedResumeCandidate = {
   call: sourceCall,
 };
 const injection: PersistedCheckpointInjection = {
+  checkpointDecision: "explicit-v1",
   sourceRunId: "source-run",
   recordedIndex: 4,
   hash: HASH,
@@ -147,7 +148,7 @@ const identityState: PersistedRunState = {
 test("incremental resume format constants and frozen reason arrays match the contract", () => {
   assert.equal(CALL_PATH_FORMAT, 1);
   assert.equal(CALL_INPUTS_FORMAT, 2);
-  assert.equal(CHECKPOINT_INPUTS_FORMAT, 1);
+  assert.equal(CHECKPOINT_INPUTS_FORMAT, 2);
   assert.deepEqual(RESUME_FALLBACK_REASONS, [
     "legacy-recording",
     "crash-residue",
@@ -204,7 +205,7 @@ test("incremental resume format constants and frozen reason arrays match the con
 test("persisted and prepared resume declaration fixtures cover every branch", () => {
   assert.equal(identityState.resume?.terminalEnvironment?.git?.head, HASH);
   assert.equal(identityState.resumeSeed?.checkpointInjections?.[0]?.recordedIndex, 4);
-  assert.equal(identityState.runtime?.checkpointInputsFormat, 1);
+  assert.equal(identityState.runtime?.checkpointInputsFormat, 2);
   assert.equal(identityPrepared.strategy, "identity-v1");
   assert.equal(positionalPrepared.eligibility, "safe-prefix");
   assert.equal(livePrepared.disabledReason, "runtime-mismatch");

@@ -8,7 +8,7 @@ import {
   type StandardSchemaWithJSON,
 } from "@modelcontextprotocol/server";
 
-import { appResourceToolMeta, supportsMcpApps } from "./mcp-apps.js";
+import { supportsMcpApps } from "./mcp-apps.js";
 
 type ToolConfig = {
   title?: string;
@@ -35,11 +35,12 @@ function modernCapabilities(ctx: ServerContext): ClientCapabilities | undefined 
   return value !== null && typeof value === "object" ? value as ClientCapabilities : undefined;
 }
 
-function appOnly(config: ToolConfig): boolean {
+function requiresApps(config: ToolConfig): boolean {
   const ui = config._meta?.ui;
   if (ui === null || typeof ui !== "object") return false;
   const visibility = (ui as { visibility?: unknown }).visibility;
-  return Array.isArray(visibility) && visibility.includes("app");
+  return typeof (ui as { resourceUri?: unknown }).resourceUri === "string" ||
+    (Array.isArray(visibility) && visibility.includes("app"));
 }
 
 async function schemaJson(
@@ -59,7 +60,6 @@ async function schemaJson(
 export class CapabilityAwareToolCatalog {
   private readonly entries = new Map<string, CatalogEntry>();
   private legacyCapabilities: ClientCapabilities | undefined;
-  private workflowAppResourceUri: string | undefined;
 
   constructor(
     private readonly mcp: McpServer,
@@ -68,7 +68,7 @@ export class CapabilityAwareToolCatalog {
     const registerNative = mcp.registerTool.bind(mcp);
     mcp.registerTool = ((name: string, config: ToolConfig, callback: (...args: unknown[]) => unknown) => {
       const entry: CatalogEntry = { name, config: { ...config }, enabled: true };
-      const wrapped = appOnly(config)
+      const wrapped = requiresApps(config)
         ? (...args: unknown[]) => {
             const ctx = args.at(-1) as ServerContext;
             if (!this.supportsApps(ctx)) {
@@ -115,10 +115,6 @@ export class CapabilityAwareToolCatalog {
     return supportsMcpApps(capabilities);
   }
 
-  setWorkflowAppResource(uri: string): void {
-    this.workflowAppResourceUri = uri;
-  }
-
   clientCapabilities(ctx: ServerContext): ClientCapabilities | undefined {
     return this.protocolEra === "modern" ? modernCapabilities(ctx) : this.legacyCapabilities;
   }
@@ -133,12 +129,9 @@ export class CapabilityAwareToolCatalog {
       const apps = this.supportsApps(ctx);
       const tools = [];
       for (const entry of this.entries.values()) {
-        if (!entry.enabled || (appOnly(entry.config) && !apps)) continue;
+        if (!entry.enabled || (requiresApps(entry.config) && !apps)) continue;
         const inputSchema = await schemaJson(entry.config.inputSchema, "input");
         const outputSchema = await schemaJson(entry.config.outputSchema, "output");
-        const meta = apps && entry.name === "workflow" && this.workflowAppResourceUri !== undefined
-          ? { ...(entry.config._meta ?? {}), ...appResourceToolMeta(this.workflowAppResourceUri) }
-          : entry.config._meta;
         tools.push({
           name: entry.name,
           title: entry.config.title,
@@ -148,7 +141,7 @@ export class CapabilityAwareToolCatalog {
           annotations: entry.config.annotations,
           icons: entry.config.icons,
           execution: entry.config.execution,
-          _meta: meta,
+          _meta: entry.config._meta,
         });
       }
       return { tools } as unknown as ListToolsResult;

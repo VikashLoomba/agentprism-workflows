@@ -5,6 +5,8 @@ Status: **implemented contract for the daemon run-control release train**.
 > `action:"status"` is the sole model-facing observation action and returns immediately. Daemon
 > ownership and control behavior are shared by the legacy 2025 and modern `2026-07-28` transports.
 > See [`workflow-status-action.md`](workflow-status-action.md).
+> Durable asynchronous preparation and setup response routing follow
+> [`async-workflow-app-cutover.md`](async-workflow-app-cutover.md).
 
 ## Source request
 
@@ -33,8 +35,9 @@ VM, promise graph, or ACP connection between processes.
 
 1. **One execution owner.** A run has at most one live writer/executor. A control timeout is never
    sufficient reason to steal a live lease.
-2. **Control follows ownership.** The current daemon can stop a whole run or cancel one in-flight
-   agent call owned by a control-capable predecessor.
+2. **Control follows ownership.** The current daemon can stop a whole run, cancel one in-flight
+   agent call, answer a pending ACP permission, or answer durable setup owned by a control-capable
+   predecessor.
 3. **Durable stop acknowledgement.** A final stop response is returned only after the persisted
    snapshot is terminal and its matching `stopped` event is durably readable.
 4. **Durable whole-stop intent.** Once accepted by a daemon, a whole-run stop request survives an
@@ -48,9 +51,9 @@ VM, promise graph, or ACP connection between processes.
 8. **Explicit destructive escalation.** Killing an execution-owner process is never inferred from
    elapsed time. It requires `forceOwner:true`, identity revalidation, and an owner that is a
    superseded AgentPrism daemon.
-9. **Honest accounting and errors.** Foreground and background executions both count as daemon-owned
-   work. Errors identify a live external owner and never recommend resume while that owner holds the
-   lease.
+9. **Honest accounting and errors.** Manager-owned execution and pending preparation both count as
+   daemon-owned work, including unanswered setup. Errors identify a live external owner and never
+   recommend resume while that owner holds the lease.
 
 ## 3. Identity and ownership
 
@@ -97,25 +100,44 @@ family-scoped so a changed backend environment can still control an existing run
 method, path, timestamp, operation ID, and the exact body; stale timestamps and non-constant-time
 signature mismatches are rejected.
 
-The operation is:
+The operations are:
 
 ```ts
 type InternalRunControlRequest =
   | { operationId: string; runId: string; action: "stop" }
-  | { operationId: string; runId: string; action: "cancel-agent"; callIndex: number };
+  | { operationId: string; runId: string; action: "cancel-agent"; callIndex: number }
+  | { operationId: string; runId: string; action: "list-permissions" }
+  | {
+      operationId: string; runId: string; action: "respond-permission";
+      permissionId: string; response: WorkflowPermissionDecisionResponse;
+    }
+  | {
+      operationId: string; runId: string; action: "respond-setup";
+      setupId: string; response: WorkflowSetupResponseToolInput["response"];
+    };
 ```
 
-The receiver resolves the run, verifies that its local manager is still the lease owner, applies the
-normal manager operation, and returns one of:
+The receiver resolves the run, verifies ownership before mutation, applies the normal manager or
+project lifecycle operation, and returns one of:
 
 - applied with a terminal status or cancellation summary;
 - already terminal;
+- the current pending permissions or a permission response acknowledgement;
+- setup response durably recorded, including an identical receipt already recorded;
 - not owner, with no mutation;
 - unknown run;
 - rejected request.
 
 The forwarding daemon never treats the HTTP response alone as proof of a stop. It reloads and
 verifies the shared persisted snapshot and event log before returning a final stop result.
+
+Setup forwarding uses the same signed endpoint and five-second forwarding bound. It carries the
+exact public setup ID and response, with no response normalization. The owner validates the stored
+request, records the response receipt under its run lease, and only then schedules further
+preparation. A lost acknowledgement never authorizes a different answer or a takeover. The caller
+can retry the identical setup response; matching receipts remain valid after execution finishes,
+and conflicting responses fail. A successor may claim unanswered preparation only after the former
+owner is gone. Receipt-only retries do not acquire a new execution lease.
 
 ## 5. Durable whole-stop intents
 
@@ -204,6 +226,16 @@ and cold-stops the requested run. Sibling nonterminal records reconcile normally
 A live non-daemon owner, current daemon, identity mismatch, or unverifiable reused PID is never
 killed.
 
+### 6.4 Setup responses across daemon generations
+
+`{ action:"setup-response", runId, setupId, response }` uses the owner of the pending preparation.
+An MCP session on a successor can read the same durable setup request and submit its answer through
+the predecessor's control endpoint. The predecessor retains its lease through this operation and
+continues preparation or settles the run after a decline. The successor does not start a second
+preparation driver. If the predecessor has exited, the successor may acquire the stale lease and
+apply the answer to the same stored request. Status projection is read after any awaited owner
+permission query, keeping its status and result availability coherent during completion.
+
 ## 7. Succession and first-upgrade compatibility
 
 A control-capable predecessor may be superseded immediately. It admits no new MCP work but keeps its
@@ -228,9 +260,9 @@ succession and cross-generation forwarding.
 
 ## 8. Lame-duck lifecycle and accounting
 
-`activeRuns` means manager-owned running executions, not merely background admission promises.
-Project health snapshots report that same quantity. Background admission slots remain a separate
-per-process concern.
+`activeRuns` includes manager-owned running executions and pending asynchronous preparation,
+including setup waiting for a response. Project health snapshots report that same quantity.
+Admission slots remain a separate per-process concern.
 
 A lame duck:
 
@@ -238,7 +270,7 @@ A lame duck:
 - accepts authenticated internal control requests;
 - scans durable whole-stop intents;
 - evicts drainable idle sessions even while workflow executions remain;
-- retains only actual workflow execution, in-flight request, and REPL-drain responsibilities;
+- retains workflow execution and preparation, in-flight request, and REPL-drain responsibilities;
 - exits when those responsibilities settle.
 
 There is no elapsed-time auto-abort. A healthy hours-long run is not destroyed because code was
@@ -280,7 +312,7 @@ This train does not:
 - turn the stdio shim into a run-aware request router;
 - impose an automatic drain deadline;
 - provide cross-machine control or handoff;
-- make the per-project background admission cap global across overlapping daemon generations.
+- make the per-project active admission cap global across overlapping daemon generations.
 
 A stable external HTTP front door or per-run worker process may be designed separately; neither is
 required for local stdio-shim succession correctness.
@@ -289,7 +321,7 @@ required for local stdio-shim succession correctness.
 
 The deterministic suite must cover:
 
-1. A predecessor owns a blocked background run; successor whole-stop reaches it and returns one
+1. A predecessor owns a blocked SDK background run; successor whole-stop reaches it and returns one
    durable aborted snapshot/event.
 2. The same path works through legacy-session and modern request-scoped MCP traffic.
 3. Per-call cancellation reaches the predecessor and the workflow remains live.
@@ -300,10 +332,16 @@ The deterministic suite must cover:
 8. A cold paused run can be stopped without resume.
 9. A pre-v1 busy predecessor is temporarily adopted; once idle, exactly one successor takes over.
 10. Sessions alone do not indefinitely defer that first upgrade.
-11. Foreground and background executions both appear in lifecycle accounting.
+11. SDK foreground/background executions and MCP pending preparation all appear in lifecycle accounting.
 12. Force rejects current, non-daemon, mismatched, and live-unverifiable owners; an authorized
     superseded owner termination cold-stops the target and leaves sibling recovery resumable.
 13. Wrong/missing/stale HMAC requests are rejected and cannot mutate a run.
 14. `status`, app-only event reads, and stop retries remain coherent across generations.
 15. Existing total-version-order, stale-lock recovery, stop durability-fault, and session-recovery
     tests remain green.
+16. A successor reads and answers the predecessor's exact unanswered setup through authenticated
+    control; the predecessor finishes and drains without transferring its live lease.
+17. Lost setup acknowledgements accept only identical retries, including after execution completes;
+    conflicting answers cannot replace the durable receipt.
+18. A real daemon crash during unanswered setup preserves the setup ID; the recovered stdio client
+    can answer it and observe the same run complete.

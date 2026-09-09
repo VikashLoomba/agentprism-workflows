@@ -10,7 +10,7 @@ import { runWorkflow } from "../src/workflow.js";
 const SCRIPT = `export const meta = { name: 'fallbacks', description: 'fallbacks', phases: [{ title: 'Review' }] }
 const first = await agent('one', { label: 'whole', model: 'missing-model' })
 const second = await agent('two', { label: 'modifier', phase: 'Review', model: 'gpt-example[high]' })
-const decision = await checkpoint('Release?', { kind: 'confirm', default: false })
+const decision = await checkpoint('Release?', { kind: 'confirm' })
 return { first, second, decision }`;
 
 function fallbackRunner(): AgentRunner {
@@ -38,7 +38,7 @@ function fallbackRunner(): AgentRunner {
 }
 
 test("run result records compatibility fallback callbacks without parsing modifier prose", async () => {
-  const result = await runWorkflow(SCRIPT, { agent: fallbackRunner(), persistLogs: false });
+  const result = await runWorkflow(SCRIPT, { agent: fallbackRunner(), persistLogs: false, confirm: async () => false });
 
   assert.deepEqual(result.fallbacks, [
     {
@@ -70,14 +70,14 @@ test("manager persists fallback observability and replay-only executions omit it
   const cwd = mkdtempSync(join(tmpdir(), "agentprism-result-observability-cwd-"));
   try {
     const manager = new WorkflowManager({ cwd, persistenceRoot, agent: fallbackRunner() });
-    const first = await manager.runSync(SCRIPT);
+    const first = await manager.runSync(SCRIPT, undefined, { confirm: async () => false });
     assert.equal(first.status, "completed");
     assert.equal(first.fallbacks?.length, 2);
 
     const persisted = manager.getPersistence().load(first.runId);
     assert.deepEqual(persisted?.fallbacks, first.fallbacks);
     assert.deepEqual(persisted?.checkpointsTaken, [
-      { callIndex: 2, kind: "confirm", decision: false, source: "headless-default" },
+      { callIndex: 2, kind: "confirm", decision: false, source: "live" },
     ]);
 
     let replayCalls = 0;

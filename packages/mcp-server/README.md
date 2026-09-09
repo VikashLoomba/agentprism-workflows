@@ -1,6 +1,6 @@
 # @automatalabs/mcp-server
 
-An **[MCP](https://modelcontextprotocol.io) server** for foreground/background execution, bounded status observation, and in-place stopping of dynamic multi-agent workflows. Execution lives in a shared per-user **local daemon** (spec-compliant Streamable HTTP on loopback) so runs survive MCP clients killing their server processes; hosts connect through the bundled **stdio shim** (the default bin, zero config change) or directly over HTTP — see [The workflow daemon](#the-workflow-daemon). Its model-facing tool surface is **two tools**: **`workflow`** for the strict config/run/resume/status/result/permissions-response/stop lifecycle and **`repl`** for persistent interactive orchestration. Version-matched guidance for both is published through the SEP-2640 MCP Skills Extension. App-only `workflow-events` and `workflow-runs` tools feed the [MCP Apps run monitor](#run-monitor-mcp-apps) and never enter the model's tool loop. The `workflow` tool discovers its live backend catalog with `action:"config"` and automatically validates every script before admission. Scripts may be supplied inline or by absolute server-side path, and every admitted script is also exposed as an immutable MCP resource. Agent backends authenticate from their own credential sources (`claude /login`, `codex login`, `opencode auth login`, provider API keys, or pi's `~/.pi/agent/auth.json`), so there is nothing auth-shaped for a host to manage here. A run that genuinely hits expired/missing credentials pauses with `authContext` and resumes with `action:"resume"` after the backend credentials are configured. Auth and provider *management* APIs live in the [`@automatalabs/workflows`](../workflows) SDK for embedding hosts.
+An **[MCP](https://modelcontextprotocol.io) server** for asynchronous execution, bounded status observation, and in-place stopping of dynamic multi-agent workflows. Execution lives in a shared per-user **local daemon** (spec-compliant Streamable HTTP on loopback) so runs survive MCP clients killing their server processes; hosts connect through the bundled **stdio shim** (the default bin, zero config change) or directly over HTTP — see [The workflow daemon](#the-workflow-daemon). Its model-facing tools are **`workflow`** for the strict config/run/resume/setup-response/status/result/permissions-response/stop lifecycle and **`repl`** for persistent interactive orchestration. Version-matched guidance for both is published through the SEP-2640 MCP Skills Extension. Apps-capable clients also get the dedicated `workflow_monitor` launcher. App-only `workflow-events`, `workflow-runs`, and `workflow-notifications` tools feed the [MCP Apps run monitor](#run-monitor-mcp-apps) and never enter the model's tool loop. The `workflow` tool discovers its live backend catalog with `action:"config"` and durably accepts each script before slow preparation and validates it before live execution. Scripts may be supplied inline or by absolute server-side path, and every admitted script is also exposed as an immutable MCP resource. Agent backends authenticate from their own credential sources (`claude /login`, `codex login`, `opencode auth login`, provider API keys, or pi's `~/.pi/agent/auth.json`), so there is nothing auth-shaped for a host to manage here. A run that genuinely hits expired/missing credentials pauses with `authContext` and resumes with `action:"resume"` after the backend credentials are configured. Auth and provider *management* APIs live in the [`@automatalabs/workflows`](../workflows) SDK for embedding hosts.
 
 This package is a **thin MCP adapter**. The `workflow` tool's real work — parsing the workflow script, running the deterministic engine, fanning `agent()` calls out to real coding agents over [ACP](https://agentclientprotocol.com), journaling, and resume — lives in **[`@automatalabs/workflows`](../workflows)**; the `repl` tool's real work — the persistent QuickJS-in-WASM VM, the subagent broker, the CDP-style previewer, and the enveloped-snapshot store — lives in **[`@automatalabs/repl-engine`](../repl-engine)**. The MCP server is the *composition root*: it builds the ACP-backed agent runner, injects it into the workflow engine, registers the `workflow` tool over a per-project `WorkflowManager` and the `repl` tool over a per-project QuickJS VM, and serves them over stdin/stdout.
 
@@ -30,9 +30,10 @@ This package is a **thin MCP adapter**. The `workflow` tool's real work — pars
         │  → real Claude / Codex / OpenCode / pi agents
 ```
 
-For `workflow`, foreground is the default; `background:true` durably admits work and returns its run
-ID without awaiting agent completion. Use `action:"status"` only for an on-demand bounded snapshot;
-the events resource and app-only monitor provide continuous progress (see [Run model](#run-model)). The `repl` tool holds a persistent QuickJS VM **per `projectDir`** — the
+For `workflow`, run/resume return durable acknowledgements and `status` reads a bounded snapshot.
+The events resource and dedicated monitor provide continuous progress. The `repl` tool holds a
+persistent QuickJS VM **per `projectDir`** — the
+
 same per-project context model — whose state persists across tool calls and daemon restarts through
 the per-project `repl/` store, and whose subagent `agent()` calls use the same ACP path shown above
 (see [The `repl` tool](#the-repl-tool)). `stdout` is reserved for JSON-RPC framing — every diagnostic
@@ -42,31 +43,37 @@ the server emits goes to `stderr`.
 
 ## Run monitor (MCP Apps)
 
-The `workflow` tool declares a UI resource per the
-[MCP Apps extension](https://modelcontextprotocol.io/extensions/apps/overview). The server
-advertises `io.modelcontextprotocol/ui`. Legacy clients opt in through initialize-scoped
-`capabilities.extensions["io.modelcontextprotocol/ui"]`; modern `2026-07-28` clients carry the
-same extension declaration in each request's client-capabilities envelope. In both eras its
-`mimeTypes` must contain `"text/html;profile=mcp-app"`. Only that exact, well-formed declaration
-adds the UI metadata and app-only surface for that client/request. Supporting hosts show a live
-run-monitor panel for `workflow` calls. Each surviving panel is a multi-run dashboard because hosts
-may replace an earlier panel when a later tool call renders: it defaults to that tool call's run and
-offers active/recent project-run navigation, a phase/agent graph with per-node log drill-in
-(including expandable per-tool results), live token/cost totals, and a Stop control. The panel
-keeps itself current by polling app-only `workflow-events` and obtains its bounded authoritative
-navigation list from app-only `workflow-runs`, so no model tokens are
-spent while it is visible; hosts without MCP Apps support receive no UI metadata and get the
-same text/structured output as always.
+Call **`workflow_monitor({ runId })`** after a run has been durably accepted. This dedicated
+model-facing launcher is the only tool associated with
+`ui://agentprism-workflow/run-monitor.html`; `workflow` management calls never open a panel.
+Legacy initialize capabilities and modern per-request capabilities must explicitly advertise
+`io.modelcontextprotocol/ui` with `mimeTypes:["text/html;profile=mcp-app"]` to discover it.
+The app-only `workflow-events`, `workflow-runs`, and `workflow-notifications` tools have
+`visibility:["app"]` and no UI resource association.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/agentprism/agentprism-workflows/main/docs/assets/run-monitor-graph.png" alt="Run monitor: live phase/agent graph of a workflow run" />
-  <img src="https://raw.githubusercontent.com/agentprism/agentprism-workflows/main/docs/assets/run-monitor-log.png" alt="Run monitor: per-agent log drill-in with an expanded tool result" />
-</p>
+Like Excalidraw's MCP App, each invocation uses one shared HTML resource and explicit input state.
+Hosts that retain App instances can show independent run panels. If a host reuses one iframe,
+a new monitor invocation deliberately binds it to the requested run and discards late replies
+from the previous binding. Active/recent project navigation is optional. Resource URI alone does
+not control whether a host keeps multiple panels.
 
-To try it locally against the [ext-apps](https://github.com/modelcontextprotocol/ext-apps)
-reference host, run `node scripts/dev-app-host.mjs` from this package (see the script header
-for the basic-host setup and its explicit Apps capability declaration;
-`AGENTPRISM_DEV_CWD=<project dir>` serves an existing run store).
+The panel shows pending setup, phase/agent graph, live usage, selectable agent details, and
+expandable tool results. It provides setup answers, explicit checkpoint replies, live permission
+choices, targeted agent stop, whole-run stop, and exact-result paging/download. Fullscreen preserves
+selection and run identity; narrow layouts adapt the inspector and controls to the available size.
+App-only polling consumes no model tool calls.
+
+Selection updates a bounded `ui/update-model-context` snapshot with the selected run/node and
+resource URIs. It does not send a chat message. **Ask about this agent** explicitly sends the selected
+agent context when the host supports text messages. Automatic messages are limited to required
+input and terminal outcomes; phase starts, progress, and usage churn remain quiet. Concurrent views
+claim event notifications through a host-scoped receipt ledger. Its scope depends on the host's
+session/origin isolation, and an accepted-message/lost-ack crash cannot guarantee exactly-once
+message delivery. Hosts lacking a capability simply omit that interaction.
+
+To try the shipped App in the official reference host, run
+`node packages/mcp-server/scripts/dev-app-host.mjs` from the repository root; its header describes
+basic-host setup. `AGENTPRISM_DEV_CWD=<project dir>` serves an existing run store.
 
 ---
 
@@ -106,10 +113,10 @@ With `--in-process`, the old lifecycle applies: on stdin EOF, transport close, `
 
 ### The workflow daemon
 
-- **Discovery**: the daemon records `{pid, instanceId, port, url, version, envFingerprint, controlUrl, controlProtocol}` (mode 0600) under `~/.agentprism/workflows/daemons/` — a **family pointer** `<envFingerprint>.json` naming the current daemon for that env, plus one `instances/<pid>.json` per live daemon. A mode-0600 `<envFingerprint>.request-state-key.json` keeps modern integrity-protected multi-round-trip state verifiable across successors; the separate user-scoped mode-0600 `run-control-key.json` authenticates cross-family predecessor control. Malformed key storage fails closed. Shims verify liveness via pid + `/healthz` and never dial a port blind. Concurrent shims race a per-family spawn lock, so a cold start produces exactly one daemon. Logs land in `~/.agentprism/workflows/logs/daemon.log`.
+- **Discovery**: the daemon records `{pid, instanceId, port, url, version, envFingerprint, controlUrl, controlProtocol}` (mode 0600) under `~/.agentprism/workflows/daemons/` — a **family pointer** `<envFingerprint>.json` naming the current daemon for that env, plus one `instances/<pid>.json` per live daemon. The user-scoped mode-0600 `run-control-key.json` authenticates cross-family predecessor control. Malformed key storage fails closed. Shims verify liveness via pid + `/healthz` and never dial a port blind. Concurrent shims race a per-family spawn lock, so a cold start produces exactly one daemon. Logs land in `~/.agentprism/workflows/logs/daemon.log`.
 - **Succession**: a shim that finds an older control-v1 daemon spawns a successor (ephemeral port), which atomically repoints the family pointer. The predecessor becomes a *lame duck*: it admits no new MCP work, migrates drainable sessions immediately, continues its owned executions/REPL drains, accepts signed internal stop/cancel forwarding, and exits when those responsibilities settle. A daemon **equal to or newer** than the shim is adopted (version is a total order, so clients cannot flip discovery backward). Bootstrap exception: when the stale predecessor predates control v1 and reports active runs or requests, the new shim temporarily adopts it until that work drains; sessions alone never defer the upgrade. `daemon status` shows instance/control identity for every current, draining, other-family, and legacy daemon.
 - **Port**: default `29888` (`AGENTPRISM_DAEMON_PORT` / `--port`). If the port is held — by a foreign process, or by a draining predecessor still finishing its work — the daemon falls back to an ephemeral port — discovery still works, only hardcoded client URLs need the actual port from `daemon status`.
-- **Sessions and projects**: sessions are project-agnostic — every `run` call names its project via the **required `projectDir` argument** (absolute path), so one registration serves any number of projects concurrently. `status`/`stop` take only a runId and locate its project store automatically (live contexts first, then the on-disk store manifests). Each project gets its own `WorkflowManager` — same per-project run stores as before — while all projects share one ACP backend pool. Background runs are visible from every session, and `MAX_BACKGROUND_RUNS` caps runs **per project** rather than per client process. The `repl` tool's workspace is the same shape of per-project context: **one persistent QuickJS VM per `projectDir`**, restored lazily from the per-project `repl/` store on first touch, persisted at every state-changing boundary, and drained when the project's last MCP client disconnects (both tools share one client-presence ledger, so a `workflow`-only client keeps the workspace's children warm too). See [The `repl` tool](#the-repl-tool).
+- **Sessions and projects**: sessions are project-agnostic — every `run` call names its project via the **required `projectDir` argument** (absolute path), so one registration serves any number of projects concurrently. `status`/`stop` take only a runId and locate its project store automatically (live contexts first, then the on-disk store manifests). Each project gets its own `WorkflowManager` — same per-project run stores as before — while all projects share one ACP backend pool. Accepted runs are visible from every session, and `MAX_ACTIVE_RUNS` caps runs **per project** rather than per client process. The `repl` tool's workspace is the same shape of per-project context: **one persistent QuickJS VM per `projectDir`**, restored lazily from the per-project `repl/` store on first touch, persisted at every state-changing boundary, and drained when the project's last MCP client disconnects (both tools share one client-presence ledger, so a `workflow`-only client keeps the workspace's children warm too). See [The `repl` tool](#the-repl-tool).
 - **Lifetime**: only signals, `daemon stop`, sustained idleness (default: 15 min with zero sessions, running workflow executions, requests, or REPL drains; `AGENTPRISM_DAEMON_IDLE_TTL_MS`, `0` disables), or completed supersession drain end the daemon. Client disconnects never cancel runs. Dead-client sessions are evicted without touching execution; the shim transparently re-initializes on the spec's 404. A predecessor may remain as an execution owner after its MCP sessions migrate, while the successor routes control by run lease. The REPL client-presence drain has its own bound, `AGENTPRISM_REPL_DRAIN_BOUND_MS` (default 2 h). A request in flight when its daemon crashes is answered by the shim with a JSON-RPC error instead of hanging.
 - **Security**: the daemon binds `127.0.0.1` only, validates the `Host` header, and enforces the spec's `Origin` validation (403 for non-loopback origins; extend with `AGENTPRISM_DAEMON_ALLOWED_ORIGINS`). The MCP endpoint has no authentication: any local process/user on the machine can reach it — the standard localhost-dev-server trade-off. The non-MCP run-control endpoint additionally requires a timestamped HMAC from the user-scoped mode-0600 key; it never accepts unsigned localhost requests.
 - **Env is captured at daemon start**: the ACP backend registry (`AGENTPRISM_BACKENDS`, `AGENTPRISM_DEFAULT_BACKEND`, …) is resolved once by the daemon. Clients are keyed by their env fingerprint: a shim whose relevant env differs gets its **own daemon family** (one daemon per distinct env, never contending), so changing the env and restarting the host always takes effect; `--in-process` remains the escape hatch for a fully private server.
@@ -131,7 +138,7 @@ url = "http://127.0.0.1:29888/mcp"
 
 One registration — global or per-project — serves every project: each run names its project via the required `projectDir` tool argument, and runId actions need no project at all.
 
-The daemon must be running before an HTTP-only host connects (`daemon start`); any stdio shim usage also keeps it alive. One endpoint serves both protocol eras. Legacy clients retain the full 2025-11-25 Streamable HTTP contract: per-session `Mcp-Session-Id`, SSE with priming events and `Last-Event-ID` resumability, `DELETE` termination, and 404-driven re-initialize. Modern clients negotiate through `server/discover` and use the SDK's stateless per-request `2026-07-28` handler, `input_required` rounds, response-stream cancellation, and `subscriptions/listen`; modern requests never allocate a legacy daemon session.
+The daemon must be running before an HTTP-only host connects (`daemon start`); any stdio shim usage also keeps it alive. One endpoint serves both protocol eras. Legacy clients retain the full 2025-11-25 Streamable HTTP contract: per-session `Mcp-Session-Id`, SSE with priming events and `Last-Event-ID` resumability, `DELETE` termination, and 404-driven re-initialize. Modern clients negotiate through `server/discover` and use the SDK's stateless per-request `2026-07-28` handler, response-stream cancellation, and `subscriptions/listen`; modern requests never allocate a legacy daemon session.
 
 ---
 
@@ -163,9 +170,9 @@ If the bin isn't on the host's `PATH`, launch it through `npx` instead:
 }
 ```
 
-`env` here is inherited by the server process **and** by every agent subprocess it spawns (see [Backends & auth](#backends--auth)), so it is where you put `AGENTPRISM_*` settings and any credentials the agent CLIs need. With a form-elicitation-capable MCP client, one structured request lets the user supply provider/model and optional advertised mode/config only for dry-run-observed calls whose effective model is unresolved. Explicit and inherited models, including backend-only specs, are preserved; omitted optional mode/config fields do not trigger a form. For clients without form elicitation, leave `AGENTPRISM_DEFAULT_BACKEND` unset for automatic selection: a model-less call causes the server to probe configured backends without prompting and pin one project default. Set it explicitly to `claude`, `codex`, `opencode`, `pi`, or a registered custom backend name only when the operator wants to force that headless fallback.
+`env` here is inherited by the server process **and** by every agent subprocess it spawns (see [Backends & auth](#backends--auth)), so it is where you put `AGENTPRISM_*` settings and any credentials the agent CLIs need. With an Apps/form-capable MCP client, one durable setup request lets the user supply provider/model and optional advertised mode/config only for dry-run-observed calls whose effective model is unresolved. Explicit and inherited models, including backend-only specs, are preserved; omitted optional mode/config fields do not trigger a form. For clients without form elicitation, leave `AGENTPRISM_DEFAULT_BACKEND` unset for automatic selection: a model-less call causes the server to probe configured backends without prompting and pin one project default. Set it explicitly to `claude`, `codex`, `opencode`, `pi`, or a registered custom backend name only when the operator wants to force that automatic fallback.
 
-After your host reloads, the `workflow` and `repl` tools appear in its tool list.
+After reload, `workflow` and `repl` appear; Apps-capable hosts also discover `workflow_monitor`.
 
 ---
 
@@ -184,381 +191,140 @@ Workflow and REPL are separate skills because their `agent()` signatures and lif
 
 ### Input parameters
 
-The tool publishes a strict config/run/resume/status/result/permissions-response/stop `oneOf`.
-`action` is required in discovery, each branch exposes only its own fields, and mixed branches fail
-at the MCP validation boundary. `config` performs zero-token, no-prompt discovery. Every new run performs static validation and a mocked dry run; capable clients receive a pre-execution agent-configuration form only for calls with unresolved models, and both authored and selected provider/model/mode/config values are included in the final routed checks before admission. Invalid scripts return bounded `status:"rejected"` diagnostics without creating a run ID or reserving background capacity. Execution resource maxima remain runtime clamps;
-status limits are contract bounds and invalid values are MCP Invalid Params (`-32602`).
-Runtime and discovery use the same strict union. Omitted actions, retired action names, and fields
-outside the selected branch are rejected; no compatibility normalizer runs.
+Discovery and runtime use the same strict eight-action `oneOf`:
+config/run/resume/setup-response/status/result/permissions-response/stop.
+Each branch requires its literal `action` and rejects extra fields. Run requires exactly one
+of `script` and `scriptPath`. There are no aliases or completion-wait controls.
 
-| Param | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `action` | `"config" \| "run" \| "resume" \| "status" \| "result" \| "permissions-response" \| "stop"` | yes | — | Canonical discriminator. `resume` continues the exact run ID; `status` returns an immediate snapshot. |
-| `script` | string (non-empty) | run XOR | — | Raw JavaScript workflow script (no Markdown fences). Exactly one of `script`/`scriptPath` is required for run. The first statement **must** be `export const meta = { name, description, phases? }`. Forbidden for resume/status/result/permissions-response/stop. |
-| `scriptPath` | absolute path string | run XOR | — | Absolute path on the **server's filesystem**. Read once as UTF-8 before admission; the content is snapshotted, and later file edits do not change that run. Relative paths and unreadable files are Invalid Params. Forbidden for resume/status/result/permissions-response/stop. |
-| `projectDir` | absolute path string | config/run (daemon) | in-process: the server's own project | Project cwd for discovery and the run store/default execution cwd for execution. Required for config and run on the shared daemon. Resume/status/result/permissions-response/stop locate it from `runId`. |
-| `harnesses` | backend-name array (1–16) | config only | every registered backend | Limit no-prompt discovery to these backends. |
-| `modelSpecs` | model-spec array (1–16) | config only | — | Select these exact routed models before reading their model-specific mode and config-option catalogs. |
-| `modelFilter` | string (1–128) | config only | provider/group summaries | Case-insensitive substring or `/regular expression/` used to return bounded matching model ids. |
-| `background` | boolean | run/resume | `false` | Acknowledge after durable admission. Resume keeps the exact input run ID. |
-| `args` | any JSON value | run only | — | Value exposed to the script as global `args`; immutable after admission. |
-| `maxAgents` | integer > 0 | no | `1000` | Max agents allowed in this run (engine cap `MAX_AGENTS_PER_RUN`). Values below 1 are clamped up to 1. |
-| `concurrency` | integer > 0 | no | engine default | Max concurrent agents. **Clamped to 16** (the runtime max) by the engine — never rejected. |
-| `agentRetries` | integer ≥ 0 | no | engine default | Retry attempts for recoverable agent failures. **Clamped to 3** (the runtime max). |
-| `checkpointReplies` | object | resume only | — | Map this run's `checkpointContext.callIndex` to a strict-JSON decision. The durable first answer wins. |
-| `runId` | engine run ID | resume/status/result/permissions-response/stop | — | Resume continues and returns this exact ID. Project-scoped capability; `^[a-z0-9]+-[a-z0-9]+$`, at most 128 characters. |
-| `permissionId` | UUID | permissions-response | — | Opaque live request id from status. |
-| `response` | ACP permission response | permissions-response | — | Exact advertised `{ outcome:{ outcome:"selected", optionId } }`, or `{ outcome:{ outcome:"cancelled" } }`. |
-| `offset` | non-negative safe integer | result only | `0` | UTF-8 byte offset into the exact serialized JSON. Use the previous response's `endOffset`; offsets inside a multi-byte code point fail. |
-| `maxBytes` | integer 4–16,384 | result only | `16,384` | Maximum UTF-8 bytes in one exact result chunk. Values are rejected, never clamped. |
-| `lastN` | integer 1–50 | status/stop only | `20` | Latest matching journal calls. Filtering happens before this selection. |
-| `labelGlob` | string | status/stop only | all calls | Non-empty, at most 128 Unicode code points. Case-sensitive whole-label `*`/`?` glob with backslash escaping; trailing backslash is literal. Only known agent labels match. |
-| `logLines` | integer 0–50 | status/stop only | `20` | Latest run-log lines. |
+| Field | Actions | Contract |
+| --- | --- | --- |
+| `requestId` | run, resume | Required caller-generated retry identity, 1–128 characters matching `[A-Za-z0-9][A-Za-z0-9._:-]*`. Keep it and the complete input unchanged when retrying a lost acknowledgement. Use a new ID for a new operation. |
+| `script`, `scriptPath` | run | Raw JavaScript or an absolute server-side regular-file path, exactly one. First statement: `export const meta = { name, description, phases? }`. The accepted UTF-8 snapshot is at most 1 MiB and immutable. |
+| `projectDir` | config, run | Absolute project directory, required on the shared daemon; defaults to the server's project under `--in-process`. Other actions locate the project through `runId`. |
+| `args` | run | Strict-JSON script input, immutable after acceptance. |
+| `maxAgents`, `concurrency`, `agentRetries` | run, resume | Runtime limits; default agent cap 1000, concurrency clamped to 16, retries clamped to 3. Resolved limits are returned. |
+| `harnesses`, `modelSpecs`, `modelFilter` | config | Optional backend names, exact routed models, and bounded model substring or `/regex/` filter for no-prompt discovery. |
+| `runId` | resume, setup-response, status, result, permissions-response, stop | Exact persisted identity, matching `^[a-z0-9]+-[a-z0-9]+$`, at most 128 characters. Resume continues the exact run ID. |
+| `checkpointReplies` | resume | Map `checkpointContext.callIndex` to the explicit kind-valid JSON answer. The first durable answer wins. |
+| `setupId`, `response` | setup-response | Exact pending setup UUID, with `{ action:"accept", content:{...} }`, `{ action:"decline" }`, or `{ action:"cancel" }`. Accept content must satisfy the persisted `requestedSchema`. |
+| `permissionId`, `response` | permissions-response | Exact pending UUID and `{ outcome:{ outcome:"selected", optionId } }` or `{ outcome:{ outcome:"cancelled" } }`. Only an advertised option ID is accepted; response `_meta` is forbidden. |
+| `lastN`, `labelGlob`, `logLines` | status, stop | Bounded inspection: latest 1–50 calls (default 20), case-sensitive whole-label glob, and 0–50 log lines (default 20). |
+| `offset`, `maxBytes` | result | Exact UTF-8 JSON paging: offset defaults to zero; maxBytes is 4–16,384 (default 16,384). Continue at the previous `endOffset`. |
+| `callIndex` | stop | Cancel one uniquely matching live agent; its slot resolves to `null` with `AGENT_CANCELLED`, while siblings continue. |
+| `forceOwner` | whole-run stop | Explicitly permit termination of a superseded owner after identity revalidation; may interrupt sibling runs. Forbidden with `callIndex`. |
 
-Agent attempts have no elapsed-time or idle budget. They remain live until completion, failure, or
-explicit call/run cancellation. Fixed protocol startup, cancellation-grace, cleanup, lease, and
-transport bounds remain internal safety controls, not workflow inputs. Resume requests resolve
-their own retry and concurrency limits.
-
-Discover a backend's live catalog before pinning model, mode, or `configOptions`:
+Discover exact live model, mode, and config values before pinning them:
 
 ```json
-{ "action": "config", "projectDir": "/absolute/project", "harnesses": ["claude"], "modelFilter": "opus" }
+{ "action":"config", "projectDir":"/absolute/project", "harnesses":["codex"], "modelFilter":"gpt" }
 ```
 
-After choosing a model, inspect its exact option domain with `{ "action": "config", "projectDir": "/absolute/project", "modelSpecs": ["claude/opus[1m]"] }`. Every successful entry preserves raw mode ids, names, descriptions, and `_meta`. For trusted implementation/review workflows use Claude `bypassPermissions` or Codex `agent` when advertised. Claude `auto` uses a model classifier and may request permission; it is not full-access autonomy. No workflow is started and no prompt is sent.
+Catalogs preserve raw mode IDs, names, descriptions, and `_meta`. For trusted work, choose
+Claude `bypassPermissions` or Codex `agent` when advertised. Claude `auto` uses a model classifier and may request permission.
 
-Example run arguments (validation is automatic):
+### Durable acceptance and setup
 
 ```json
 {
-  "action": "run",
-  "script": "export const meta = { name: 'review', description: 'review a diff' };\nconst r = await agent('Review this diff and summarize risks:\\n' + args.diff);\nreturn r;",
-  "args": { "diff": "diff --git a/x b/x\n+console.log(1)" },
-  "concurrency": 4
+  "action":"run",
+  "requestId":"review-20260908-1",
+  "projectDir":"/absolute/project",
+  "script":"export const meta = { name: 'review', description: 'review the repository', model: 'codex' }; return await agent('Review the repo');"
 }
 ```
 
-Compact reader/worktree fan-out for `script`:
+The request validates its input and source structure, acquires the run lease, and durably records
+the immutable script, args, operation identity, limits, and preparation state before returning.
+Slow mock execution, backend probes, and human setup happen after this acknowledgement. Malformed
+source fails before acceptance; a later validation or preparation failure remains an inspectable
+failed run. A repeated `requestId` with the same input finds the original run even if a script file
+has changed or disappeared. Reusing it with different input fails without starting work.
 
-```js
-export const meta = { name: "fan-out", description: "Audit and experiment independently" };
-return await parallel([
-  () => agent("Audit src/api without changing files.", {
-    label: "audit:api",
-  }),
-  () => agent("Try the worker fix in isolation; return a unified diff.", {
-    label: "try:worker", isolation: "worktree",
-  }),
-]);
-```
-
-The worktree edits are discarded. Both completed calls use deterministic journal identity, and an
-MCP continuation reuses the same run's persisted journal and configuration.
-
-The same run delivered from disk:
-
-```json
-{
-  "action": "run",
-  "scriptPath": "/absolute/path/to/review.workflow.js",
-  "args": { "target": "src/auth.ts" }
-}
-```
-Immediate status example:
-
-```json
-{
-  "action": "status",
-  "runId": "mabc1234-k9x2pq",
-  "lastN": 10,
-  "labelGlob": "plan-review-*",
-  "logLines": 20
-}
-```
-
-Background start and bounded collection:
-
-```json
-{
-  "action": "run",
-  "script": "export const meta = { name: 'review', description: 'review a change' };\nconst report = await agent('Review ' + args.target, { label: 'review' });\nreturn report;",
-  "args": { "target": "src/auth.ts" },
-  "background": true,
-  "concurrency": 4
-}
-```
-
-```json
-{
-  "runId": "mabc1234-k9x2pq",
-  "status": "running",
-  "limits": {
-    "maxAgents": 1000,
-    "concurrency": 4,
-    "agentRetries": 0
-  }
-}
-```
-
-```json
-{ "action": "status", "runId": "mabc1234-k9x2pq" }
-```
-
-Stop a live run and return its final bounded snapshot:
-
-```json
-{ "action": "stop", "runId": "mabc1234-k9x2pq", "lastN": 10, "logLines": 20 }
-```
-
-Cancel one in-flight agent and return a live bounded snapshot without aborting the run:
-
-```json
-{ "action": "stop", "runId": "mabc1234-k9x2pq", "callIndex": 7, "lastN": 10, "logLines": 20 }
-```
-
-The selected form settles that call to `null` with `AGENT_CANCELLED`, skips retries, and leaves
-sibling calls running. `labelGlob` filters only the returned snapshot. A missing, settled,
-checkpoint, terminal, or ambiguous scoped index is an input error listing the in-flight
-call-index/label pairs.
-
-### Output
-
-The tool returns both machine-readable `structuredContent` and a human-readable text block. Discovery and pre-admission rejection have no run ID:
+An accepted response is always an acknowledgement, including when work finishes quickly:
 
 ```ts
-interface WorkflowConfigToolResult {
-  action: "config";
-  ok: boolean;
-  harnessOptions: Array<{
-    backendId: string;
-    model?: string;
-    probed: boolean;
-    modes?: { currentModeId: string; availableModes: Array<{ id: string; name: string }> } | null;
-    options: unknown[];
-    error?: string;
-  }>;
-  models: Array<{ backendId: string; hasModelOption: boolean; matches: string[] }>;
-}
-
-interface WorkflowValidationRejected {
-  action: "run";
-  status: "rejected";
-  validation: { ok: false; exitCode: 1 | 2; parse: object; dryRun?: object; warnings: string[] };
-}
-```
-
-A rejected run has `isError:true`, bounded diagnostics, and no `runId`, `scriptUri`, or persistence record. Admitted executions retain the durable engine result shape:
-
-```ts
-interface WorkflowExecutionToolResult {
+type WorkflowOperationAccepted = {
+  accepted: true;
+  requestId: string;
+  duplicate: boolean;
   runId: string;
-  status: "paused" | "completed" | "failed" | "aborted";
-  limits: WorkflowRunLimits;
-  result?: unknown; // present only on a completed run — the script's resolved value
-  tokenUsage?: {
-    input: number;
-    output: number;
-    total: number;
-    cost: number;
-    cacheRead?: number;
-    cacheWrite?: number;
-  };
-  logs?: string[];
-  logTail?: WorkflowLogTail;               // paused/failed/aborted only
-  authContext?: AuthErrorContext;           // auth_required pauses only
-  checkpointContext?: CheckpointContext;   // checkpoint_required pauses only
-  fallbacks?: WorkflowRunFallback[];       // model/modifier/continuation audit; absent when empty
-  checkpointsTaken?: WorkflowCheckpointTaken[]; // resolved checkpoints; absent when empty
-  scriptSource: "inline" | "path" | "stored";
-  scriptUri: string;
-  eventsUri: string; // durable bounded/redacted event stream
-  resultUri?: string; // completed runs with a persisted JSON result
-}
-
-interface WorkflowPendingPermission {
-  version: 1;
-  permissionId: string;
-  runId: string;
-  callIndex: number;
-  backendId: string;
-  label?: string;
-  requestedAt: string;
-  request: RequestPermissionRequest;
-  requestTruncated: boolean;
-}
-
-interface WorkflowBackgroundAccepted {
-  runId: string;
-  status: "running";
+  status: "pending" | "running" | "paused" | "completed" | "failed" | "aborted";
   scriptSource: "inline" | "path" | "stored";
   scriptUri: string;
   eventsUri: string;
-  limits: WorkflowRunLimits;
-  pendingPermissions?: WorkflowPendingPermission[];
-  interaction: { permissionRequests: "may-block"; collectWith: ["run", "resume"]; respondWith: "permissions-response"; elicitation: "available" | "unavailable" };
-}
+  limits: { maxAgents: number; concurrency: number; agentRetries: number };
+  setup?: WorkflowSetup;
+} & (
+  | { action:"run" }
+  | { action:"resume"; continuation: WorkflowContinuationResult }
+);
 
-interface WorkflowResultRetrieval {
-  action: "result";
-  runId: string;
-  status: "completed";
-  resultUri: string;
-  eventsUri?: string; // absent for legacy rows without a durable event stream
-  mimeType: "application/json";
-  encoding: "utf-8";
-  totalBytes: number;
-  offset: number;
-  endOffset: number;
-  hasMore: boolean;
-  chunk: string;
-}
-
-interface WorkflowStatusToolResult<T = unknown> extends WorkflowRunStatus {
-  tokenUsage?: TokenUsage;
-  pendingPermissions?: WorkflowPendingPermission[];
-  outcome?: Omit<WorkflowExecutionToolResult<T>, "scriptSource" | "eventsUri"> & { eventsUri?: string }; // terminal; legacy streams may omit URI
-  scriptUri: string;
-  resultUri?: string;
-  eventsUri?: string;
-  latestActivity?: WorkflowRunLatestActivity[];
-}
-
-interface WorkflowRunLatestActivity {
-  scope: string;
-  callIndex: number;
-  executionStartSeq: number;
-  label: string;
-  phase?: string;
-  timestamp: string;
-  cursor: number;
-  turnCount: number;
-  observedEvents: number;
-  latestText?: string;     // exactly one of latestText / lastToolName
-  lastToolName?: string;
-  tokensObserved?: number;
-  relevance: "current" | "terminal";
-}
-
-interface WorkflowPermissionResponseResult extends WorkflowRunStatus {
-  pendingPermissions?: WorkflowPendingPermission[];
-  permissionResponse: { permissionId: string; runId: string; callIndex: number; outcome: object; respondedAt: string };
-  scriptUri: string;
-  eventsUri?: string;
-  latestActivity?: WorkflowRunLatestActivity[];
-}
-
-interface WorkflowStopResult extends WorkflowRunStatus {
-  stopped: boolean;
-  alreadyTerminal: boolean;
-  scriptUri: string;
-  eventsUri?: string;
-  latestActivity?: WorkflowRunLatestActivity[];
-}
-
-type WorkflowToolResult =
-  | WorkflowResultRetrieval
-  | WorkflowExecutionToolResult
-  | WorkflowBackgroundAccepted
-  | WorkflowStatusToolResult
-  | WorkflowPermissionResponseResult
-  | WorkflowStopResult;
+type WorkflowSetup =
+  | { state:"preparing" }
+  | { state:"input-required"; request: {
+      id: string;
+      kind: "backend-approval" | "agent-configuration";
+      title: string;
+      message: string;
+      requestedSchema: {
+        type:"object";
+        properties: Record<string, unknown>;
+        required: string[];
+        additionalProperties?: false;
+      };
+    } };
 ```
 
-`WorkflowRunFallback.kind` is `"model" | "modifier" | "continuation"`. Continuation entries carry
-an optional flat detail of `{ outcome: "reattached", method: "resume" | "load" }` or
-`{ outcome: "skipped", reason }`; the MCP output schema accepts either shape because the detail is
-additive. Continuation is default-on manager behavior and adds no MCP input.
+It carries no execution result or result URI. Read `status` for the current outcome and `result`
+for exact output. Pending setup appears in status and the App immediately. `setup-response` works
+with every client; no tool request stays open for a human answer. Repeating the same response to
+the same setup ID is idempotent even after execution starts; a conflicting response is rejected.
+Decline, cancel, and a false backend approval retain a cancelled (`aborted`) run in history.
 
-| Execution output field | Shape | Notes |
-| --- | --- | --- |
-| `fallbacks` | `{ callIndex, label, phase?, requestedSpec, resolvedModel?, backendId?, kind, message }[]` | Agent/session continuation diagnostics; absent when empty. |
-| `checkpointsTaken` | `{ callIndex, kind, decision, source }[]` | `source` is `"live"`, `"headless-default"`, `"journal-replay"`, or `"injected"`; paused checkpoints are omitted; absent when empty. |
+Script-declared spawn commands require approval before any probe or live dispatch, unless
+`AGENTPRISM_ALLOW_SCRIPT_BACKENDS=1` is set. Apps/form-capable clients get an agent-configuration
+setup request only for mock-observed calls with unresolved effective models. Authored and inherited
+models, including backend-only specs, are preserved. The saved form includes provider/model choices,
+optional advertised mode/config, phase and label, and bounded credential-redacted task previews.
+Accepted choices are checked against the saved form and current catalog. The full routed preflight
+then persists canonical effective configurations before execution. Raw submitted form fields are
+not retained. Clients without either capability keep the automatic default-backend policy.
 
-`fallbacks` and `checkpointsTaken` appear on foreground execution results and terminal status
-`outcome` objects. MCP exposes no execution-attempt identity or continuation generation.
+### Output and interaction
 
-Resolved `limits` is a common field rather than an execution-detail field: it appears on foreground
-results, background acknowledgements, status, stop status, and terminal status
-`outcome`. Records created by versions that did not persist limits may omit it.
+`status` is a bounded observation. It includes lifecycle state, resolved limits, log and call tails,
+`latestActivity`, live `pendingPermissions`, and `setup` where relevant. Paused or terminal runs add
+`outcome`: exact authored result/full logs on completion, or redacted `logTail` and non-secret
+`authContext`/`checkpointContext` where applicable. Inspecting failed or aborted runs is a successful
+read. Missing, corrupt, and unreadable runs fail clearly. The inherited status projection is capped
+at 24,576 UTF-8 bytes and status text at 8,192; raw terminal outcome has no new envelope cap.
 
-`scriptSource` is an admission-time fact on the direct foreground result or background
-acknowledgement. `"stored"` means `action:"resume"` loaded this run's immutable persisted script.
-It is not persisted, so later status outcomes expose `scriptUri` without inferring admission form.
+Every unanswered script checkpoint pauses with `reason:"checkpoint_required"`. Use the App or:
 
-`status` lets a host distinguish a `completed` run from a `paused` one (resumable via `{ action:"resume", runId }`) without parsing logs. The tool result is flagged `isError` when `status` is `failed` or `aborted`. A `result` field is only present when `status === "completed"`.
-
-A status response extends the shared `WorkflowRunStatus` with resource URIs and `latestActivity`:
-
-```ts
-interface WorkflowRunStatus {
-  runId: string;
-  status: "pending" | "running" | "paused" | "completed" | "failed" | "aborted";
-  workflowName: string;
-  phases: string[];
-  currentPhase?: string;
-  reason?: string;
-  errorCode?: WorkflowErrorCode;
-  limits?: WorkflowRunLimits;
-  logTail: WorkflowLogTail;
-  calls: WorkflowRunCallStatus[];
-  filter: { lastN: number; logLines: number; labelGlob?: string };
-  truncation: WorkflowRunStatusTruncation;
-}
+```json
+{ "action":"resume", "requestId":"review-answer-1", "runId":"mabc1234-k9x2pq", "checkpointReplies":{"1":true} }
 ```
 
-Each call has its deterministic index, known agent/checkpoint attribution, a compact JSON
-`resultPreview`, and redaction/truncation flags. Agent rows also expose a terminal `errorCode`, so
-host-cancelled calls remain visible as `AGENT_CANCELLED`. `limits` contains
-`maxAgents`, `concurrency`, and `agentRetries` as resolved for
-this run (legacy persisted rows may omit it). Ordinary call-status projection never returns script,
-args, prompts, histories, hashes, session IDs, cwd, checkpoint/auth details, or raw journal results;
-a live `pendingPermissions` entry carries a safe ACP projection so the caller can make the decision.
-The private ACP session id is omitted; diagnostic values are credential-redacted and scalar-bounded,
-and the complete ordered exact option-id set must fit within the 64 KiB permission envelope or the
-request is cancelled rather than exposed partially. Sensitive keys and credential-shaped strings are
-redacted before ordinary results are structurally compacted; every
-text scalar and preview is at most 512 UTF-8 bytes. The inherited structured status is at most
-24,576 bytes. `latestActivity` is folded from the validated durable event stream into one latest
-sample per logical call. It reports its source cursor/timestamp, turn/event counts, observed tokens,
-exactly one bounded assistant preview or tool name, and `current`/`terminal` relevance. The same
-`lastN`/`labelGlob` selection applies to it; targeted cancellation, whole-run abort, and restart
-remain visible because the projection is rebuilt from durable records. Legacy or unsafe streams
-omit it. The cap retains newest diagnostics by dropping oldest calls, activity rows, logs, then phases. The accompanying text is formatted
-from the bounded status and capped at 8,192 bytes.
+Use the exact index from `outcome.checkpointContext`. Confirm replies must be boolean, input replies
+strings (including the empty string), and select replies one exact choice. The first answer is
+persisted before continuation. Later conflicting answers cannot replace it. There is no `headless`
+or `default` checkpoint option; lack of a UI, timeout, or dismissal never approves or aborts work.
+SDK users may supply a live `confirm` callback that collects an actual explicit answer.
 
-An unknown, corrupt, or unreadable run returns `isError: true`, no `structuredContent`, and:
+ACP permissions remain live in the owner process and are answered with `permissions-response` from
+the App or a later tool call. Safe projections omit private ACP session IDs, redact diagnostics,
+and preserve complete ordered option IDs within a separate 64 KiB envelope. An unrepresentable
+request is cancelled rather than partially exposed. Owner loss invalidates the original ACP request;
+a successor cannot reconstruct it. Setup and checkpoints, in contrast, are durable waits.
 
-```text
-No workflow run found for runId "<runId>" in this server's project-scoped run store.
-```
+An `AUTH_REQUIRED` pause reports `reason:"auth_required"` and `outcome.authContext`. Configure the
+named backend's credentials out of band, then call `action:"resume"` with a new `requestId` and the
+same `runId`. Continuation uses the immutable stored script, args, cwd, canonical agent configuration,
+journal, event stream, cumulative usage, and checkpoint answers; it never accepts edited input.
+Historical records without current admission or explicit checkpoint provenance remain readable
+where supported but refuse continuation/reuse clearly; start a fresh run.
 
-Reading an existing failed/aborted run with status is still successful (`isError: false`); branch on
-the payload `status`.
-
-Status uses that safe projection and reports `action-required` when a live ACP permission is
-pending. It attaches the request's exact ordered option ids with bounded, redacted presentation
-metadata, but never elicits or changes execution. Form-capable foreground run/resume calls present
-the choice in place; background and form-less clients answer with `permissions-response`. The
-response accepts only the selected exact optionId or cancellation—caller-supplied response `_meta`
-is forbidden—and routes to the daemon generation holding the run lease. The workflow remains running
-and keeps its ACP session/concurrency slot. This state is execution-affine, not a durable pause, and cannot be reconstructed after
-owner loss.
-
-Status retains the 24,576-byte bound,
-redaction, compaction, filtering, and truncation counters, and its text is capped at 8,192 bytes.
-Before terminal state, optional `tokenUsage` is the cumulative live work observed in this execution;
-replayed calls add zero. At terminal state, `outcome` is the foreground-equivalent execution result:
-the authored `result` and full `logs` remain raw and unbounded. Completed foreground and status
-responses add `resultUri`; exact result JSON up to 4,096 UTF-8 bytes is also copied into a text block
-for content-first hosts. Larger results are not duplicated wholesale: the text points to the exact
-result resource and bounded `action:"result"` paging. Status omits the admission-only `scriptSource`
-while retaining `scriptUri`. Top-level and outcome token
-usage are identical. Paused outcomes carry the existing non-secret
-`authContext` or `checkpointContext` used for CLI-login/resume or checkpoint-reply handling. Result
-observability (`fallbacks` and `checkpointsTaken`) stays inside the terminal `outcome`.
-
----
+Full status, outcome, and response fields are documented in the [API reference](../../docs/api.md#status-outcome-and-response-shapes).
 
 ## Run resources
 
@@ -632,10 +398,10 @@ events document is bounded/redacted observability, not an exact result-reconstru
 content strings are credential-redacted and capped at 512 UTF-8 bytes. Query URIs are readable but not subscribable. Integrity failures are explicit rather than
 serving a silently incomplete transcript. See the [API contract](../../docs/api.md#mcp-live-events-resource).
 
-Run/background results contain clearly labelled `resource_link` blocks for the newly admitted
+Run/resume acknowledgements contain clearly labelled `resource_link` blocks for the newly admitted
 script and its durable events stream, and structured `scriptUri`/`eventsUri` fields. Status,
 permission-response, stop, terminal outcome, and result-retrieval responses repeat `eventsUri` and
-the events link whenever that stream exists; legacy rows may omit them. Completed foreground and
+the events link whenever that stream exists; legacy rows may omit them. Completed
 status results also carry `resultUri` and a clearly labelled exact result link. Status,
 permission-response, and stop responses link only the exact run's immutable script. Every URI is
 also present in structured output. Lower-level SDK ancestry is not projected through MCP.
@@ -648,69 +414,30 @@ client `resources` capability to gate these server-offered primitives.
 
 ## Run model
 
-- **Foreground by default.** Omitted/false `background` preserves the synchronous behavior,
-  request cancellation, progress notifications, live checkpoint and ACP-permission elicitation,
-  terminal `isError`, and result shape. Each accepted form response continues the same run inside
-  the original run/resume call.
-- **Detached admission.** `background:true` returns a running acknowledgement with `runId`,
-  `status`, `scriptSource`, `scriptUri`, `eventsUri`, resolved `limits`, and separately labelled
-  script/events resource links
-  after parsing, backend approval, one of four process-local slot reservations, lease acquisition,
-  and successful persistence readback. It never awaits agent or script-body completion. A fifth
-  active-or-starting request returns
-  `Background workflow limit reached (4 active or starting runs). Check an existing run with status and retry.`
-  There is no queue. Foreground and status consume no slot; a durably stopped background
-  run frees its slot immediately even if backend session wind-down is still pending.
-- **Canonical bounded status.** `action:"status"` reads the manager's freshest in-memory snapshot,
-  then its project-scoped persisted store and returns immediately. It is an on-demand read, not a
-  waiting or interaction channel; use the event resource or app-only monitor for continuous progress.
-  Status never parses/runs a script, invokes an agent, elicits permission, asks for backend approval, or leases a live
-  owner. A cold persisted `pending`/`running` row may take a short reconciliation lease and become
-  `paused` / `interrupted` when its owner is dead; live or permission-protected owners and every
-  other status remain unchanged. Run ID possession is the capability; UI `sessionId` listing
-  filters do not apply.
-- **Progress notifications.** When the host includes a `progressToken` with the call, the server streams `notifications/progress` as agents settle (it reports `settled / total` agents plus the current phase). With no `progressToken`, progress is a no-op.
-  Background runs deliberately have no initiating progress channel; the durable events resource and
-  app-only run monitor are their continuous progress surfaces, with status reserved for on-demand snapshots.
-- **Terminal status, not exceptions.** An ordinary pause/fail/abort does **not** throw — the run resolves to a `WorkflowRunResult` with `status` already stamped (`completed | paused | failed | aborted`) plus an optional `reason`/`resetHint`. Only a malformed script (which fails before a run exists) surfaces as an MCP tool error.
-- **Immediate terminal diagnostics.** Paused, failed, and aborted execution results contain a
-  redacted final-20 `logTail` even when empty. The text response renders `recent run log (last X of
-  Y):` before resume guidance. The terminal text is capped at 12,288 UTF-8 bytes; completed results
-  omit this extra tail and preserve the existing full `logs` field.
-- **Same-ID continuation.** `{ action:"resume", runId }` continues that exact paused or failed run
-  with its persisted script, args, canonical effective agent configuration, journal, event stream,
-  cumulative usage, and checkpoint decisions. It never creates a child run, accepts edited inputs,
-  or re-elicits provider/model configuration. Exact journal hits add no provider usage. Old records
-  without valid admission metadata remain observable but require a fresh Run.
-- **Authoritative stop.** `action:"stop"` without `callIndex` is location-independent. A local live run uses its abort controller; a lease-free persisted run is cold-stopped under the lease; a predecessor-owned run gets an idempotent durable stop intent plus signed forwarding to that owner. Final success still requires persisted `aborted` plus a readable matching `stopped` event. Repeating stop on a terminal run is a successful no-op. An aborted run is terminal; edited content always starts a fresh Run.
-- **Targeted agent cancellation.** Adding `callIndex` to `action:"stop"` synchronously routes to the live execution owner, selects one uniquely matching in-flight agent, settles it to `null` with `AGENT_CANCELLED`, and returns a live status. Siblings and the run continue, retries are bypassed, and `labelGlob` remains only an output filter. The cancelled call has a durable failed record but no journal result, so a later resume executes that occurrence live. Call cancellation is not stored as a cross-owner pending intent and is never fabricated after owner loss. `forceOwner` is forbidden with `callIndex`.
-- **Agent configuration.** Before admission, the server mock-executes without tokens to resolve call, agent-definition, tier, phase, and meta models. Only calls with unresolved models require live provider-catalog discovery and a configuration form. That flat form has required provider/model choices, optional provider-scoped mode/config, phase title/detail, label, and a bounded credential-redacted task preview. Already configured calls retain their model/mode/config; backend-only specs are configured, and optional omissions do not trigger elicitation. Accepted selections and preserved authored configurations undergo full routed validation and are persisted together atomically as a complete versioned canonical host snapshot; raw form fields are not stored. Legacy server-to-client elicitation and modern `2026-07-28` `input_required` use the same contract. An uncovered live occurrence is recorded and fails closed forever. Resume inherits the snapshot without eliciting again.
-- **Checkpoints.** Foreground uses MCP elicitation when advertised. Legacy clients use the established
-  server-to-client request; modern clients receive the equivalent SDK `input_required` round, with the
-  paused run/checkpoint identity carried in integrity-protected request state and resumed through the
-  same durable journal. Background never retains a live callback: omitted/`"default"` returns
-  `default ?? true`, `"abort"` becomes failed
-  with `WORKFLOW_ABORTED`, and `"pause"` becomes paused with `checkpoint_required` plus
-  `outcome.checkpointContext`. Resume that same `runId` with `checkpointReplies` keyed by its exact
-  call index. Under the run lease, the first strict-JSON answer is journaled before continuation;
-  identical repeats are idempotent and later conflicts are ignored in favor of that durable answer.
-  Cold reconstruction replays it forever.
-- **Auth pauses.** Status reports `auth_required`/`AUTH_REQUIRED` and the non-secret
-  `outcome.authContext`. Log the named backend CLI in out-of-band, then call
-  `{ action:"resume", runId }` for that same paused run; no MCP credential channel is added.
-- **Retention and process lifetime.** Terminal results are reconstructed from project-scoped
-  persistence and have no MCP TTL; repeated/cold status works until deletion, corruption, or store
-  loss. Runs execute in the shared daemon, so a client disconnect, shim kill, host exit, or session
-  eviction does **not** touch in-flight or background work — the daemon and its runs continue, and
-  any later session of the same project can status/stop them. Work is lost only when the
-  daemon itself dies (signals, `daemon stop`, crash, machine loss) — or, under `--in-process`,
-  whenever that single client-owned process exits: there a client disconnect stops new admissions,
-  disposes the ACP runner, force-kills a stalled backend tree at the deadline, and exits.
-  Construction and
-  cold status/list/stop/resume preflights reconcile a dead owner's durable
-  `pending`/`running` state under its lease to `paused` with `pauseReason: "interrupted"`; completed
-  journal entries remain resumable, while an in-flight unjournaled call can run again. Later
-  persistence after admission is best effort.
+- **Every run is asynchronous.** Run/resume requests acknowledge durable acceptance. Each lifecycle
+  request has a 45-second bound; each active preparation attempt has a 120-second bound. Human
+  setup and agent execution outlive individual requests. There is no workflow completion wait,
+  request-scoped progress stream, or request-abort ownership of accepted work.
+- **Capacity and retries.** At most four preparing or executing runs per project are active, with
+  no queue. Waiting setup consumes capacity. Failed/stopped/paused/completed work releases it.
+  Exact retries return the existing operation and do not consume another slot, even at capacity.
+- **Same-ID continuation.** Resume durably records its caller operation and generation under the
+  run lease before executing. Lost-ack retries reuse that receipt; journal hits add no provider
+  usage. Checkpoint answers and setup receipts cannot be overwritten by a conflicting retry.
+- **Observation and recovery.** Status never waits for work or collects an answer. A cold accepted
+  preparation is recovered under its lease and preserves pending setup IDs. An interrupted admitted
+  execution becomes paused/interrupted for explicit resume. A live lease is never stolen on timeout.
+- **Stop.** Whole-run stop is location independent: it records a durable intent and forwards to the
+  lease owner. Final success requires durable aborted state and a matching stopped event. A bounded
+  control wait may return `control.state:"pending"` with an operation ID. Repeated terminal stop is
+  a successful no-op. Targeted agent cancellation needs a live owner and is not fabricated cold.
+- **Process lifetime.** Disconnect, shim kill, and session eviction leave daemon-owned work alive.
+  A successor routes setup replies, permission replies, and stop/cancel control to a predecessor
+  still holding the lease. Owner process exit can interrupt work; `--in-process` ends with its own
+  client-owned process. There is no cross-machine handoff.
+- **Retention.** Script, events, exact results, and operation receipts use the project store and
+  have no MCP TTL. Deletion/corruption/store loss are explicit boundaries; unreadable accepted
+  identities cannot silently turn into a new execution on retry.
 
 ---
 
@@ -883,7 +610,7 @@ The prompt is intentionally compact: it frames the optional **`task`**, directs 
 
 ## Backends & auth
 
-Each `agent()` call is dispatched to an **ACP agent server** chosen by the call's effective `model`/`tier`. Form-elicitation-capable MCP clients select only observed calls whose effective model is unresolved before execution as described above. For clients without that capability, an explicitly present `AGENTPRISM_DEFAULT_BACKEND` is the fallback. When it is truly unset, the MCP server runs zero-token session/config probes only for workflows that may reach a model-less call, excludes definite probe failures and explicitly empty built-in model catalogs, prefers positive session-open readiness evidence (Codex authorization or Pi's credential-filtered catalog), then falls back to the first session-ready backend whose prompt authentication remains unknown. The selected backend is pinned into validation, call identity, execution, and resume; a later `AUTH_REQUIRED` pauses rather than switching providers. The four built-in backends are:
+Each `agent()` call is dispatched to an **ACP agent server** chosen by the call's effective `model`/`tier`. Apps/form-capable MCP clients select only observed calls whose effective model is unresolved before execution as described above. For clients without that capability, an explicitly present `AGENTPRISM_DEFAULT_BACKEND` is the fallback. When it is truly unset, the MCP server runs zero-token session/config probes only for workflows that may reach a model-less call, excludes definite probe failures and explicitly empty built-in model catalogs, prefers positive session-open readiness evidence (Codex authorization or Pi's credential-filtered catalog), then falls back to the first session-ready backend whose prompt authentication remains unknown. The selected backend is pinned into validation, call identity, execution, and resume; a later `AUTH_REQUIRED` pauses rather than switching providers. The four built-in backends are:
 
 - **Claude** → `@agentclientprotocol/claude-agent-acp` (the Claude Agent SDK over ACP). By default the server resolves that package's bin and runs it under the current Node; if it can't be resolved, it falls back to `npx -y @agentclientprotocol/claude-agent-acp`.
 - **Codex** → `@automatalabs/codex-acp` (a published fork that bakes in the structured-output patch). By default the server resolves that package and runs it under the current Node.
@@ -892,9 +619,13 @@ Each `agent()` call is dispatched to an **ACP agent server** chosen by the call'
 
 Beyond the built-ins, **any ACP agent** can be registered as a named backend via `AGENTPRISM_BACKENDS` (see the table below) and routed to with `agent(p, { model: "<name>" })` — or `"<name>/<inner-model>"` to send `<inner-model>` verbatim as its model config value. Scripts can pass arbitrary session/turn `_meta` to such agents with `agent(p, { meta, promptMeta })`.
 
-A workflow script can also **declare its own backends** in its meta block (`meta.backends: { <name>: { command, args?, env?, sessionMeta? } }`). Because these spawn commands on this machine, they require approval before the run starts: if the connected client supports MCP **elicitation**, the user is asked to approve each unique spawn config; otherwise the call fails with an informative error naming the `AGENTPRISM_ALLOW_SCRIPT_BACKENDS=1` env opt-in. Approvals remain session-sticky on legacy connections and are integrity-bound to the active multi-round-trip call on stateless modern connections. Host-registered names (`AGENTPRISM_BACKENDS`) always win over script declarations of the same name.
+A workflow script can **declare its own backends** in `meta.backends` as
+`{ <name>: { command, args?, env?, sessionMeta? } }`. These commands require a durable
+`backend-approval` setup answer before any probe or live dispatch, unless
+`AGENTPRISM_ALLOW_SCRIPT_BACKENDS=1` is configured. Every client can answer with `setup-response`;
+repeat answers are scoped to the saved setup ID. Host-registered names always win over declarations.
 
-**Authentication belongs to the agents, not this server.** Claude, Codex, and OpenCode use their normal CLI credentials; pi uses the selected provider's environment key or `~/.pi/agent/auth.json`. There is no separate auth state for an MCP host to inspect or manage. In particular, a successful no-prompt config probe means session/config discovery succeeded, not that ACP universally proved first-prompt authentication; ambient CLI credentials are not observable through generic runner bookkeeping, so automatic default selection reports unknown readiness honestly where necessary. If a run genuinely hits expired/missing credentials, the backend returns ACP `AUTH_REQUIRED` and the managed run **pauses** with `reason: "auth_required"` plus a non-secret `authContext` naming the backend and advertised methods: configure that credential out-of-band, then call `workflow` with `{ action:"resume", runId }` — that exact run continues from its stored script, args, canonical agent configuration, and journal on the same pinned backend. Programmatic auth flows (env-var/gateway credential injection, LLM provider routing) live in the [`@automatalabs/workflows`](../workflows) SDK runner APIs for hosts that embed the engine directly.
+**Authentication belongs to the agents, not this server.** Claude, Codex, and OpenCode use their normal CLI credentials; pi uses the selected provider's environment key or `~/.pi/agent/auth.json`. There is no separate auth state for an MCP host to inspect or manage. In particular, a successful no-prompt config probe means session/config discovery succeeded, not that ACP universally proved first-prompt authentication; ambient CLI credentials are not observable through generic runner bookkeeping, so automatic default selection reports unknown readiness honestly where necessary. If a run genuinely hits expired/missing credentials, the backend returns ACP `AUTH_REQUIRED` and the managed run **pauses** with `reason: "auth_required"` plus a non-secret `authContext` naming the backend and advertised methods: configure that credential out-of-band, then call `workflow` with `{ action:"resume", requestId, runId }` — that exact run continues from its stored script, args, canonical agent configuration, and journal on the same pinned backend. Programmatic auth flows (env-var/gateway credential injection, LLM provider routing) live in the [`@automatalabs/workflows`](../workflows) SDK runner APIs for hosts that embed the engine directly.
 
 ---
 
@@ -906,7 +637,7 @@ All settings are read from the environment of the `agentprism-workflow` process 
 | --- | --- | --- |
 | `AGENTPRISM_DEFAULT_BACKEND` | unset | Explicit fallback backend used when an `agent()` call's model/tier does not pin a provider: `claude`, `codex`, `opencode`, `pi`, or a registered custom backend name. Form-eliciting clients select only calls with unresolved models; otherwise MCP auto-selects a project default when this variable is absent. If explicitly present but empty/unknown, historical runner behavior falls back to Claude. |
 | `AGENTPRISM_BACKENDS` | — | Custom ACP backends as a JSON object: `{"<name>": {"command": "…", "args": […], "env": {…}, "sessionMeta": {…}}}`. Registered names route `model`/`tier` specs **before** built-in heuristics; `claude`/`codex`/`opencode`/`pi` are reserved. |
-| `AGENTPRISM_ALLOW_SCRIPT_BACKENDS` | — | `1`/`true` approves **script-declared** `meta.backends` headlessly. Only needed for clients without elicitation support — eliciting clients are prompted per spawn config instead. Understand the risk: this lets any workflow script spawn arbitrary commands. |
+| `AGENTPRISM_ALLOW_SCRIPT_BACKENDS` | — | `1`/`true` approves **script-declared** `meta.backends` headlessly. Otherwise each accepted run exposes durable backend-approval setup before probing or execution. Understand the risk: this lets any workflow script spawn arbitrary commands. |
 | `AGENTPRISM_ACP_INIT_TIMEOUT_MS` | `60000` | Deadline for a backend's one-time ACP `initialize` handshake; a command that is not an ACP server fails fast with a clear error instead of hanging. |
 | `AGENTPRISM_ACP_POOL_SIZE` | `1` | Long-lived ACP server processes to keep **per backend**. Each pooled process multiplexes many concurrent sessions; raise it to spread concurrent load across processes. Clamped to ≥ 1. |
 | `AGENTPRISM_CLAUDE_ACP_CMD` | — | Override the command used to launch the Claude ACP server. When set, the default resolution/`npx` fallback is bypassed. |
@@ -940,7 +671,7 @@ const run = await runDynamicWorkflow(
 console.log(run.status, run.result);
 ```
 
-This MCP-server package does export its own building blocks, for hosts that want to mount the same surface on a transport they control rather than the default stdio one. `createWorkflowServer(runner)` registers the `workflow` and `repl` tools, the two authoring skills (plus their `skills/list`, `skills/get`, resource-read, and directory-read surface), app-only `workflow-events` and `workflow-runs` tools, and the `author-workflow` prompt. The `repl` workspaces default to a private client-presence ledger and a server-owned eval-break channel. `CreateWorkflowServerOptions` exposes `protocolEra` for SDK serving factories, `requestStateCodec` for deployments that need a durable/shared modern multi-round-trip key, plus `replRunner`, `replPresence`, `replClientId`, `replEvalBreakChannel`, and `replDrainBoundMs` for host lifecycle integration (the daemon passes shared instances):
+This MCP-server package does export its own building blocks, for hosts that want to mount the same surface on a transport they control rather than the default stdio one. `createWorkflowServer(runner)` registers the `workflow` and `repl` tools, the two authoring skills (plus their `skills/list`, `skills/get`, resource-read, and directory-read surface), the capability-gated `workflow_monitor` launcher, app-only `workflow-events`, `workflow-runs`, and `workflow-notifications` tools, and the `author-workflow` prompt. The `repl` workspaces default to a private client-presence ledger and a server-owned eval-break channel. `CreateWorkflowServerOptions` exposes `protocolEra` for SDK serving factories, plus `replRunner`, `replPresence`, `replClientId`, `replEvalBreakChannel`, and `replDrainBoundMs` for host lifecycle integration (the daemon passes shared instances). Workflow setup and continuation use durable run state; the server has no request-state codec or token verifier:
 
 ```ts
 import { createWorkflowServer, WorkflowPermissionBroker } from "@automatalabs/mcp-server";
@@ -958,15 +689,15 @@ await serveStdio(({ era }) => createWorkflowServer(runner, { protocolEra: era, p
 
 > **Use an SDK serving entry for dual-era hosting.** A hand-constructed server connected directly to `StdioServerTransport` intentionally serves only the legacy era. `serveStdio(factory)` performs the official modern/legacy arbitration while registering each tool once through the factory. The bundled `main()` additionally supplies its internal relay transport, whose worker-thread stdin reader can fire the out-of-band eval-break for a fully synchronous runaway; a vanilla stdio transport remains bounded by the per-eval deadline for that case.
 
-The REPL-specific exports are `replToolInputShape` / `replToolOutputShape` (the tool's Zod input/output schemas), the `ReplToolOptions` type, `createReplProjectState` / `ensureReplWorkspace` / `disposeReplProjectState` / `resetReplProjectState` and the `ReplProjectState` type (per-project workspace state), and `ReplPresenceLedger` (the client-presence drain). Other workflow-side exports include the individual-validator catalog `workflowToolInputShape`, canonical `workflowToolInputBranches` / `workflowToolCanonicalInputSchema`, compatibility-normalizing `workflowToolInputSchema` / `parseWorkflowToolInput`,
+The REPL-specific exports are `replToolInputShape` / `replToolOutputShape` (the tool's Zod input/output schemas), the `ReplToolOptions` type, `createReplProjectState` / `ensureReplWorkspace` / `disposeReplProjectState` / `resetReplProjectState` and the `ReplProjectState` type (per-project workspace state), and `ReplPresenceLedger` (the client-presence drain). Other workflow-side exports include the individual-validator catalog `workflowToolInputShape`, canonical `workflowToolInputBranches` / `workflowToolCanonicalInputSchema`, strict `workflowToolInputSchema` / `parseWorkflowToolInput`,
 `clampWorkflowInput`,
 `CreateWorkflowServerOptions`,
-`WorkflowExecuteToolInput`, `WorkflowResumeToolInput`, `WorkflowStatusToolInput`, `WorkflowPermissionResponseToolInput`, `WorkflowStopToolInput`,
-`WorkflowExecutionToolResult`, `WorkflowBackgroundAccepted`,
+`WorkflowExecuteToolInput`, `WorkflowResumeToolInput`, `WorkflowSetupResponseToolInput`, `WorkflowStatusToolInput`, `WorkflowPermissionResponseToolInput`, `WorkflowStopToolInput`,
+`WorkflowExecutionOutcome`, `WorkflowOperationAccepted`, `WorkflowSetupResponseResult`,
 `WorkflowRunLatestActivity`,
 `WorkflowStatusToolResult`, `WorkflowPermissionResponseResult`, `WorkflowStopResult`,
-`WorkflowToolResult`, `WorkflowPermissionBroker`, `WorkflowPendingPermission`, `MAX_BACKGROUND_RUNS`,
-`workflowToolOutputShape` / `toWorkflowToolResult`,
+`WorkflowToolResult`, `WorkflowPermissionBroker`, `WorkflowPendingPermission`, `MAX_ACTIVE_RUNS`,
+`workflowToolOutputShape` / `toWorkflowExecutionOutcome`,
 `createProgressReporter`, `installMcpServerLifecycle` / `SHUTDOWN_DEADLINE_MS`, and lifecycle
 types `McpServerLifecycle`, `McpServerLifecycleOptions`, `McpServerShutdownReason`, and
 `WorkflowServerControl`, plus a `main()` that runs the default stdio server. For anything beyond

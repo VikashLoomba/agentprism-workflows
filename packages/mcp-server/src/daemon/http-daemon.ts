@@ -16,7 +16,6 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import {
   createMcpHandler,
-  createRequestStateCodec,
   isJsonContentType,
   isLegacyRequest,
   type ServerNotifier,
@@ -34,11 +33,12 @@ import { workflowRunEventsUri } from "../workflow-resources.js";
 import { WorkflowProjectRegistry } from "../project-registry.js";
 import { ReplPresenceLedger } from "../repl-presence.js";
 import { WorkflowPermissionBroker } from "../workflow-permissions.js";
+import { workflowLifecycle } from "../workflow-lifecycle.js";
+import { workflowToolInputBranches } from "../workflow-tool-input.js";
 import { DAEMON_NAME, HEALTHZ_PATH, MCP_ENDPOINT_PATH, REPL_DRAIN_BOUND_MS } from "./constants.js";
 import { envFingerprint, isSupersededBy } from "./daemon-info.js";
 import { BoundedEventStore } from "./event-store.js";
 import { validateRequest } from "./middleware.js";
-import { loadOrCreateRequestStateKey } from "./request-state.js";
 import {
   loadOrCreateRunControlKey,
   RUN_CONTROL_PATH,
@@ -242,6 +242,12 @@ function isInternalRunControlRequest(value: unknown): value is InternalRunContro
       isPermissionResponse(row.response) &&
       keys.join(",") === "action,operationId,permissionId,response,runId";
   }
+  if (row.action === "respond-setup") {
+    return keys.join(",") === "action,operationId,response,runId,setupId" &&
+      workflowToolInputBranches["setup-response"].safeParse({
+        action: "setup-response", runId: row.runId, setupId: row.setupId, response: row.response,
+      }).success;
+  }
   return row.action === "cancel-agent" &&
     Number.isSafeInteger(row.callIndex) &&
     (row.callIndex as number) >= 0 &&
@@ -346,6 +352,7 @@ export async function createDaemon(options: CreateDaemonOptions): Promise<Daemon
     ownInstanceId,
     key: runControlKey,
     permissionBroker,
+    respondSetup: (context, input) => workflowLifecycle(context, options.runner).respond(input),
     log,
   });
   // The REPL client-presence ledger: every session touches the projects it addresses; on
@@ -367,12 +374,6 @@ export async function createDaemon(options: CreateDaemonOptions): Promise<Daemon
   let boundPort = options.port;
   let modernInflight = 0;
 
-  // One family-scoped integrity key serves every per-request modern server instance and its
-  // successor daemons. No authorization state is accepted from an unverified requestState token.
-  const requestStateCodec = createRequestStateCodec<unknown>({
-    key: loadOrCreateRequestStateKey(familyFingerprint),
-    bind: (ctx) => ctx.mcpReq.method,
-  });
   let modernHandler!: ReturnType<typeof createMcpHandler>;
   const modernNotifier: ServerNotifier = {
     toolsChanged: () => modernHandler.notify.toolsChanged(),
@@ -392,7 +393,6 @@ export async function createDaemon(options: CreateDaemonOptions): Promise<Daemon
         replDrainBoundMs,
         replEvalBreakChannel: options.evalBreakChannel,
         protocolEra: "modern",
-        requestStateCodec,
         disconnectReplClientOnClose: true,
         modernNotifier,
         runControl,

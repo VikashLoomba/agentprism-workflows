@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { WorkflowAgentCallCancellation, WorkflowManager } from "@automatalabs/workflows";
 import { ProtocolError, ProtocolErrorCode } from "@modelcontextprotocol/server";
 
-import type { WorkflowProjectRegistry } from "../project-registry.js";
+import type { ProjectContext, WorkflowProjectRegistry } from "../project-registry.js";
+import type { WorkflowSetupResponseToolInput } from "../workflow-tool-input.js";
 import { requireDurableStoppedRun } from "../workflow-stop.js";
 import {
   WorkflowPermissionBroker,
@@ -65,6 +66,7 @@ export interface WorkflowRunControlRouter {
     manager: WorkflowManager,
     input: { runId: string; permissionId: string; response: WorkflowPermissionDecisionResponse },
   ): Promise<WorkflowPermissionResponseAcknowledgement>;
+  respondSetup(manager: WorkflowManager, input: WorkflowSetupResponseToolInput): Promise<void>;
 }
 
 export type InternalRunControlRequest =
@@ -77,6 +79,13 @@ export type InternalRunControlRequest =
       action: "respond-permission";
       permissionId: string;
       response: WorkflowPermissionDecisionResponse;
+    }
+  | {
+      operationId: string;
+      runId: string;
+      action: "respond-setup";
+      setupId: string;
+      response: WorkflowSetupResponseToolInput["response"];
     };
 
 export type InternalRunControlResponse =
@@ -88,6 +97,7 @@ export type InternalRunControlResponse =
       outcome: "permission-responded";
       acknowledgement: WorkflowPermissionResponseAcknowledgement;
     }
+  | { ok: true; outcome: "setup-responded" }
   | { ok: false; code: "UNKNOWN_RUN" | "NOT_OWNER" | "INVALID_OPERATION" | "INTERNAL_ERROR"; message: string };
 
 interface ResolvedOwner {
@@ -103,6 +113,7 @@ export interface DaemonRunControlOptions {
   ownInstanceId: string;
   key: Uint8Array;
   permissionBroker?: WorkflowPermissionBroker;
+  respondSetup?: (context: ProjectContext, input: WorkflowSetupResponseToolInput) => void | Promise<void>;
   log?: (line: string) => void;
   fetch?: typeof fetch;
   kill?: (pid: number, signal: NodeJS.Signals) => void;
@@ -253,10 +264,17 @@ export class DaemonRunControl implements WorkflowRunControlRouter {
       return this.applyWholeIntent(manager, intent);
     }
 
-    if (!manager.getRun(request.runId)) {
+    if (request.action !== "respond-setup" && !manager.getRun(request.runId)) {
       return { ok: false, code: "NOT_OWNER", message: `Daemon has no live run ${request.runId}` };
     }
     try {
+      if (request.action === "respond-setup") {
+        await this.respondSetupLocally(context, {
+          action: "setup-response", runId: request.runId, setupId: request.setupId,
+          response: request.response,
+        });
+        return { ok: true, outcome: "setup-responded" };
+      }
       if (request.action === "list-permissions") {
         return {
           ok: true,
@@ -418,6 +436,48 @@ export class DaemonRunControl implements WorkflowRunControlRouter {
       );
     }
     return response.acknowledgement;
+  }
+
+  private async respondSetupLocally(context: ProjectContext, input: WorkflowSetupResponseToolInput): Promise<void> {
+    if (!this.options.respondSetup) {
+      throw new ProtocolError(ProtocolErrorCode.InternalError, "Daemon workflow setup handler is unavailable.");
+    }
+    // The lifecycle validates the exact stored setup ID and immutable response receipt,
+    // and acquires a cold preparation lease only after the previous owner is gone.
+    await this.options.respondSetup(context, input);
+  }
+
+  async respondSetup(manager: WorkflowManager, input: WorkflowSetupResponseToolInput): Promise<void> {
+    const context = this.options.projects.storeFor(input.runId);
+    if (!context) {
+      throw new ProtocolError(ProtocolErrorCode.InvalidParams, `No workflow run found for ${input.runId}`);
+    }
+    const owner = manager.getRun(input.runId) ? undefined : await this.resolveOwner(manager, input.runId);
+    if (!owner) {
+      await this.respondSetupLocally(context, input);
+      return;
+    }
+    if (!this.controlCapable(owner)) {
+      throw new ProtocolError(ProtocolErrorCode.InvalidParams,
+        actionableOwnerMessage(input.runId, owner, "setup response"));
+    }
+    let response: InternalRunControlResponse;
+    try {
+      response = await this.post(owner, {
+        operationId: randomUUID(), runId: input.runId, action: "respond-setup",
+        setupId: input.setupId, response: input.response,
+      });
+    } catch (error) {
+      throw new ProtocolError(ProtocolErrorCode.InternalError,
+        `${actionableOwnerMessage(input.runId, owner, "setup response")} Retry the identical setup response; any committed answer remains recorded. ${String(error)}`);
+    }
+    if (!response.ok || response.outcome !== "setup-responded") {
+      throw new ProtocolError(
+        response.ok || response.code === "INTERNAL_ERROR"
+          ? ProtocolErrorCode.InternalError : ProtocolErrorCode.InvalidParams,
+        response.ok ? "Owner returned an invalid setup-response acknowledgement." : response.message,
+      );
+    }
   }
 
   async control(

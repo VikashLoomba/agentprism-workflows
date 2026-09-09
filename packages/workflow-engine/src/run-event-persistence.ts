@@ -534,6 +534,8 @@ function isJournalEntry(value: unknown, projected: boolean): boolean {
 }
 
 function isCallRecord(value: unknown, projected: boolean): boolean {
+  // Historical event observation remains readable, including the retired "headless"
+  // origin. Execution reuse is separately gated by explicit checkpoint provenance.
   if (!isObject(value)) return false;
   const text = projected ? isProjectedText : isString;
   if (

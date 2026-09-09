@@ -5,7 +5,7 @@
 ## Same-run continuation journal
 
 Each `agent()` and `checkpoint()` result is journaled under a monotonic call index and identity hash.
-MCP `{ action:"resume", runId }` reloads the same run's persisted script, args, canonical effective
+MCP `{ action:"resume", requestId, runId }` reloads the same run's persisted script, args, canonical effective
 agent configuration, journal, events, cumulative usage, and checkpoint decisions. It returns the
 same `runId`; there is no public execution-attempt or child-run model.
 
@@ -14,10 +14,13 @@ sorted `configOptions`, `tier`, `phase`, `agentType`, resolved agent definition,
 Exact journal hits reconstruct completed calls without current provider usage. Eligible interrupted
 ACP calls may reattach at the live boundary. New live usage is added to the prior cumulative total.
 
-The host persists a versioned canonical admission snapshot before execution. Same-ID continuation
+The host persists a format-2 canonical admission snapshot before execution. Same-ID continuation
 uses it without new provider/model elicitation. Missing, invalid, or uncovered admission metadata
 fails closed. Checkpoint replies are first-writer-wins under the run lease and become permanent
-journal facts.
+journal facts with `checkpointDecision:"explicit-v1"`. Historical ambiguous/automatic answers and
+missing admission metadata cannot authorize execution; inspect them read-only and start a fresh
+run. Retry the same request ID with identical inputs after a lost acknowledgement; a new
+continuation needs a fresh ID.
 
 ## <a name="custom-backends-metabackends"></a>Custom backends — `meta.backends`
 
@@ -36,9 +39,11 @@ export const meta = {
 };
 ```
 
-Script-declared backends spawn commands on the host and are trust-gated before admission. The MCP
-server obtains explicit approval; SDK hosts use `allowScriptBackends`, `ExecOptions.scriptBackends`,
-or their configured environment policy. A declined backend aborts admission rather than rerouting.
+Script-declared backends spawn commands on the host and are trust-gated before live dispatch. The MCP
+server first accepts an inspectable run, then exposes a durable backend-approval setup request.
+Answer its exact `setupId` through `setup-response`; a decline leaves an inspectable aborted run.
+SDK hosts use `allowScriptBackends`, `ExecOptions.scriptBackends`, or their configured environment
+policy. A declined backend never reroutes to another provider.
 Host-registered names win. Approved canonical backend definitions are stored in the run's admission
 snapshot so continuation never re-elicits or changes them.
 

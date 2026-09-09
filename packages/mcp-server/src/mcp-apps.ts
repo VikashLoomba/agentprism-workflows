@@ -4,8 +4,6 @@ import type { ClientCapabilities } from "@modelcontextprotocol/server";
 export const EXTENSION_ID = "io.modelcontextprotocol/ui";
 /** Exact MCP Apps HTML resource MIME type. */
 export const RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
-/** Deprecated flat tool metadata key retained for older Apps hosts. */
-export const RESOURCE_URI_META_KEY = "ui/resourceUri";
 
 export interface UiCapability {
   mimeTypes?: unknown;
@@ -23,13 +21,12 @@ export function supportsMcpApps(capabilities: ClientCapabilities | undefined): b
   return Array.isArray(ui?.mimeTypes) && ui.mimeTypes.includes(RESOURCE_MIME_TYPE);
 }
 
-/** Emit the current nested key and the deprecated flat key for older Apps hosts. */
+/** Attach the monitor through the current MCP Apps metadata contract. */
 export function appResourceToolMeta(resourceUri: string, visibility?: readonly string[]): Record<string, unknown> {
   return {
     ui: {
       resourceUri,
       ...(visibility === undefined ? {} : { visibility: [...visibility] }),
     },
-    [RESOURCE_URI_META_KEY]: resourceUri,
   };
 }

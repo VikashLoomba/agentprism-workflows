@@ -109,11 +109,11 @@ log(`${confirmed.length}/${candidates.length} confirmed; complete=${gaps.complet
 return { confirmed, missing: gaps.missing ?? [] };
 ```
 
-## Automatic validation before admission
+## Automatic preparation before live execution
 
-The MCP `workflow` tool validates every run automatically before admission: static parse, mocked dry run, then routed no-prompt config checks. Invalid scripts return `status:"rejected"` diagnostics without creating a run ID, reserving a background slot, or spending tokens. When pinning model, mode, or `configOptions`, use `action:"config"` first.
+The MCP `workflow` tool checks source structure, accepts an immutable run, then prepares it with a mocked dry run and routed no-prompt config checks. Run requires a fresh `requestId` and returns a durable acknowledgement; inspect `status` for preparation and any `setup.request`, and answer setup with `setup-response`. Malformed source/meta is rejected before a run exists; later validation failure remains an inspectable failed run with no live agent dispatch. When pinning model, mode, or `configOptions`, use `action:"config"` first.
 
-The mocked pass executes reachable script control flow with schema-conforming fabricated agent results. It can prove that syntax, metadata, helper calls, and reachable branches are structurally executable, but it cannot prove prompt quality, real-world judgment, or convergence through every branch. Keep loops bounded in script code and inspect validation warnings for declared phases that the default fabricated path did not reach.
+The mocked pass executes reachable script control flow with schema-conforming fabricated agent results. It simulates explicit checkpoint replies, including `true` for confirm, with journaling disabled; simulated answers cannot approve live work. It can prove that syntax, metadata, helper calls, and reachable branches are structurally executable, but it cannot prove prompt quality, real-world judgment, or convergence through every branch. Keep loops bounded in script code and inspect validation warnings for declared phases that the fabricated path did not reach.
 
 The routed config pass probes each distinct backend/model pair without prompting. Unknown option ids, invalid select values, wrong value types, and the reserved `"model"` config key reject the script with direct alternatives. A backend that cannot be probed produces an explicit warning and leaves only that backend's option domain unverified.
 

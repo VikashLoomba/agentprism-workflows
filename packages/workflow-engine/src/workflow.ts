@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertExplicitCheckpointProvenance, assertExplicitCheckpointDecision } from "./checkpoint-provenance.js";
 import { existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import vm from "node:vm";
@@ -125,6 +126,10 @@ export interface WorkflowAgentOptions {
  * level getting its own limiter and counters.
  */
 export interface SharedRuntime {
+  /** Host selections address agent() occurrences only; checkpoints still consume the run call limit. */
+  agentOccurrenceCount?: number;
+  /** An unanswered checkpoint cannot be converted into approval by catching its signal. */
+  pendingCheckpoint?: WorkflowError;
   limiter: <T>(fn: () => Promise<T>) => Promise<T>;
   agentCount: number;
   tokenUsage: { input: number; output: number; total: number; cost: number; cacheRead: number; cacheWrite: number };
@@ -242,17 +247,14 @@ export interface WorkflowRunOptions extends WorkflowAgentOptions {
    */
   scriptBackends?: Record<string, WorkflowBackendConfig>;
   /**
-   * Ask the human a checkpoint() question and resolve to their reply. Threaded from
-   * a UI-bearing tool context. Absent => the checkpoint's headless mode applies:
-   * default (declared default/true), abort, or the opt-in durable pause.
+   * Ask the human a checkpoint() question and resolve to their explicit reply.
+   * Missing, rejected, timed-out, or unanswered interactions durably pause the run.
    */
   confirm?: (
     promptText: string,
     options: CheckpointOptions,
     context?: CheckpointCallContext,
   ) => Promise<unknown>;
-  /** Force every live checkpoint to become a durable CHECKPOINT_REQUIRED pause. */
-  pauseOnCheckpoint?: boolean;
   /**
    * Host-selected configurations keyed by the zero-based, root-execution-wide agent
    * occurrence ordinal. A selected model/mode/config becomes the effective call input
@@ -436,10 +438,6 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
 
 /** Options for a human checkpoint() — a deterministic, journaled, replayable gate. */
 export interface CheckpointOptions {
-  /** Reply used when no UI is available and `headless` is "default" (the default mode). */
-  default?: unknown;
-  /** Headless behavior: take `default`/true, abort, or durably pause. Default "default". */
-  headless?: "default" | "abort" | "pause";
   /** Confirm | free-text input | pick-one. Affects the hash and the UI widget. */
   kind?: "confirm" | "input" | "select";
   /** For kind "select". */
@@ -535,7 +533,7 @@ export const CALL_PATH_RAW_FRAMES = 64;
 /** Observable call-input fingerprint format. Bump when its inputs or encoding change. */
 export const CALL_INPUTS_FORMAT = 2;
 /** Observable checkpoint-input fingerprint format. Bump when its inputs or encoding change. */
-export const CHECKPOINT_INPUTS_FORMAT = 1;
+export const CHECKPOINT_INPUTS_FORMAT = 2;
 
 export interface WorkflowRunLimitOptions {
   maxAgents?: number;
@@ -568,6 +566,13 @@ export async function runWorkflow<T = unknown>(
   const { meta, body } = parseWorkflowScript(script);
   const agentConfigurations = snapshotHostAgentConfigurations(options.agentConfigurations);
   const journaling = options.journaling ?? true;
+  const resumeSeed = options.preparedResume?.strategy === "identity-v1"
+    ? options.preparedResume.seed
+    : options.preparedResume?.strategy === "positional-v1" ? options.preparedResume.checkpoint?.seed : undefined;
+  assertExplicitCheckpointProvenance({
+    journal: options.resumeJournal ? [...options.resumeJournal.values()] : undefined,
+    resumeSeed,
+  });
   if (!journaling && (options.resumeJournal || options.resumeFromRunId || options.preparedResume)) {
     throw new WorkflowError("journaling disabled for this run", WorkflowErrorCode.SCRIPT_VALIDATION_ERROR, {
       recoverable: false,
@@ -741,6 +746,7 @@ export async function runWorkflow<T = unknown>(
       abortSignaled = true;
       throw new WorkflowError("workflow aborted", WorkflowErrorCode.WORKFLOW_ABORTED, { recoverable: true });
     }
+    if (shared.pendingCheckpoint) throw shared.pendingCheckpoint;
   };
 
   const reportTerminalObserverError = (observer: string, error: unknown) => {
@@ -1008,10 +1014,9 @@ export async function runWorkflow<T = unknown>(
     }
 
     const assignedPhase = agentOptions.phase ?? state.currentPhase;
-    // shared.agentCount is incremented exactly once for every allocated agent() across the
-    // root and its nested workflow. Read it before allocation to address host selections
-    // with one deterministic, root-execution-wide ordinal.
-    const agentOrdinal = shared.agentCount;
+    // Checkpoints consume the shared call limit but cannot shift agent configuration keys.
+    // This counter agrees with validation's root-wide agent-only occurrence ordinal.
+    const agentOrdinal = shared.agentOccurrenceCount ?? 0;
     const hostConfiguration = normalizeHostAgentConfiguration(
       agentConfigurations?.[agentOrdinal],
       agentOrdinal,
@@ -1172,6 +1177,7 @@ export async function runWorkflow<T = unknown>(
     // (no await in between) — so a parallel() fan-out can't all observe the
     // same agentCount and overshoot maxAgents.
     shared.agentCount++;
+    shared.agentOccurrenceCount = agentOrdinal + 1;
 
     let precreatedWorktree: Worktree | undefined;
     let preparedRunCwd: string | undefined;
@@ -2319,11 +2325,8 @@ export async function runWorkflow<T = unknown>(
     return { ok: false, value: last, verdict: lastVerdict ?? null, attempts };
   };
 
-  // Deterministic, journaled, replayable human checkpoint. Gated on the agent
-  // counter + abort. On resume the human's reply
-  // replays by callIndex exactly like a cached agent() — the genuine edge over CC,
-  // whose steering is in-session only. Headless defaults remain non-blocking; authors
-  // can opt into a persisted pause with headless:"pause".
+  // Only explicit decisions may cross a human checkpoint. Missing answers pause;
+  // journal replay retains the original answer and its versioned provenance.
   const checkpointImplementation = async (
     promptText: string,
     checkpointOptions: CheckpointOptions,
@@ -2338,18 +2341,16 @@ export async function runWorkflow<T = unknown>(
         { recoverable: false },
       );
     }
-    const checkpointDefault = checkpointOptions.default;
-    const checkpointHeadless = checkpointOptions.headless;
+    validateCheckpointOptionKeys(checkpointOptions, realmObjectPrototype);
     const checkpointTimeoutMs = checkpointOptions.timeoutMs;
     const checkpointKind = checkpointOptions.kind;
     const checkpointChoices = checkpointOptions.choices;
     const capturedCheckpointOptions: CheckpointOptions = {
-      ...(checkpointDefault !== undefined ? { default: checkpointDefault } : {}),
-      ...(checkpointHeadless !== undefined ? { headless: checkpointHeadless } : {}),
       ...(checkpointKind !== undefined ? { kind: checkpointKind } : {}),
       ...(checkpointChoices !== undefined ? { choices: checkpointChoices } : {}),
       ...(checkpointTimeoutMs !== undefined ? { timeoutMs: checkpointTimeoutMs } : {}),
     };
+    validateCheckpointOptions(capturedCheckpointOptions);
     const callHash = hashCheckpoint(promptText, capturedCheckpointOptions);
     const callInputsHash = hashCheckpointInputs(capturedCheckpointOptions);
     const callPath = captureCallPath(vmFilename, preludeLines);
@@ -2411,6 +2412,7 @@ export async function runWorkflow<T = unknown>(
       const terminalRecord = settle({
         outcome: "result",
         origin: "journal-replay",
+        checkpointDecision: "explicit-v1",
         ...(input.manifestProvenance
           ? {
               replay: {
@@ -2429,6 +2431,7 @@ export async function runWorkflow<T = unknown>(
         hash: callHash,
         result: input.resultSnapshot,
         kind: "checkpoint" as const,
+        checkpointDecision: "explicit-v1" as const,
         scope: runId,
         call: { kind: "checkpoint" as const, label: "checkpoint" as const, phase: state.currentPhase },
       });
@@ -2471,6 +2474,8 @@ export async function runWorkflow<T = unknown>(
               match.source.injection,
             );
           if (match.action === "replay" && !movedInjectionWithoutSourcePrefix) {
+            assertExplicitCheckpointDecision(match.source.type === "candidate"
+              ? match.source.candidate.entry : match.source.injection);
             const result = match.source.type === "candidate"
               ? match.source.candidate.entry.result
               : match.source.injection.decision;
@@ -2541,6 +2546,7 @@ export async function runWorkflow<T = unknown>(
               (injectionMatch.match === "path-hash" || callIndex < state.firstMiss)
             ) {
               const injection = injectionMatch.source.injection;
+              assertExplicitCheckpointDecision(injection);
               const resultSnapshot = strictSnapshot(
                 injection.decision,
                 `checkpoint "${promptText}" injected reply`,
@@ -2591,6 +2597,7 @@ export async function runWorkflow<T = unknown>(
           });
           state.firstMiss = match.nextFirstMiss;
           if (match.action === "replay") {
+            assertExplicitCheckpointDecision(match.entry);
             const resultSnapshot = strictSnapshot(
               match.entry.result,
               `checkpoint "${promptText}" replayed reply`,
@@ -2663,6 +2670,7 @@ export async function runWorkflow<T = unknown>(
         (options.sameRunContinuation || callIndex < state.firstMiss)
       ) {
         try {
+          assertExplicitCheckpointDecision(cached);
           const resultSnapshot = strictSnapshot(cached.result, `checkpoint "${promptText}" replayed reply`);
           return replayCheckpoint({
             resultSnapshot,
@@ -2684,46 +2692,62 @@ export async function runWorkflow<T = unknown>(
       if (cached == null || cached.hash !== callHash) state.firstMiss = Math.min(state.firstMiss, callIndex);
     }
 
-    const origin = options.confirm ? "confirm" as const : "headless" as const;
+    const origin = options.confirm ? "confirm" as const : "engine" as const;
+    const waiting = () => shared.pendingCheckpoint ??= new WorkflowError(
+      `checkpoint "${promptText}" awaits an explicit human decision`,
+      WorkflowErrorCode.CHECKPOINT_REQUIRED,
+      {
+        recoverable: false,
+        checkpointContext: {
+          callIndex,
+          hash: callHash,
+          prompt: promptText,
+          kind: checkpointKind ?? "confirm",
+          ...(checkpointChoices === undefined ? {} : { choices: checkpointChoices }),
+          ...(checkpointTimeoutMs === undefined ? {} : { timeoutMs: checkpointTimeoutMs }),
+        },
+      },
+    );
     try {
+      if (!options.confirm) throw waiting();
+      if (!preparedResume) options.onResumeFilesystemTainted?.();
       let reply: unknown;
-      if (options.confirm) {
-        if (!preparedResume) options.onResumeFilesystemTainted?.();
-        reply = await options.confirm(promptText, capturedCheckpointOptions, {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
+      try {
+        const answer = options.confirm(promptText, capturedCheckpointOptions, {
           callIndex,
           hash: callHash,
           scope: runId,
           path: callPath,
         });
-      } else if (checkpointHeadless === "abort") {
-        throw new WorkflowError(
-          `checkpoint "${promptText}" needs human input but none is available (headless run)`,
-          WorkflowErrorCode.WORKFLOW_ABORTED,
-          { recoverable: false },
-        );
-      } else if (options.pauseOnCheckpoint || checkpointHeadless === "pause") {
-        throw new WorkflowError(
-          `checkpoint "${promptText}" awaits a human decision`,
-          WorkflowErrorCode.CHECKPOINT_REQUIRED,
-          {
-            recoverable: false,
-            checkpointContext: {
-              callIndex,
-              hash: callHash,
-              prompt: promptText,
-              kind: checkpointKind ?? "confirm",
-              ...(checkpointChoices === undefined ? {} : { choices: checkpointChoices }),
-              ...(checkpointDefault === undefined ? {} : { default: checkpointDefault }),
-              ...(checkpointTimeoutMs === undefined ? {} : { timeoutMs: checkpointTimeoutMs }),
-            },
-          },
-        );
-      } else {
-        reply = checkpointDefault ?? true;
+        const interruption = new Promise<never>((_, reject) => {
+          onAbort = () => reject(new WorkflowError("workflow aborted", WorkflowErrorCode.WORKFLOW_ABORTED, { recoverable: true }));
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) onAbort();
+          if (checkpointTimeoutMs !== undefined) timeout = setTimeout(() => reject(waiting()), checkpointTimeoutMs);
+        });
+        reply = await Promise.race([answer, interruption]);
+      } catch (error) {
+        throwIfAborted();
+        // Isolation failures describe invalid replay, not an unavailable human channel.
+        if (error instanceof WorkflowError && error.code === WorkflowErrorCode.REPLAY_DIVERGENCE) throw error;
+        throw waiting();
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+        if (onAbort) signal.removeEventListener("abort", onAbort);
       }
+      if (reply === undefined) throw waiting();
       throwIfAborted();
-      const replySnapshot = strictSnapshot(reply, `checkpoint "${promptText}" reply`);
-      const terminalRecord = settle({ outcome: "result", origin });
+      let replySnapshot: unknown;
+      try {
+        replySnapshot = strictSnapshot(reply, `checkpoint "${promptText}" reply`);
+      } catch {
+        // A value that cannot become a durable decision is still unanswered. Latch the
+        // checkpoint so the script cannot catch serialization failure and cross its gate.
+        throw waiting();
+      }
+      const terminalRecord = settle({ outcome: "result", origin, ...(journaling ? { checkpointDecision: "explicit-v1" as const } : {}) });
       if (terminalRecord.outcome !== "result") return reply;
       if (journaling) {
         const entry = deepFreeze({
@@ -2731,6 +2755,7 @@ export async function runWorkflow<T = unknown>(
           hash: callHash,
           result: replySnapshot,
           kind: "checkpoint" as const,
+          checkpointDecision: "explicit-v1" as const,
           scope: runId,
           call: { kind: "checkpoint" as const, label: "checkpoint" as const, phase: state.currentPhase },
         });
@@ -2740,7 +2765,7 @@ export async function runWorkflow<T = unknown>(
         callIndex,
         kind: checkpointKind ?? "confirm",
         decision: replySnapshot,
-        source: options.confirm ? "live" : "headless-default",
+        source: "live",
       });
       state.checkpointsTaken.push(checkpointTaken);
       guardTerminal("onCheckpointTaken", () => options.onCheckpointTaken?.(checkpointTaken));
@@ -2834,6 +2859,7 @@ export async function runWorkflow<T = unknown>(
     // rejection (e.g. WORKFLOW_ABORTED from the fault-channel cancel) never floats.
     result = await Promise.race([scriptPromise, tripwire.tripped]);
     await tripwire.drain();
+    if (shared.pendingCheckpoint) throw shared.pendingCheckpoint;
   } catch (error) {
     scriptFailed = true;
     // A WorkflowError crossing the script boundary keeps its classification (abort,
@@ -2863,7 +2889,7 @@ export async function runWorkflow<T = unknown>(
     result: result as T,
     logs: state.logs,
     phases: state.phases,
-    agentCount: shared.agentCount,
+    agentCount: shared.agentOccurrenceCount ?? 0,
     durationMs: Date.now() - started,
     runId,
     tokenUsage: shared.tokenUsage,
@@ -3259,7 +3285,7 @@ export function canonicalizeWorkflowAgentConfigurations(
 
 /** Stable binding for every provider-affecting value admitted by the host. */
 export function hashWorkflowAdmissionSelection(input: {
-  format: 1;
+  format: 2;
   agentConfigurations: Readonly<Record<number, WorkflowAgentConfiguration>>;
   defaultModel?: string;
   scriptBackends?: Record<string, WorkflowBackendConfig>;
@@ -3332,14 +3358,41 @@ function hashCallInputsV1(inputs: {
 }
 
 export function hashCheckpointInputs(options: CheckpointOptions): string | undefined {
-  const defaultValue = options.default;
-  const headless = options.headless;
   const timeoutMs = options.timeoutMs;
   return hashCanonicalStrictJson({
-    ...(defaultValue !== undefined ? { default: defaultValue } : {}),
-    ...(headless !== undefined ? { headless } : {}),
+    checkpointDecision: "explicit-v1",
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
   });
+}
+
+function validateCheckpointOptionKeys(options: CheckpointOptions, realmObjectPrototype: object | undefined): void {
+  const invalid = (detail: string): never => {
+    throw new WorkflowError(`checkpoint() ${detail}`, WorkflowErrorCode.SCRIPT_VALIDATION_ERROR, { recoverable: false });
+  };
+  if (!options || typeof options !== "object" || Array.isArray(options)) invalid("options must be a plain object");
+  const prototype = Reflect.getPrototypeOf(options);
+  if (prototype !== null && prototype !== Object.prototype && prototype !== realmObjectPrototype) {
+    invalid("options must be a plain object");
+  }
+  const allowed = new Set(["kind", "choices", "timeoutMs"]);
+  for (const key of Reflect.ownKeys(options)) {
+    if (typeof key !== "string" || !allowed.has(key)) {
+      invalid(`unsupported option ${String(key)}; checkpoints require an explicit answer (headless and default are retired)`);
+    }
+  }
+}
+
+function validateCheckpointOptions(options: CheckpointOptions): void {
+  const invalid = (detail: string): never => {
+    throw new WorkflowError(`checkpoint() ${detail}`, WorkflowErrorCode.SCRIPT_VALIDATION_ERROR, { recoverable: false });
+  };
+  if (options.kind !== undefined && !["confirm", "input", "select"].includes(options.kind)) invalid("kind must be confirm, input, or select");
+  if (options.choices !== undefined && (!Array.isArray(options.choices) || options.choices.some(choice => typeof choice !== "string"))) {
+    invalid("choices must be an array of strings");
+  }
+  if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) {
+    invalid("timeoutMs must be a positive finite number");
+  }
 }
 
 function validateAgentOptions(

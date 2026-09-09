@@ -14,6 +14,7 @@ import type {
   WorkflowResumeSafety,
 } from "@automatalabs/shared-types";
 import { WorkflowError, WorkflowErrorCode } from "./errors.js";
+import { assertExplicitCheckpointDecision, assertExplicitCheckpointProvenance } from "./checkpoint-provenance.js";
 import {
   type PersistedCheckpointInjection,
   type PersistedResumeCandidate,
@@ -347,7 +348,7 @@ function validateBasicCall(value: unknown, sourceRunId: string): value is Workfl
     (value.kind !== "agent" && value.kind !== "checkpoint") ||
     !isHash(value.hash) ||
     !["result", "null", "error"].includes(String(value.outcome)) ||
-    !["runner", "journal-replay", "confirm", "headless", "engine"].includes(String(value.origin)) ||
+    !["runner", "journal-replay", "confirm", "engine"].includes(String(value.origin)) ||
     value.scope !== sourceRunId
   ) {
     return false;
@@ -381,9 +382,8 @@ function validateCallFacts(call: WorkflowCallRecord): boolean {
     return call.origin === "runner" || call.origin === "journal-replay";
   }
   return (
-    call.origin === "confirm" ||
-    call.origin === "headless" ||
-    call.origin === "journal-replay"
+    call.checkpointDecision === "explicit-v1" &&
+    (call.origin === "confirm" || call.origin === "journal-replay")
   );
 }
 
@@ -396,6 +396,7 @@ function validateJournalEntry(value: unknown, sourceRunId: string): value is Jou
     isNonNegativeSafeInteger(value.index) &&
     isHash(value.hash) &&
     (value.kind === "agent" || value.kind === "checkpoint") &&
+    (value.kind !== "checkpoint" || value.checkpointDecision === "explicit-v1") &&
     value.scope === sourceRunId &&
     hasOwn(value, "result") &&
     isStrictJson(value.result) &&
@@ -495,6 +496,7 @@ function validateCallBlocker(value: unknown): PersistedResumeCallBlocker | undef
 function validateInjection(value: unknown): PersistedCheckpointInjection | undefined {
   if (!isRecord(value)) return undefined;
   if (
+    value.checkpointDecision !== "explicit-v1" ||
     !isNonEmptyString(value.sourceRunId) ||
     !isNonNegativeSafeInteger(value.recordedIndex) ||
     !isHash(value.hash) ||
@@ -622,7 +624,7 @@ function pendingInjection(
     !isHash(context.hash) ||
     call?.kind !== "checkpoint" ||
     call.outcome !== "error" ||
-    call.origin !== "headless" ||
+    (call.origin !== "engine" && call.origin !== "confirm") ||
     !isRecord(call.error) ||
     call.error.form !== "workflow-error" ||
     call.error.code !== WorkflowErrorCode.CHECKPOINT_REQUIRED ||
@@ -653,6 +655,7 @@ function pendingInjection(
   );
   if (duplicateRoot || duplicateCandidate || duplicateBlocker || duplicateInjection) return { valid: true };
   const injection = strictClone<PersistedCheckpointInjection>({
+    checkpointDecision: "explicit-v1",
     sourceRunId: source.runId,
     recordedIndex: call.index,
     hash: call.hash,
@@ -768,6 +771,7 @@ function liveDecision(
 
 export function admitResumeSource(input: ResumeAdmissionInput): ResumeAdmissionDecision {
   const { source, requestedPolicy, current } = input;
+  assertExplicitCheckpointProvenance(source);
   const sourceRunId = typeof source?.runId === "string" ? source.runId : "";
   const reply = parseCheckpointReplies(input.checkpointReplies, pendingCheckpointContext(source));
   const checkpointReplyIndex = reply?.recordedIndex;
@@ -1071,6 +1075,10 @@ export function initialPositionalFirstMiss(
 export function selectPositionalResume(
   input: PositionalResumeMatchInput,
 ): PositionalResumeMatchDecision {
+  if (input.kind === "checkpoint" && input.cached) {
+    assertExplicitCheckpointDecision(input.cached);
+    if (input.sourceCall) assertExplicitCheckpointProvenance({ calls: [input.sourceCall] });
+  }
   const firstMiss = input.eligibility === "all-live" ? 0 : input.firstMiss;
   if (input.index >= firstMiss) {
     return { action: "live", reason: "positional-suffix", nextFirstMiss: firstMiss };
@@ -1120,6 +1128,10 @@ export function selectResumeCandidate(
       reason: "not-recorded",
       remove: source,
     };
+  }
+  if (input.kind === "checkpoint") {
+    assertExplicitCheckpointDecision(source.type === "candidate" ? source.candidate.entry : source.injection);
+    if (source.type === "candidate") assertExplicitCheckpointProvenance({ calls: [source.candidate.call] });
   }
   if (
     input.kind === "agent" &&

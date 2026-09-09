@@ -27,6 +27,7 @@ import {
 } from "../src/validate.js";
 import { setValidateProbeFactoryForTests } from "../src/validate-internal.js";
 import type { SessionConfigOption } from "@automatalabs/acp-agents";
+import { WorkflowManager } from "@automatalabs/workflow-engine";
 
 const ADVERTISED_OPTIONS: SessionConfigOption[] = [
   {
@@ -84,7 +85,7 @@ test("valid script: parse + dry run complete; calls, backends, checkpoints, phas
     '  () => agent("b", { label: "codex-side", model: "codex/gpt-5.6-luna" }),',
     "]);",
     'phase("Judge");',
-    'const go = await checkpoint("proceed?", { kind: "confirm", default: false });',
+    'const go = await checkpoint("proceed?", { kind: "confirm" });',
     "return { pair, go };",
   ].join("\n");
 
@@ -101,11 +102,11 @@ test("valid script: parse + dry run complete; calls, backends, checkpoints, phas
   assert.equal(byLabel.get("codex-side")?.backend, "codex");
   assert.equal(byLabel.get("codex-side")?.schema, false);
 
-  // The checkpoint took its declared headless default (false), and the fabricated
+  // The checkpoint uses a validation-only simulated answer, and the fabricated
   // structured result flowed into the script's return value.
-  assert.deepEqual(report.dryRun!.checkpoints, [{ prompt: "proceed?", kind: "confirm", reply: false }]);
+  assert.deepEqual(report.dryRun!.checkpoints, [{ prompt: "proceed?", kind: "confirm", reply: true }]);
   const result = report.dryRun!.result as { pair: [{ ok: boolean; notes: string }, string]; go: boolean };
-  assert.equal(result.go, false);
+  assert.equal(result.go, true);
   assert.equal(result.pair[0].ok, true);
   assert.equal(typeof result.pair[0].notes, "string");
   assert.match(result.pair[1], /dry-run/);
@@ -931,30 +932,49 @@ test("agent({ phase }) assignments count as phase usage (no false declared-but-u
   assert.equal(report.warnings.length, 0);
 });
 
-test("checkpoint headless:abort is warned about (the dry-run confirm still answers it)", async () => {
-  const report = await validateWorkflowScript(
-    [
-      'export const meta = { name: "v", description: "d" };',
-      'const ok = await checkpoint("ship?", { kind: "confirm", headless: "abort" });',
-      'return await agent("then", { label: "then" }) && ok;',
-    ].join("\n"),
-  );
+for (const options of [{ headless: "abort" }, { headless: "pause" }, { headless: "default" }, { default: "hold" }]) {
+  test(`validation rejects retired checkpoint options ${JSON.stringify(options)}`, async () => {
+    const report = await validateWorkflowScript(`export const meta = { name: "v", description: "d" };
+return await checkpoint("ship?", ${JSON.stringify(options)});`);
+    assert.equal(report.ok, false);
+    assert.equal(report.exitCode, 2);
+    assert.equal(report.dryRun?.checkpoints.length, 0);
+    assert.match(JSON.stringify(report), /unsupported option/);
+  });
+}
+
+test("checkpoint simulation supplies kind-appropriate inspection values", async () => {
+  const report = await validateWorkflowScript(`export const meta = { name: "v", description: "d" };
+return [await checkpoint("confirm"), await checkpoint("input", { kind: "input" }), await checkpoint("select", { kind: "select", choices: ["hold", "ship"] })];`);
   assert.equal(report.ok, true);
-  assert.match(report.warnings.join("\n"), /headless: "abort"/);
+  assert.deepEqual(plain(report.dryRun?.result), [true, "mock input", "hold"]);
 });
 
-test("checkpoint headless:pause dry-runs through the mock confirm without a warning", async () => {
-  const report = await validateWorkflowScript(
-    [
-      'export const meta = { name: "v", description: "d" };',
-      'const decision = await checkpoint("ship?", { headless: "pause", default: "hold" });',
-      'return { decision };',
-    ].join("\n"),
-  );
-
-  assert.equal(report.ok, true);
-  assert.deepEqual(report.dryRun?.checkpoints, [{ prompt: "ship?", kind: "confirm", reply: "hold" }]);
-  assert.doesNotMatch(report.warnings.join("\n"), /headless: "pause"/);
+test("validation checkpoint simulations cannot become live durable approvals", async () => {
+  const root = mkdtempSync(join(tmpdir(), "validation-checkpoint-isolation-"));
+  const script = `export const meta = { name: "validation-only", description: "simulation isolation" };
+await checkpoint("Approve live work?");
+return await agent("must wait for approval");`;
+  try {
+    const report = await validateWorkflowScript(script, { cwd: root, probeConfig: false });
+    assert.equal(report.ok, true);
+    assert.deepEqual(report.dryRun?.checkpoints, [{ prompt: "Approve live work?", kind: "confirm", reply: true }]);
+    assert.equal(report.dryRun?.agentCalls.length, 1, "validation reaches work after the checkpoint");
+    assert.equal(report.dryRun?.agentCalls[0].index, 0, "checkpoint calls never shift agent selection ordinals");
+    let liveCalls = 0;
+    const manager = new WorkflowManager({
+      cwd: root, persistenceRoot: root,
+      agent: { async run() { liveCalls++; return "unexpected live work"; } },
+    });
+    assert.equal(manager.listRuns().length, 0);
+    const live = await manager.runSync(script);
+    assert.equal(live.status, "paused");
+    assert.equal(live.checkpointContext?.prompt, "Approve live work?");
+    assert.equal(liveCalls, 0);
+    assert.deepEqual(manager.getPersistence().load(live.runId)?.journal, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("dry-run gate result exposes every fabricated structured validator field", async () => {

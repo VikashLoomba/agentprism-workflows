@@ -686,7 +686,7 @@ It reuses the existing redaction/compaction code with these exact rules:
    strings, then `JSON.stringify` and a 512-byte UTF-8 cap. `redacted` and `truncated` report any
    replacement, structural omission, depth marker, or final byte cap. The algorithm is applied to
    `agentEnd.result`, `journal.entry.result`, the top-level workflow result in `complete`,
-   checkpoint defaults, and the `details`/`props`/`value` fields of recorded errors.
+   checkpoint decisions, and the `details`/`props`/`value` fields of recorded errors.
 5. Auth methods are limited to the first 20 in source order; their `type` discriminants are copied
    and their IDs/names use rule 2. Checkpoint choices and agent-end `modelFallbacks` are each
    limited to the first 20 in source order. Every omitted entry sets `projection.truncated`.
@@ -1275,7 +1275,7 @@ ACP sessions opened by a child already receive the child's `RunOptions.runId`; t
 `agentEvent` payload therefore has `runId === scope === childRunId` plus the child-local
 `callIndex`.
 
-### 2.12 Host consumption and MCP background progress
+### 2.12 Host consumption after MCP asynchronous acceptance
 
 The engine and SDK ship no HTTP, SSE, WebSocket, MCP notification, or other wire protocol. A host
 loads a snapshot, requires its `eventStreamId`, reads `readEvents(runId, { streamId:
@@ -1289,9 +1289,11 @@ projection to the snapshot value.
 
 The MCP server is one such host without adding a model-facing tail contract:
 
-- Foreground execution keeps the live `onProgress` projection and request cancellation.
-- A background start returns immediately and emits no progress notification after that initiating
-  request completes. A completed MCP request is not a durable progress channel.
+- Every run/resume returns a durable asynchronous acceptance. No workflow progress callback or
+  cancellation lifetime stays attached to that completed request. Disconnect does not cancel
+  accepted work; explicit `stop` follows the execution owner.
+- A completed MCP request is not a durable progress channel. The run monitor consumes the event
+  stream after acceptance.
 - Model-facing `action:"status"` reads one bounded snapshot and never watches or polls for a later
   lifecycle transition.
 - The capability-gated app-only `workflow-events` tool reads bounded event pages for the run
@@ -1429,7 +1431,7 @@ any exported name would be semver-major; the declared patch bump is valid only u
   sleeps on timing alone; file-change and fake-clock seams drive it deterministically.
 - **workflow-engine — redaction/volume**: credential assignments, bearer/basic auth, URL userinfo,
   JWTs, known key prefixes, PEM keys, opaque tokens, sensitive object keys, config-option secrets,
-  checkpoint defaults, results, recorded-error details, and both agent-end/call-record provenance
+  checkpoint decisions, results, recorded-error details, and both agent-end/call-record provenance
   strings are absent from raw event-file bytes;
   live emitter payloads retain their originals. UTF-8 caps do not split code points; depth/array/key
   limits and projection flags are exact; maximum-cardinality ordinary-text fixtures for every
@@ -1460,8 +1462,8 @@ any exported name would be semver-major; the declared patch bump is valid only u
   `(scope, callIndex)` when present with the legacy label queue only as a compatibility fallback;
   tool spans consume direct ACP `callIndex`; all existing no-content/capture-content and detach
   tests stay green.
-- **mcp-server**: foreground progress stays request-scoped; the initial background-start request
-  never sends after returning. The app-only event poller returns bounded pages for safe streams and
+- **mcp-server**: asynchronous run/resume acknowledgement ends the initiating request; it never
+  owns later progress or human input. The app-only event poller returns bounded pages for safe streams and
   fails closed for missing, mismatched, corrupt, or incomplete streams. The app-only run listing is
   capability-gated, authoritative, and bounded. Model-facing status remains immediate.
 - **retention/compatibility**: old run fixtures list/inspect unchanged; event reads report
@@ -1496,11 +1498,11 @@ any exported name would be semver-major; the declared patch bump is valid only u
 - `packages/agentprism-otel/README.md`: note direct event-contract consumption and retained
   structural attachment API.
 - `skills/agentprism-workflow-authoring/SKILL.md` and `reference.md`: keep host-call guidance clear
-  that background starts have no enduring request channel, status is immediate, and app-only event
+  that accepted run/resume operations have no enduring request channel, status is immediate, and app-only event
   polling is outside the model tool loop. There is no new workflow DSL.
 - Regenerate `packages/mcp-server/src/generated/authoring-prompt-content.ts` with
   `scripts/generate-authoring-prompt.mjs` and extend its drift/sentinel test for the corrected
-  background progress wording.
+  asynchronous acceptance and event-consumption wording.
 
 ## 7. Implementation breakdown
 

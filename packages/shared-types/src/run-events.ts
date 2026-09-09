@@ -243,10 +243,9 @@ export interface RunEventValueProjection {
 }
 
 export interface RunEventCheckpointProjection
-  extends Omit<CheckpointContext, "prompt" | "choices" | "default"> {
+  extends Omit<CheckpointContext, "prompt" | "choices"> {
   prompt: string;
   choices?: string[];
-  default?: RunEventValueProjection;
 }
 
 export interface RunEventErrorProjection

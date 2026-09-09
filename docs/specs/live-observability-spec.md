@@ -611,24 +611,17 @@ export interface WorkflowSnapshot {
 On each successful `agentProgress` append, the manager copies the returned record's positive `seq`
 and projected payload into `managed.snapshot.latestActivity`, then invokes the same `progress()`
 function that recomputes counts and calls `ExecOptions.onProgress` [L13]. `persistedState()`
-continues selecting its established fields and must not serialize `latestActivity`; agent rows are
-unchanged, preserving legacy run JSON [L8]. A foreground MCP invocation therefore receives content
-through its existing request-owned `exec.onProgress` callback, already correlated by construction.
-That closure remembers only the greatest activity `seq` it reported: on a newer one it formats
-`"<label>: tool <lastToolName>"` when a tool is latest or `"<label>: <latestText>"` otherwise; on
-ordinary lifecycle/phase callbacks with no newer activity it retains the existing phase message.
-Thus a subsequent lifecycle callback does not replay stale content, while every heartbeat has a new
-sequence and remains visible. Settled/total counts are unchanged. There is no manager-wide
-listener, run-ID filter, pre-assignment slot, or listener cleanup lifecycle.
+continues selecting its established fields and does not serialize `latestActivity`; agent rows are
+unchanged. SDK embedding hosts retain this callback and can project content from its already-safe
+snapshot. Settled/total counts retain their established meaning.
 
-MCP `status` is an immediate snapshot and emits no `notifications/progress` for persisted
-`agentProgress` rows; only a foreground `run`/`resume` request reports live progress, using the same
-safe message [L13]. Persisted `agentTranscript` rows never drive progress: they neither change
-counters nor emit `notifications/progress`; the following `agentProgress` record is
-the one progress-reporting surface. Both paths keep existing request-correlated
-`notifications/progress` behavior; absent progress tokens remain a no-op and notification promises
-are never awaited. These messages are a convenience only; transcript reconstruction always uses
-`agentTranscript` records.
+MCP run and resume acknowledge durable asynchronous operations and do not retain a request-owned
+progress callback or cancellation lifetime. Status returns one bounded snapshot without polling or
+`notifications/progress`. The run monitor obtains durable event pages through `workflow-events`
+and treats resource updates as refresh hints. Transcript reconstruction uses `agentTranscript`
+records; `agentProgress` provides compact current activity. Neither starts an enduring progress
+channel on a completed MCP request. This supersedes the original foreground/await progress portion
+of this design under [the asynchronous cutover](async-workflow-app-cutover.md).
 
 ## 7. MCP events resource and subscription
 
@@ -954,17 +947,17 @@ The implementation updates all of these in the same train:
    restart would lose it and multiple reads could consume each other's state. Cursor state stays in
    resource documents and the client; reads are idempotent.
 9. **Use `notifications/progress` as R2.** Rejected because it exists only when a specific tool
-   request supplied a progress token and cannot supervise an independently running background run.
-   It is enriched as a convenience, not used as the durable subscription surface.
+   request supplied a progress token and cannot supervise execution after asynchronous acceptance.
+   MCP workflow supervision uses durable event pages and resource update hints.
 10. **Fail the workflow when observability persistence fails.** Rejected because supervision must
    not control the work being supervised. Integrity failures are explicit to readers and existing
    incomplete markers/diagnostics are retained.
 11. **Put ACP types in workflow-engine.** Rejected because it breaks the backend-neutral runner
     seam. The workflows facade owns ACP decoding; the engine consumes normalized activity.
-12. **Use a temporary manager-wide `agentProgress` listener for foreground MCP progress.** Rejected
-    because the existing `ExecOptions.onProgress`/`WorkflowSnapshot` channel is already owned by and
-    correlated to that foreground request. `latestActivity` is an additive ephemeral snapshot field
-    and avoids listener lifetime, run-ID filtering, and pre-assignment races.
+12. **Keep a request-owned `agentProgress` listener after MCP acceptance.** Rejected because the
+    request has completed while workflow execution continues. The monitor reads the durable event
+    stream; SDK embedding hosts retain `ExecOptions.onProgress` and `WorkflowSnapshot` for their
+    own host lifecycle.
 13. **Continue transcript indexes/counters across same-ID resume by scanning and reseeding them.**
     Rejected because `agentStart` already supplies a durable sequence identity for each execution.
     `executionStartSeq` makes repeated cycles explicit, resets dense state safely, and requires no
@@ -1128,12 +1121,10 @@ compatibility invariant. All stated cases are release blockers.
   safe-message assertions require normalized URI/run ID and stable `RunEventLogError.code`; a
   malicious malformed URI is not echoed. Both groups prove paths/content/causes/credentials are
   absent.
-- Script-resource tests pass unchanged. Foreground and `await` progress tests assert the safe
-  content message. The foreground test proves the content arrives through the existing
-  request-owned snapshot callback, `latestActivity` is already projected and absent from persisted
-  run JSON, and no manager listener/filter/holding slot exists. The `await` reporter receives an
-  `agentTranscript` followed by `agentProgress`, proves the transcript emits nothing and changes no
-  counters, then emits only the safe progress message. No-progress-token remains a no-op.
+- Script-resource tests pass unchanged. SDK callback tests prove `latestActivity` is already
+  projected and absent from persisted run JSON. MCP tests prove run/resume return durable
+  acceptance without request-owned workflow progress; status remains immediate and the monitor's
+  event pages carry safe activity and transcript updates after the initiating request completes.
 
 ### 13.5 Compatibility, docs, and release
 
@@ -1215,8 +1206,8 @@ an envelope type [U4]. These are risk notes, not permission to omit any work in 
 3. Add projected transcript upserts, execution-partitioned reducer validation, final ordering,
    pause/resume cycles, and terminal-history compatibility fixtures.
 4. Add the MCP event document/parser/template, subscription watcher/coalescer/re-arm state, exact
-   error mapping, critical same-ID running-status save, and content-bearing foreground
-   snapshot/await progress.
+   error mapping, critical same-ID running-status save, and bounded snapshot/event-page
+   consumption after asynchronous acceptance.
 5. Complete cross-package integration/backpressure tests, documentation, generated artifacts, and
    coordinated changesets. Publish only after all five stages are green together.
 
@@ -1254,9 +1245,9 @@ All local file/line citations were verified at base commit
   `packages/mcp-server/src/workflow-resources.ts:18-32`, `:45-80`, `:152-233`.
 - **[L11] MCP resources capability registration:**
   `packages/mcp-server/src/server.ts:1149-1163`.
-- **[L12] Await's durable event tail and terminal detection:**
+- **[L12] Historical await implementation, superseded by immediate status and App event reads:**
   `packages/mcp-server/src/server.ts:960-1086`.
-- **[L13] Existing snapshot type and request-owned foreground/background progress projections:**
+- **[L13] SDK snapshot channel and historical MCP progress projections (MCP portion superseded):**
   `packages/workflow-engine/src/display.ts:20-67`;
   `packages/mcp-server/src/progress.ts:1-26`, `:60-118`;
   `packages/mcp-server/src/server.ts:1527-1536`.

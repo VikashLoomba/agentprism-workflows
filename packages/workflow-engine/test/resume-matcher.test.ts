@@ -74,6 +74,7 @@ function checkpointRow(index = 0, overrides: Partial<WorkflowCallRecord> = {}): 
   return {
     index,
     kind: "checkpoint",
+    ...(overrides.outcome === undefined || overrides.outcome === "result" ? { checkpointDecision: "explicit-v1" as const } : {}),
     hash: HASH_B,
     path: `workflow.js:${index + 1}:1`,
     inputsHash: INPUT_B,
@@ -90,6 +91,7 @@ function entryFor(call: WorkflowCallRecord, result: unknown = `result-${call.ind
     hash: call.hash,
     result,
     kind: call.kind,
+    ...(call.checkpointDecision === undefined ? {} : { checkpointDecision: call.checkpointDecision }),
     scope: call.scope,
   };
 }
@@ -155,6 +157,7 @@ function candidate(
 
 function injection(index = 0, overrides: Partial<PersistedCheckpointInjection> = {}): PersistedCheckpointInjection {
   return {
+    checkpointDecision: "explicit-v1",
     sourceRunId: SOURCE_RUN_ID,
     recordedIndex: index,
     hash: HASH_B,
@@ -241,13 +244,11 @@ describe("incremental resume admission", () => {
     assert.equal(inconsistent.strategy, "identity-v1");
     assert.equal(inconsistent.strategy === "identity-v1" && inconsistent.seed.candidates.length, 1);
 
-    const headless = admission(sourceState([checkpointRow(0, { origin: "headless" })]));
-    assert.equal(headless.strategy, "identity-v1");
-    assert.equal(headless.strategy === "identity-v1" && headless.seed.candidates.length, 1);
+    assert.throws(() => admission(sourceState([checkpointRow(0, { origin: "headless" as never })])), /checkpoint-provenance-incompatible/);
 
     const failedCall = checkpointRow(0, {
       outcome: "error",
-      origin: "headless",
+      origin: "engine",
       error: { form: "workflow-error", message: "stopped", code: WorkflowErrorCode.UNKNOWN },
     });
     const failed = admission(sourceState([failedCall]));
@@ -545,7 +546,7 @@ return { first, second };`;
     missingPair.journal = [];
     assert.equal(admission(missingPair).strategy === "live" && admission(missingPair).disabledReason, "manifest-invalid");
     const stalePair = sourceState();
-    stalePair.journal?.push({ index: 1, hash: HASH_B, result: true, kind: "checkpoint", scope: SOURCE_RUN_ID });
+    stalePair.journal?.push({ index: 1, hash: HASH_B, result: true, kind: "checkpoint", checkpointDecision: "explicit-v1", scope: SOURCE_RUN_ID });
     assert.equal(admission(stalePair).strategy === "live" && admission(stalePair).disabledReason, "manifest-invalid");
 
     const missingHighest = sourceState([agentRow(0)]);
@@ -692,7 +693,7 @@ return { first, second };`;
 
     const pending = checkpointRow(1, {
       outcome: "error",
-      origin: "headless",
+      origin: "engine",
       error: {
         form: "workflow-error",
         message: "awaits reply",
@@ -711,6 +712,7 @@ return { first, second };`;
     assert.deepEqual(
       injected.strategy === "identity-v1" && injected.seed.checkpointInjections,
       [{
+        checkpointDecision: "explicit-v1",
         sourceRunId: SOURCE_RUN_ID,
         recordedIndex: 1,
         hash: HASH_B,
@@ -739,13 +741,14 @@ return { first, second };`;
       sourceRunId: "older-run",
       call: {
         kind: "checkpoint",
+        checkpointDecision: "explicit-v1",
         hash: HASH_B,
         path: "older-checkpoint",
         inputsHash: INPUT_B,
         origin: "confirm",
         resumeSafety: undefined,
       },
-      entry: { kind: "checkpoint", hash: HASH_B, result: false },
+      entry: { kind: "checkpoint", checkpointDecision: "explicit-v1", hash: HASH_B, result: false },
     });
     delete retainedCheckpoint.call.resumeSafety;
     const retainedBlocker = sourceState([prior, pending], {
@@ -975,19 +978,10 @@ describe("positional resume selection", () => {
       match: "index-hash",
       nextFirstMiss: Number.POSITIVE_INFINITY,
     });
-    assert.deepEqual(selectPositionalResume({
-      index: 0,
-      kind: "checkpoint",
-      hash: HASH_A,
-      eligibility: "legacy",
-      firstMiss: Number.POSITIVE_INFINITY,
-      cached,
-    }), {
-      action: "replay",
-      entry: cached,
-      match: "index-hash",
-      nextFirstMiss: Number.POSITIVE_INFINITY,
-    });
+    assert.throws(() => selectPositionalResume({
+      index: 0, kind: "checkpoint", hash: HASH_A, eligibility: "legacy",
+      firstMiss: Number.POSITIVE_INFINITY, cached,
+    }), /checkpoint-provenance-incompatible/, "a legacy hash match cannot turn an agent result into checkpoint approval");
     assert.deepEqual(selectPositionalResume({
       index: 1,
       kind: "agent",
@@ -1059,7 +1053,7 @@ describe("positional resume selection", () => {
     assert.equal(unsafeDecision.action, "replay");
   });
 
-  it("rejects changed checkpoint inputs and replays completed headless results", () => {
+  it("rejects changed checkpoint inputs and only replays explicit results", () => {
     const confirmed = checkpointRow();
     const cached = entryFor(confirmed, true);
     assert.equal(selectPositionalResume({
@@ -1083,18 +1077,17 @@ describe("positional resume selection", () => {
       sourceCall: confirmed,
     });
     assert.equal(changed.action === "live" && changed.reason, "positional-miss");
-    const headless = checkpointRow(0, { origin: "headless" });
-    const unproved = selectPositionalResume({
+    const unmarked = checkpointRow(0, { checkpointDecision: undefined });
+    assert.throws(() => selectPositionalResume({
       index: 0,
       kind: "checkpoint",
       hash: HASH_B,
       inputsHash: INPUT_B,
       eligibility: "safe-prefix",
       firstMiss: Number.POSITIVE_INFINITY,
-      cached: entryFor(headless),
-      sourceCall: headless,
-    });
-    assert.equal(unproved.action, "replay");
+      cached: entryFor(unmarked),
+      sourceCall: unmarked,
+    }), /checkpoint-provenance-incompatible/);
   });
 });
 

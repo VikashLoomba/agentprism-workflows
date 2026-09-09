@@ -5,8 +5,8 @@ import type {
 } from "@automatalabs/workflows";
 
 import type {
-  WorkflowBackgroundAccepted,
-  WorkflowExecutionToolResult,
+  WorkflowOperationAccepted,
+  WorkflowExecutionOutcome,
   WorkflowResultRetrieval,
   WorkflowScriptResourceFields,
   WorkflowStatusToolResult,
@@ -20,10 +20,9 @@ const limits = {
   concurrency: 6,
   agentRetries: 0,
 };
-const execution: WorkflowExecutionToolResult = {
+const execution: WorkflowExecutionOutcome = {
   runId: "aa-bb",
   status: "completed",
-  scriptSource: "inline",
   scriptUri: "workflow://runs/aa-bb/script",
   resultUri: "workflow://runs/aa-bb/result",
   eventsUri: "workflow://runs/aa-bb/events",
@@ -42,7 +41,11 @@ const resultRetrieval: WorkflowResultRetrieval = {
   hasMore: false,
   chunk: "42",
 };
-const background: WorkflowBackgroundAccepted = {
+const acceptance: WorkflowOperationAccepted = {
+  action: "run",
+  accepted: true,
+  requestId: "request-1",
+  duplicate: false,
   runId: "aa-bb",
   status: "running",
   scriptSource: "stored",
@@ -110,36 +113,37 @@ const resultRetrievalWithoutChunk: WorkflowResultRetrieval = {
   endOffset: 2,
   hasMore: false,
 };
-// @ts-expect-error execution results require scriptSource
-const executionWithoutSource: WorkflowExecutionToolResult = {
-  runId: "aa-bb",
-  status: "completed",
-  scriptUri: "workflow://runs/aa-bb/script",
-  eventsUri: "workflow://runs/aa-bb/events",
+const acceptanceFields = {
+  action: "run" as const, accepted: true as const, duplicate: false, requestId: "request-1",
+  runId: "aa-bb", status: "pending" as const, scriptSource: "inline" as const,
+  scriptUri: "workflow://runs/aa-bb/script", eventsUri: "workflow://runs/aa-bb/events", limits,
 };
-// @ts-expect-error execution results require resolved limits
-const executionWithoutLimits: WorkflowExecutionToolResult = {
-  runId: "aa-bb",
-  status: "completed",
-  scriptSource: "inline",
-  scriptUri: "workflow://runs/aa-bb/script",
-  eventsUri: "workflow://runs/aa-bb/events",
+const { requestId: _requestId, ...noIdentity } = acceptanceFields;
+// @ts-expect-error acceptance requires retry identity
+const acceptanceWithoutIdentity: WorkflowOperationAccepted = noIdentity;
+const { scriptSource: _scriptSource, ...noSource } = acceptanceFields;
+// @ts-expect-error acceptance requires accepted source classification
+const acceptanceWithoutSource: WorkflowOperationAccepted = noSource;
+const { limits: _limits, ...noLimits } = acceptanceFields;
+// @ts-expect-error acceptance requires resolved limits
+const acceptanceWithoutLimits: WorkflowOperationAccepted = noLimits;
+const { scriptUri: _scriptUri, ...noUri } = acceptanceFields;
+// @ts-expect-error acceptance requires durable source discovery
+const acceptanceWithoutUri: WorkflowOperationAccepted = noUri;
+const { eventsUri: _eventsUri, ...noEvents } = acceptanceFields;
+// @ts-expect-error acceptance requires durable events discovery
+const acceptanceWithoutEvents: WorkflowOperationAccepted = noEvents;
+// @ts-expect-error resume acceptance requires the continuation generation
+const resumeWithoutGeneration: WorkflowOperationAccepted = { ...acceptanceFields, action: "resume" };
+const acceptanceWithResult: WorkflowOperationAccepted = {
+  ...acceptanceFields,
+  // @ts-expect-error completion is observed through status/result, never returned by acceptance
+  result: 42,
 };
-// @ts-expect-error background acknowledgements require scriptUri
-const backgroundWithoutUri: WorkflowBackgroundAccepted = {
-  runId: "aa-bb",
-  status: "running",
-  scriptSource: "inline",
-  eventsUri: "workflow://runs/aa-bb/events",
-  limits,
-};
-// @ts-expect-error current execution results require durable events discovery
-const executionWithoutEvents: WorkflowExecutionToolResult = {
-  runId: "aa-bb",
-  status: "completed",
-  scriptSource: "inline",
-  scriptUri: "workflow://runs/aa-bb/script",
-  limits,
+const acceptanceWithResultUri: WorkflowOperationAccepted = {
+  ...acceptanceFields,
+  // @ts-expect-error acceptance exposes source and events; exact results have their own retrieval path
+  resultUri: "workflow://runs/aa-bb/result",
 };
 // @ts-expect-error status results require scriptUri
 const statusWithoutUri: WorkflowStatusToolResult = {
@@ -157,17 +161,21 @@ void [
   execution,
   resultRetrieval,
   resultRetrievalWithoutChunk,
-  background,
+  acceptance,
   observed,
   stopped,
   pendingStop,
   resourceFields,
   removedBudgetLimit,
   removedCallDebit,
-  executionWithoutSource,
-  executionWithoutLimits,
-  executionWithoutEvents,
-  backgroundWithoutUri,
+  acceptanceWithoutIdentity,
+  acceptanceWithoutSource,
+  acceptanceWithoutLimits,
+  acceptanceWithoutEvents,
+  acceptanceWithoutUri,
+  resumeWithoutGeneration,
+  acceptanceWithResult,
+  acceptanceWithResultUri,
   statusWithoutUri,
   stopWithoutTerminalAck,
 ];

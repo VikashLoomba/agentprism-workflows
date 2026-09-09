@@ -21,11 +21,12 @@ export const WORKFLOW_RESULT_CHUNK_BYTES_MAX = 16_384;
 export const WORKFLOW_RESULT_CHUNK_BYTES_MIN = 4;
 
 const actionSchema = z
-  .enum(["config", "run", "resume", "status", "result", "permissions-response", "stop"])
+  .enum(["config", "run", "resume", "setup-response", "status", "result", "permissions-response", "stop"])
   .describe("Workflow operation. Activate the agentprism-workflow-authoring skill for the action guide.");
 const scriptSchema = z
   .string()
   .min(1)
+  .max(1_048_576)
   .describe("Run only: raw JavaScript workflow source, without Markdown fences.");
 const scriptPathSchema = z
   .string()
@@ -76,9 +77,16 @@ const checkpointRepliesSchema = z
     z.unknown(),
   )
   .describe("Resume only: checkpoint decisions keyed by this run's checkpoint call index.");
-const backgroundSchema = z
-  .boolean()
-  .describe("Run/resume only: acknowledge after durable admission; default false.");
+const requestIdSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, "requestId must contain 1..128 identifier characters")
+  .describe("Run/resume retry identity. Reuse for an identical retry; use a fresh ID for a new operation.");
+const setupIdSchema = z.string().uuid().describe("Exact pending setup request ID from status.setup.request.id.");
+const setupResponseSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("accept"), content: z.record(z.string(), z.unknown()) }).strict(),
+  z.object({ action: z.literal("decline") }).strict(),
+  z.object({ action: z.literal("cancel") }).strict(),
+]);
 const runIdSchema = z
   .string()
   .max(128)
@@ -145,7 +153,8 @@ export const workflowToolInputShape = {
   concurrency: concurrencySchema,
   agentRetries: agentRetriesSchema,
   checkpointReplies: checkpointRepliesSchema,
-  background: backgroundSchema,
+  requestId: requestIdSchema,
+  setupId: setupIdSchema,
   runId: runIdSchema,
   permissionId: permissionIdSchema,
   response: permissionResponseSchema,
@@ -169,12 +178,12 @@ const configInputSchema = z
   .strict();
 
 const executionOptionsShape = {
+  requestId: requestIdSchema,
   projectDir: projectDirSchema.optional(),
   args: argsSchema.optional(),
   maxAgents: maxAgentsSchema.optional(),
   concurrency: concurrencySchema.optional(),
   agentRetries: agentRetriesSchema.optional(),
-  background: backgroundSchema.optional(),
 } as const;
 
 const runInlineInputSchema = z
@@ -200,11 +209,11 @@ const resumeInputSchema = z
   .object({
     action: z.literal("resume").describe("Continue this exact run using its durable inputs and configuration."),
     runId: runIdSchema,
+    requestId: requestIdSchema,
     maxAgents: maxAgentsSchema.optional(),
     concurrency: concurrencySchema.optional(),
     agentRetries: agentRetriesSchema.optional(),
     checkpointReplies: checkpointRepliesSchema.optional(),
-    background: backgroundSchema.optional(),
   })
   .strict();
 
@@ -240,6 +249,13 @@ const permissionResponseInputSchema = z
   })
   .strict();
 
+const setupResponseInputSchema = z.object({
+  action: z.literal("setup-response").describe("Answer the exact pending workflow setup request."),
+  runId: runIdSchema,
+  setupId: setupIdSchema,
+  response: setupResponseSchema,
+}).strict();
+
 const wholeRunStopInputSchema = z
   .object({
     action: z.literal("stop").describe("Abort a run through its execution owner."),
@@ -256,11 +272,12 @@ const callStopInputSchema = z
   .strict();
 const stopInputSchema = z.xor([wholeRunStopInputSchema, callStopInputSchema]);
 
-/** The seven canonical action branches; run and stop contain structural sub-variants. */
+/** The canonical action branches; run and stop contain structural sub-variants. */
 export const workflowToolInputBranches = {
   config: configInputSchema,
   run: runInputSchema,
   resume: resumeInputSchema,
+  "setup-response": setupResponseInputSchema,
   status: statusInputSchema,
   result: resultInputSchema,
   "permissions-response": permissionResponseInputSchema,
@@ -271,6 +288,7 @@ export const workflowToolCanonicalInputSchema = z.xor([
   workflowToolInputBranches.config,
   workflowToolInputBranches.run,
   workflowToolInputBranches.resume,
+  workflowToolInputBranches["setup-response"],
   workflowToolInputBranches.status,
   workflowToolInputBranches.result,
   workflowToolInputBranches["permissions-response"],
@@ -282,14 +300,13 @@ export const workflowToolInputSchema = workflowToolCanonicalInputSchema;
 
 interface WorkflowExecuteToolInputBase {
   action: "run";
+  requestId: string;
   /** Absolute project directory selecting the run store and default execution cwd. */
   projectDir?: string;
   args?: unknown;
   maxAgents?: number;
   concurrency?: number;
   agentRetries?: number;
-  /** Default false. True acknowledges after admission and executes in this server process. */
-  background?: boolean;
 }
 
 type WorkflowExplicitContent =
@@ -304,11 +321,18 @@ export interface WorkflowResumeToolInput {
   action: "resume";
   /** The exact persisted run to continue. */
   runId: string;
+  requestId: string;
   maxAgents?: number;
   concurrency?: number;
   agentRetries?: number;
   checkpointReplies?: Record<number, unknown>;
-  background?: boolean;
+}
+
+export interface WorkflowSetupResponseToolInput {
+  action: "setup-response";
+  runId: string;
+  setupId: string;
+  response: z.infer<typeof setupResponseSchema>;
 }
 
 export interface WorkflowConfigToolInput {
@@ -350,6 +374,7 @@ export type WorkflowToolInput =
   | WorkflowConfigToolInput
   | WorkflowExecuteToolInput
   | WorkflowResumeToolInput
+  | WorkflowSetupResponseToolInput
   | WorkflowStatusToolInput
   | WorkflowResultToolInput
   | WorkflowPermissionResponseToolInput
@@ -394,15 +419,11 @@ export function parseWorkflowToolInput(
     case "config":
       return input;
     case "run":
-      return {
-        ...input,
-        background: input.background ?? false,
-      } as WorkflowExecuteToolInput;
+      return input as WorkflowExecuteToolInput;
     case "resume":
       return {
         ...input,
         checkpointReplies: checkpointReplies(input.checkpointReplies),
-        background: input.background ?? false,
       };
     case "status":
       return input;
@@ -413,6 +434,7 @@ export function parseWorkflowToolInput(
         maxBytes: input.maxBytes ?? WORKFLOW_RESULT_CHUNK_BYTES_DEFAULT,
       };
     case "permissions-response":
+    case "setup-response":
     case "stop":
       return input;
   }
