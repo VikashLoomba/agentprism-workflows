@@ -16,9 +16,9 @@ cross-action fields, and retired request-state tokens are rejected in both proto
 ### Actions
 
 - **Config** (`{ action:"config", projectDir, harnesses?, modelSpecs?, modelFilter? }`): read bounded no-prompt model/mode/config catalogs without creating a run. Use `modelSpecs` for a selected model's exact option domain. Preserve backend-advertised ids and descriptions.
-- **Run** (`{ action:"run", requestId, projectDir, script | scriptPath, args?, maxAgents?, concurrency?, agentRetries? }`): provide exactly one source. Bounded source/metadata checks precede durable acceptance; a path is read once, and later edits cannot change the accepted source. The acknowledgement contains `accepted:true`, `requestId`, `duplicate`, `runId`, current `status`, resource links, limits, and optional `setup`. It contains no final result. Mock validation, backend approval, configuration selection, and probes run afterward with live dispatch blocked. A later setup failure remains an inspectable failed run; decline/cancel leaves an aborted run.
+- **Run** (`{ action:"run", requestId, projectDir, script | scriptPath, args?, maxAgents?, concurrency?, agentRetries? }`): provide exactly one source. Bounded source/metadata checks precede durable acceptance; a path is read once, and later edits cannot change the accepted source. The acknowledgement contains `accepted:true`, `requestId`, `duplicate`, `runId`, current `status`, resource links, limits, and optional `setup`. It contains no final result. Backend approval, mock validation, and routed probes run afterward with live dispatch blocked. A later setup failure remains an inspectable failed run; decline/cancel leaves an aborted run.
 - **Resume** (`{ action:"resume", requestId, runId, checkpointReplies?, maxAgents?, concurrency?, agentRetries? }`): continue the exact run using stored source, args, configuration, journal, events, usage, and checkpoint decisions. An accepted acknowledgement adds `continuation`; observe later state with Status. Running, completed, aborted, auth-blocked, or unanswered-checkpoint states return an observation when no continuation is admitted. Resume never accepts replacement logical inputs or opens an inline human interaction.
-- **Setup response** (`{ action:"setup-response", runId, setupId, response }`): answer `status.setup.request.id`. Acceptance is exactly `{ action:"accept", content:{ ... } }`, matching the advertised `requestedSchema`. Backend approval requires `{ approve:true }`; configuration requires the exact advertised fields. `{ action:"decline" }` and `{ action:"cancel" }` have no content and stop setup. Identical retransmissions are idempotent; conflicting or stale responses cannot authorize a new request.
+- **Setup response** (`{ action:"setup-response", runId, setupId, response }`): answer `status.setup.request.id`. Acceptance is exactly `{ action:"accept", content:{ ... } }`, matching the advertised `requestedSchema`. Backend approval is the only setup kind and requires `{ approve:true }`; it never chooses agent routes. `{ action:"decline" }` and `{ action:"cancel" }` have no content and stop setup. Identical retransmissions are idempotent; conflicting or stale responses cannot authorize a new request.
 - **Status** (`{ action:"status", runId, lastN?, labelGlob?, logLines? }`): return an immediate bounded observation with calls, durable `latestActivity`, log tail, usage, safe pending permissions, setup state, and resource links. Settled runs add `outcome`; a checkpoint appears at `outcome.checkpointContext`. Reading a failed workflow is a successful tool request. Status never waits for execution or collects input.
 - **Result** (`{ action:"result", runId, offset?, maxBytes? }`): page exact completed JSON results in chunks up to 16,384 UTF-8 bytes. If `hasMore`, continue from `endOffset`; code points are never split.
 - **Permission response** (`{ action:"permissions-response", runId, permissionId, response:{ outcome:{ outcome:"selected", optionId } } }`): select an exact advertised ACP option. Cancellation is `response:{ outcome:{ outcome:"cancelled" } }`. The request must still belong to the live execution owner. Caller response `_meta` is forbidden. These bounded controls work with or without an App.
@@ -34,10 +34,13 @@ checkpoint. A fresh operation needs a fresh request ID; do not use a fresh ID me
 transport timed out.
 
 One run ID names one immutable source, event stream, usage total, and final result. Before live
-dispatch, the host persists format-2 canonical admission with an agent-only occurrence map,
-default model, approved backends, and selection hash. Checkpoints do not shift agent configuration
-ordinals. An uncovered live occurrence fails before provider dispatch; continuation cannot guess a
-new configuration. Same-ID replay adds no duplicate journal rows or provider usage.
+dispatch, the host persists format-3 routing admission: `strict:true`, captured tier configuration
+and named-agent definitions, optional host default, approved backends, integrity hash, and timestamp.
+Every actual call must resolve a model. Configured calls on unseen live branches are valid; missing
+routes fail before dispatch with bounded discovery guidance. There is no agent-configuration setup
+or automatic default selection. Continuation validates admission and reuses its immutable inputs
+without routing-file drift; old admissions remain inspectable but cannot execute. Same-ID replay
+adds no duplicate journal rows or provider usage.
 
 Every unanswered script checkpoint pauses. Resume with `checkpointReplies:{ [context.callIndex]:
 decision }`, using the exact pending index and a strict-JSON value. The first answer is durable

@@ -134,7 +134,7 @@ const SMOKE_PROMPT = "Reply with exactly LIVE_SMOKE_OK and no other text. Do not
  *  parallel() here deliberately exercises that process-exclusive overlap end to end. */
 function buildScript(backend: Backend, modelSpec?: string): string {
   const prompt = backend === "opencode" ? OPENCODE_AGENT_PROMPT : AGENT_PROMPT;
-  const modelEntry = modelSpec ? `, model: ${JSON.stringify(modelSpec)}` : "";
+  const modelEntry = `, model: ${JSON.stringify(modelSpec ?? backend)}`;
   return [
     `export const meta = { name: 'live-${backend}', description: 'pooling reuse + structured output', phases: [{ title: 'Fan' }] };`,
     `const SMALL = ${JSON.stringify(SMALL)};`,

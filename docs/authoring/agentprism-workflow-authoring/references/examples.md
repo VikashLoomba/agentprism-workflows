@@ -25,7 +25,7 @@ const plan = await agent(
 
 const approved = await checkpoint(
   `Implement "${args.feature}" with this plan?\n- ${plan.steps.join("\n- ")}\nRisks: ${plan.risks.join("; ")}`,
-  { kind: "confirm", default: true },
+  { kind: "confirm" },
 );
 if (!approved) return { implemented: false, plan };
 
@@ -62,13 +62,15 @@ full tool autonomy. Confirm both ids in the live catalog first. Claude `auto` us
 and may request permission; it is not the full-access mode. For a read-only planner, select the
 exact advertised read-only/plan mode instead.
 
-## Worked example — fully backend-agnostic audit
+## Worked example — audit with one shared backend route
 
-No `model` anywhere: this script runs unchanged on whatever backend the host defaults to.
+All agent calls and quality helpers inherit `meta.model`. Change that one backend-only route to
+use another configured backend; the backend selects its own default model.
 
 ```js
 export const meta = {
   name: "edge-case-audit",
+  model: "codex",
   description: "Exhaustively hunt edge-case bugs in a target dir, verify each, report gaps",
   phases: [{ title: "Hunt" }, { title: "Verify" }],
 };
@@ -111,7 +113,7 @@ return { confirmed, missing: gaps.missing ?? [] };
 
 ## Automatic preparation before live execution
 
-The MCP `workflow` tool checks source structure, accepts an immutable run, then prepares it with a mocked dry run and routed no-prompt config checks. Run requires a fresh `requestId` and returns a durable acknowledgement; inspect `status` for preparation and any `setup.request`, and answer setup with `setup-response`. Malformed source/meta is rejected before a run exists; later validation failure remains an inspectable failed run with no live agent dispatch. When pinning model, mode, or `configOptions`, use `action:"config"` first.
+The MCP `workflow` tool checks source structure, accepts an immutable run, then prepares it with a mocked dry run and routed no-prompt config checks. Run requires a fresh `requestId` and returns a durable acknowledgement; inspect `status` for preparation and any backend-approval `setup.request`, and answer approval with `setup-response`. Every actual agent call must have an effective model; no configuration form fills missing routing. Malformed source/meta is rejected before a run exists; later validation failure remains an inspectable failed run with no live agent dispatch. When pinning model, mode, or `configOptions`, use `action:"config"` first.
 
 The mocked pass executes reachable script control flow with schema-conforming fabricated agent results. It simulates explicit checkpoint replies, including `true` for confirm, with journaling disabled; simulated answers cannot approve live work. It can prove that syntax, metadata, helper calls, and reachable branches are structurally executable, but it cannot prove prompt quality, real-world judgment, or convergence through every branch. Keep loops bounded in script code and inspect validation warnings for declared phases that the fabricated path did not reach.
 

@@ -5,7 +5,7 @@
 - Every agent session runs in the run's base `cwd` unless the call narrows it: `agent({ cwd: "packages/api" })` (relative resolves against the base).
 - `isolation: "worktree"` runs the agent in a **throwaway git worktree** (`<repoRoot>/.agentprism/worktrees/…`) so parallel agents can edit without colliding. The worktree and its branch are **always deleted when the call ends — an isolated agent's file edits are discarded**. Have isolated agents *return their work as data* (a unified diff, a file map, a report) and apply it in a later non-isolated step; use worktrees for experiments, builds, and verification, not for persistent edits. Outside a git repo, isolation degrades to the shared tree with a logged notice.
 - `mode` requests an exact agent-advertised ACP session mode. Config returns raw names, descriptions, and `_meta`; use those backend-owned explanations instead of inferring from an id. For trusted implementation/review workflows use Claude `bypassPermissions` or Codex `agent` when advertised. Claude `auto` uses a model classifier and may still request permission, so it is not the full-access autonomous mode. Automatic preflight rejects a mode the selected backend/model does not advertise. Only set `mode` on calls whose `model` you also pin. Use an advertised read-only/plan mode for reviewers that must not write.
-- `agentType: "<name>"` binds a reusable subagent definition — a Markdown file at `<cwd>/.agentprism/agents/<name>.md` (project) or `~/.agentprism/agents/<name>.md` (user; project wins) whose frontmatter sets tool allow/deny lists, a model, and isolation, and whose body is the role prompt. An unknown name logs a warning and degrades to defaults.
+- `agentType: "<name>"` binds a reusable subagent definition — a Markdown file at `<cwd>/.agentprism/agents/<name>.md` (project) or `~/.agentprism/agents/<name>.md` (user; project wins) whose frontmatter sets tool allow/deny lists, a model, and isolation, and whose body is the role prompt. Admission snapshots the resolved definitions for cold continuation. An unknown name logs a warning and uses the remaining authored routing; MCP still requires an effective model.
 
 ## Where a mutating workflow runs
 
@@ -27,6 +27,7 @@ Any process that speaks ACP over stdio can serve `agent()` calls — an in-house
 
 ```js
 export const meta = {
+  model: "codex",
   name: "checkout-qa",
   description: "Implement, then QA the checkout flow in a real browser",
   backends: {
@@ -35,7 +36,7 @@ export const meta = {
 };
 
 const change = await agent("Implement the coupon-code field per the spec in docs/coupon.md.",
-                           { label: "implement" });              // default backend
+                           { label: "implement" });              // inherits meta.model
 const verdict = await agent(
   `Open the app, walk through checkout with coupon SAVE20, and verify the discount line. Change summary:\n${change}`,
   { label: "qa", model: "browser",                               // the custom agent

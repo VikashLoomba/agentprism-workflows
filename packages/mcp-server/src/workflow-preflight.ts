@@ -2,6 +2,9 @@ import type { AgentRunner } from "@automatalabs/shared-types";
 const BUILTIN_BACKEND_IDS = ["claude", "codex", "opencode", "pi"] as const;
 import {
   buildHarnessModelsView,
+  buildHarnessConfigSummary,
+  formatHarnessConfigSummary,
+  probeHarnessConfig,
   collapseHarnessOptionsForOutput,
   formatHarnessConfigReport,
   formatValidateReport,
@@ -12,6 +15,10 @@ import {
   type ValidateProbeRunner,
   type ValidateWorkflowReport,
 } from "@automatalabs/workflows";
+
+export const WORKFLOW_DIAGNOSTIC_PROBE_TIMEOUT_MS = 5_000;
+export const WORKFLOW_CONFIG_PROBE_TIMEOUT_MS = 15_000;
+export const WORKFLOW_CONFIG_DISCOVERY_TIMEOUT_MS = 40_000;
 
 const MAX_STRUCTURED_BYTES = 24_576;
 const MAX_HARNESSES = 32;
@@ -30,6 +37,7 @@ export interface WorkflowConfigSummary {
   harnessOptions: Array<Record<string, unknown>>;
   omittedHarnesses: number;
   models: Array<Record<string, unknown>>;
+  authoringSummary: { harnesses: Array<Record<string, unknown>>; omittedHarnesses: number };
 }
 
 interface ProbeRunnerCandidate {
@@ -39,7 +47,6 @@ interface ProbeRunnerCandidate {
   ) => Promise<ProbedConfigOptions>;
   listBackends?: () => string[];
   listCustomBackends?: () => string[];
-  defaultBackendId?: () => string;
 }
 
 /** Reuse the server's live runner for no-prompt discovery. A generic AgentRunner that does
@@ -57,9 +64,6 @@ export function workflowProbeRunner(runner: AgentRunner): ValidateProbeRunner {
       listBackends,
       ...(typeof candidate.listCustomBackends === "function"
         ? { listCustomBackends: () => candidate.listCustomBackends!() }
-        : {}),
-      ...(typeof candidate.defaultBackendId === "function"
-        ? { defaultBackendId: () => candidate.defaultBackendId!() }
         : {}),
     };
   }
@@ -101,6 +105,10 @@ export function configSummary(report: HarnessConfigReport, modelFilter?: string)
     ok: report.ok,
     ...projected,
     models: views,
+    authoringSummary: {
+      harnesses: buildHarnessConfigSummary(report).harnesses.slice(0, MAX_HARNESSES).map(entry => boundValue(entry) as Record<string, unknown>),
+      omittedHarnesses: Math.max(0, report.harnessOptions.length - MAX_HARNESSES),
+    },
   };
   while (jsonBytes(summary) > MAX_STRUCTURED_BYTES) {
     const harness = summary.harnessOptions.find((entry) =>
@@ -122,13 +130,24 @@ export function configSummary(report: HarnessConfigReport, modelFilter?: string)
       grouped.groups.pop();
       continue;
     }
+    if (summary.authoringSummary.harnesses.length) {
+      summary.authoringSummary.harnesses.pop();
+      summary.authoringSummary.omittedHarnesses++;
+      continue;
+    }
+    if (summary.harnessOptions.length) {
+      summary.harnessOptions.pop();
+      summary.omittedHarnesses++;
+      continue;
+    }
+    if (summary.models.length) { summary.models.pop(); continue; }
     break;
   }
   return summary;
 }
 
 function routedModelSpec(backendId: string, modelId: string): string {
-  return modelId.startsWith(`${backendId}/`) ? modelId : `${backendId}/${modelId}`;
+  return `${backendId}/${modelId}`;
 }
 
 function modelProbeSuggestion(
@@ -162,6 +181,15 @@ function modelProbeSuggestion(
 
 export function configText(report: HarnessConfigReport, modelFilter?: string): string {
   const lines = ["Live workflow backend configuration (no workflow was started):"];
+  if (modelFilter !== undefined) {
+    for (const view of buildHarnessModelsView(report, modelFilter)) {
+      if (!view.probed) continue;
+      const matches = view.matches ?? [];
+      lines.push(`${view.backendId}: ${matches.length} model(s) match ${JSON.stringify(modelFilter)}`,
+        ...matches.slice(0, MAX_MODEL_MATCHES).map((model) => `  ${routedModelSpec(view.backendId, model)}`));
+      if (matches.length > MAX_MODEL_MATCHES) lines.push(`  … ${matches.length - MAX_MODEL_MATCHES} more omitted`);
+    }
+  }
   for (const harness of report.harnessOptions) {
     const suggestion = modelProbeSuggestion(report, harness);
     if (!suggestion) continue;
@@ -172,19 +200,10 @@ export function configText(report: HarnessConfigReport, modelFilter?: string): s
       `Discover similar models with modelFilter: ${JSON.stringify(suggestion.filter)}`,
     );
   }
-  lines.push(formatHarnessConfigReport(report));
-  if (modelFilter !== undefined) {
-    const views = buildHarnessModelsView(report, modelFilter);
-    for (const view of views) {
-      if (!view.probed) continue;
-      const matches = view.matches ?? [];
-      lines.push(
-        `${view.backendId}: ${matches.length} model(s) match ${JSON.stringify(modelFilter)}`,
-        ...matches.slice(0, MAX_MODEL_MATCHES).map((model) => `  ${model}`),
-      );
-      if (matches.length > MAX_MODEL_MATCHES) lines.push(`  … ${matches.length - MAX_MODEL_MATCHES} more omitted`);
-    }
-  }
+  const exactModelsOnly = report.harnessOptions.length > 0 && report.harnessOptions.every((harness) => harness.model !== undefined);
+  if (!exactModelsOnly) lines.push(formatHarnessConfigSummary(buildHarnessConfigSummary(report)));
+  lines.push('Config option defaults below are model-specific: backend-only probes describe the backend’s default model. Use action:"config", modelSpecs:["backend/exact-model"] to check the selected model’s options.');
+  lines.push(formatHarnessConfigReport(report, { includeSummary: false }));
   return truncateUtf8(lines.join("\n"), MAX_TEXT_BYTES, "…[config diagnostics truncated]");
 }
 
@@ -208,6 +227,7 @@ function projectHarnessOptions(harnesses: readonly unknown[]): {
       backendId: harness.backendId,
       defaultModeId: harness.defaultModeId,
       model: harness.model,
+      optionScope: harness.model === undefined ? "default-model" : "exact-model",
       probed: harness.probed,
       error: harness.error,
       modes: harness.modes,
@@ -246,4 +266,24 @@ function boundValue(value: unknown, depth = 0): unknown {
     return output;
   }
   return boundText(String(value));
+}
+
+/** Bounded, partial discovery supplements a missing route; it never selects one. */
+export async function missingRoutingDiagnostics(
+  probeRunner: ValidateProbeRunner,
+  cwd: string,
+  backends?: Record<string, CustomBackendConfig>,
+): Promise<string> {
+  const guidance = 'Agent routing discovery:\nConfigure the failing agent call with an explicit model route, for example agent("task", { model:"codex" }), or set meta.model. Backend-only routes intentionally use that backend’s configured default model. Discover exact model-specific options with workflow { action:"config", modelSpecs:["backend/exact-model"] }.';
+  try {
+    const available = [...new Set([...(probeRunner.listBackends?.() ?? BUILTIN_BACKEND_IDS), ...Object.keys(backends ?? {})])];
+    const harnesses = available.slice(0, MAX_HARNESSES);
+    const omitted = available.length > harnesses.length
+      ? `\n${available.length - harnesses.length} additional backends omitted; request workflow action:"config" with explicit harnesses to probe them.`
+      : "";
+    const report = await probeHarnessConfig({ cwd, harnesses, backends, probeRunner, probeTimeoutMs: WORKFLOW_DIAGNOSTIC_PROBE_TIMEOUT_MS, probeConcurrency: 4 });
+    return truncateUtf8(`${guidance}${omitted}\n\n${formatHarnessConfigSummary(buildHarnessConfigSummary(report))}`, MAX_TEXT_BYTES, "…[discovery truncated]");
+  } catch (error) {
+    return `${guidance}\nDiscovery unavailable: ${boundText(error instanceof Error ? error.message : String(error))}`;
+  }
 }

@@ -129,7 +129,7 @@ test("whole-run stop exposes a durable pending operation when an external owner 
   const owner = new WorkflowManager({ cwd: root, agent: controlled.runner, persistence: store.persistence });
   const started = owner.startInBackground(
     [
-      'export const meta = { name: "pending-stop", description: "pending stop" };',
+      'export const meta = { model: "claude", name: "pending-stop", description: "pending stop" };',
       'return await agent("block");',
     ].join("\n"),
     undefined,
@@ -176,7 +176,7 @@ test("stop durably aborts a asynchronous run, publishes stopped, and retains its
   const dir = mkdtempSync(join(tmpdir(), "agentprism-mcp-stop-loop-"));
   const scriptPath = join(dir, "stop-loop.workflow.js");
   const original = [
-    'export const meta = { name: "stop-loop", description: "stop and resume" };',
+    'export const meta = { model: "claude", name: "stop-loop", description: "stop and resume" };',
     'const first = await agent("first", { label: "first" });',
     'const second = await agent("second", { label: "second" });',
     "return { first, second };",
@@ -253,7 +253,7 @@ test("stop with callIndex cancels one agent, keeps the run live, and treats labe
       arguments: {
         action: "run", requestId: randomUUID(),
         script: [
-          'export const meta = { name: "narrow-stop", description: "cancel one branch" };',
+          'export const meta = { model: "claude", name: "narrow-stop", description: "cancel one branch" };',
           "const values = await parallel([",
           '  () => agent("peer", { label: "peer", retries: 3 }),',
           '  () => agent("cancel", { label: "cancel", retries: 3 }),',
@@ -353,7 +353,7 @@ test("stop with callIndex reports scoped ambiguity and leaves whole-run stop beh
     agent: controlled.runner,
     loadSavedWorkflow: (name) => name === "child"
       ? [
-          'export const meta = { name: "cancel-child", description: "nested call" };',
+          'export const meta = { model: "claude", name: "cancel-child", description: "nested call" };',
           'return await agent("nested", { label: "nested" });',
         ].join("\n")
       : undefined,
@@ -365,7 +365,7 @@ test("stop with callIndex reports scoped ambiguity and leaves whole-run stop beh
       arguments: {
         action: "run", requestId: randomUUID(),
         script: [
-          'export const meta = { name: "cancel-ambiguity", description: "duplicate indexes" };',
+          'export const meta = { model: "claude", name: "cancel-ambiguity", description: "duplicate indexes" };',
           "return await parallel([",
           '  () => agent("root", { label: "root" }),',
           '  () => workflow("child"),',
@@ -418,7 +418,7 @@ test("four stopped asynchronous runs immediately free every registry slot", asyn
   );
   const { client, dispose } = await connect(runner);
   const script = [
-    'export const meta = { name: "registry-stop", description: "slot eviction" };',
+    'export const meta = { model: "claude", name: "registry-stop", description: "slot eviction" };',
     'return await agent("block until cleanup");',
   ].join("\n");
   try {
@@ -465,7 +465,7 @@ test("stop refuses a final acknowledgement when the terminal snapshot save fails
       arguments: {
         action: "run", requestId: randomUUID(),
         script: [
-          'export const meta = { name: "stop-save-fault", description: "fault" };',
+          'export const meta = { model: "claude", name: "stop-save-fault", description: "fault" };',
           'return await agent("block");',
         ].join("\n"),
       },
@@ -540,7 +540,7 @@ test("stop refuses a final acknowledgement when the stopped event append fails",
       arguments: {
         action: "run", requestId: randomUUID(),
         script: [
-          'export const meta = { name: "stop-event-fault", description: "fault" };',
+          'export const meta = { model: "claude", name: "stop-event-fault", description: "fault" };',
           'return await agent("block");',
         ].join("\n"),
       },
@@ -648,7 +648,7 @@ test("stop clears durable checkpoint context on a paused live run", async () => 
     const paused = await runAndObserve(client, {
         action: "run", requestId: randomUUID(),
         script: [
-          'export const meta = { name: "paused-stop", description: "paused stop" };',
+          'export const meta = { model: "claude", name: "paused-stop", description: "paused stop" };',
           'return await checkpoint("approve", {});',
         ].join("\n"),
       });

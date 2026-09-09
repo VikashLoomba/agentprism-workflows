@@ -17,7 +17,7 @@ export const meta = {
 };
 ```
 
-Per-agent model resolution order: explicit `agent({ model })` > `agent({ tier })` > the current phase's `model` > `meta.model` > the host session's default. So `meta.phases[].model` gives a whole phase a backend without repeating it on every call.
+Per-agent model resolution order starts with explicit `agent({ model })`, then the named-agent definition's model. Otherwise a declared tier uses its captured mapping or host `mainModel` and suppresses phase/default routing; without a tier, the current phase's `model` precedes `meta.model` and an explicit host `defaultModel`. MCP rejects any actual call left without an effective model. So `meta.phases[].model` gives a whole phase a backend without repeating it on every call. The fragments below inherit the metadata above.
 
 ## Fan-out: `parallel` and `pipeline`
 

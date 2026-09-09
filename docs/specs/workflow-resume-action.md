@@ -20,7 +20,7 @@ interface WorkflowResumeToolInput {
 
 `runId` is both the input and output run identity. Resume never allocates a child run, exposes an
 attempt identity, accepts new script content, or accepts replacement args. It reloads the persisted
-script, args, canonical host-owned agent configuration, journal, event stream, cumulative usage,
+script, args, immutable routing inputs, journal, event stream, cumulative usage,
 checkpoint decisions, and eligible interrupted ACP session state. The same event stream continues
 from its durable cursor and provider usage is added to the run's existing total.
 
@@ -40,18 +40,21 @@ selector. The Run action accepts explicit new content only and cannot name a pri
 
 ## Canonical admission
 
-Before the first live call, the host atomically persists a format-2 admission snapshot containing
-the canonical effective occurrence-indexed model/mode/config selection, host-pinned default model,
-approved script backend map, selection hash, source, and admission timestamp. The canonical admission
-contains effective configuration rather than raw form responses; pending setup separately stores its
-exact schema/catalog and immutable response receipts. A continued run uses that snapshot without probing or opening new configuration setup.
+Before live dispatch, the host atomically persists format-3 admission:
+`{ format:3, strict:true, routingSnapshot:{ modelTiers:null|{tiers}, agentDefinitions, mainModel? }, defaultModel?, scriptBackends?, routingHash, recordedAt }`.
+The snapshot captures tier configuration and named-agent definitions, including their absence,
+so cold continuation does not reread changed routing files. The immutable script supplies phase
+and workflow models. `routingHash` binds the routing snapshot, optional host default, and approved
+script backends. Continuation validates the format and integrity and reuses these inputs without
+new routing discovery or provider selection.
 
-Strict occurrence coverage remains active for the life of the run. If execution reaches an agent
-occurrence that admission did not cover, the occurrence is durably recorded and the run fails
-closed. Every later resume refuses with `admission-uncovered`. A pre-contract run with no valid
-admission snapshot remains observable when its stored data permits, but MCP continuation refuses
-with a named admission error and instructs the caller to start a fresh Run. There is no migration,
-mapping guess, or fallback selection.
+Every actual call must resolve a nonblank effective model before identity hashing or dispatch.
+Mock validation observes one path; additional configured live calls are valid, including nested
+and data-dependent calls. A missing live route fails before that call reaches the runner. There is
+no positional configuration map or uncovered-occurrence marker. Effective model, mode, and config
+options enter call identity and durable call records (`modelRequested`, `modeRequested`, and
+`configOptionsRequested`). Old or invalid admissions remain inspectable where supported but cannot
+execute through MCP; start a fresh Run. Supported SDK journal eras retain their separate contracts.
 
 ## Checkpoint decisions
 
@@ -62,7 +65,7 @@ is reported as ignored and the first durable value remains authoritative. Cold r
 replays that decision forever and never re-asks the checkpoint.
 
 Only paused or failed continuable runs may start execution again. Missing, lease-owned,
-not-continuable, and admission-missing/invalid/uncovered states are tool errors naming the reason.
+not-continuable, and admission-missing/invalid states are tool errors naming the reason.
 Running, terminal, auth-blocked, and unanswered-checkpoint states are not errors: the response is
 the run's current observation (the same shape as `status`, including the pending `authContext` or
 `checkpointContext` and any reported checkpoint resolutions) with guidance on what to do next.

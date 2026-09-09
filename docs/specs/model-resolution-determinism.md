@@ -21,8 +21,9 @@ the harness that serves them, so it should stop having opinions about them.
 For an effective model spec `S` (after the engine's existing precedence — call `model`, agent-
 definition model, tier mapping, phase/meta route, then an optional host-pinned `defaultModel` — and
 the host tier configuration, which maps `small`/`medium`/`big` to a full spec string that then follows
-these same rules). `defaultModel` is an additive composition-root input introduced by
-[`mcp-automatic-default-backend.md`](mcp-automatic-default-backend.md); absent it, the historical
+these same rules). `defaultModel` remains an optional SDK composition-root input.
+[Explicit MCP routing](explicit-agent-routing.md) requires an effective model and rejects browse
+selectors ending in `/*` before dispatch; it does not auto-select a backend. Non-strict SDK
 runner-default behavior below is unchanged:
 
 1. **Routing.** Split `S` on its first `/`. If the first segment, ASCII-case-insensitively, is a

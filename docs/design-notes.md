@@ -329,26 +329,33 @@ before reading a mutable path. Exact retries work at capacity and after a lost a
 conflicting use of the same ID fails clearly. Unreadable accepted records cannot be recreated.
 
 `WorkflowLifecycle` belongs to the project context, independent of MCP request/session lifetime.
-It performs mock routing, approved no-prompt backend probes, optional model setup, and final routed
-validation after acceptance. Script-declared commands are never probed before approval. Pending
-`setup` is persisted with an immutable setup UUID and exact schema/catalog. `setup-response` accepts
-or declines that ID in a separate bounded request; durable receipts make identical retries safe
-after admission or completion. Decline/cancel stays in history as aborted; invalid choices remain
+It performs backend approval, mock routing, and routed no-prompt configuration validation after
+acceptance. Script-declared commands are never probed before approval. Pending backend-approval
+`setup` is persisted with an immutable setup UUID and exact schema. `setup-response` accepts or
+declines that ID in a separate bounded request; durable receipts make identical retries safe after
+admission or completion. Decline/cancel stays in history as aborted; invalid responses remain
 pending; later validation failure stays as failed. No request holds a human form open.
 
-Apps/form-capable clients configure only mock-observed occurrences whose effective model remains
-unresolved. Authored call/agent-definition/tier/phase/meta choices, including backend-only specs,
-are preserved. The form shows phase title/detail, label, and bounded credential-redacted task text.
-Selected models are rechecked against the current catalog, then the full routed configuration is
-validated. Canonical admission format 2 stores effective provider/model/mode/config by stable root
-agent occurrence ordinal before live dispatch. Raw submitted form fields are not retained. A live
-occurrence absent from this canonical map fails closed. Same-ID continuation inherits the snapshot.
+All MCP clients require an effective model on every actual call, directly or from agent-definition,
+resolved tier, phase, or workflow routing. Backend-only specs intentionally retain the backend's
+default model; mode and config options are optional. Missing routes produce actionable errors with
+bounded concurrent discovery, not an agent-configuration form or an automatically selected backend.
 
-Clients without Apps/forms preserve automatic default routing: an explicit
-`AGENTPRISM_DEFAULT_BACKEND` wins; otherwise no-prompt discovery excludes failures/empty built-in
-catalogs, prefers positive Codex/Pi session-open evidence, and falls back to a session-ready unknown.
-Session discovery cannot prove universal first-prompt authentication. The selected backend-only
-pin persists; `AUTH_REQUIRED` pauses on that backend without switching providers.
+Before live dispatch, the host atomically persists format-3 admission:
+`{ format:3, strict:true, routingSnapshot:{ modelTiers:null|{tiers}, agentDefinitions, mainModel? }, defaultModel?, scriptBackends?, routingHash, recordedAt }`.
+The snapshot captures tier configuration and named-agent definitions, including their absence,
+so cold continuation does not reread changed routing files. The immutable script supplies phase
+and workflow models. `routingHash` binds the routing snapshot, optional host default, and approved
+script backends. Continuation validates the format and integrity and reuses these inputs without
+new routing discovery or provider selection.
+
+Every actual call must resolve a nonblank effective model before identity hashing or dispatch.
+Mock validation observes one path; additional configured live calls are valid, including nested
+and data-dependent calls. A missing live route fails before that call reaches the runner. There is
+no positional configuration map or uncovered-occurrence marker. Effective model, mode, and config
+options enter call identity and durable call records (`modelRequested`, `modeRequested`, and
+`configOptionsRequested`). Old or invalid admissions remain inspectable where supported but cannot
+execute through MCP; start a fresh Run. Supported SDK journal eras retain their separate contracts.
 
 Every workflow request has a 45-second bound, and each active preparation attempt has a 120-second
 bound. Human input can remain pending indefinitely. At most four preparing/executing runs are
@@ -359,7 +366,7 @@ observation, not accepted work; run/resume never retain progress tokens or reque
 ### Durable continuation, checkpoints, and live permissions
 
 Resume requires a new `requestId` for each intended operation and uses the exact stored run ID,
-script, args, cwd, approved backends, canonical configurations, journal, event stream, cumulative
+script, args, cwd, approved backends, immutable routing inputs, journal, event stream, cumulative
 usage, and checkpoint history. Receipt/generation persistence precedes execution, so a lost-ack
 retry cannot start a second continuation. Edited content starts a fresh run. Existing SDK promise
 APIs, incremental/new-run resume surfaces, and REPL remain independent supported products.
@@ -582,8 +589,8 @@ ACP is a *unified* protocol — nothing about the runner is backend-specific exc
   registered names FIRST (`model: "browser"` or `"browser/<inner-model>"` — the name is
   routing; the part after the slash is selected via Session Config Options), then the
   built-in heuristics. `AGENTPRISM_DEFAULT_BACKEND` may name a registry entry. The runner's
-  historical unset fallback remains Claude; MCP's separate composition-root policy may inject a
-  discovered backend-only `defaultModel` before the runner sees an otherwise omitted model.
+  historical unset fallback remains Claude for non-strict SDK calls. MCP requires an effective
+  authored or inherited model and never discovers a default to fill a missing route.
   `"claude"`/`"codex"`/`"opencode"`/`"pi"` are reserved. A custom backend speaks the repo's published generic
   dialect: schema IN as turn-level `_meta.outputSchema` (plain JSON Schema, not
   OpenAI-strict), optionally a client-hosted StructuredOutput MCP tool when HTTP MCP is

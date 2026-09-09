@@ -105,3 +105,14 @@ Run `node scripts/smoke-pi-package.mjs` from the repository root after changing 
 ## Built on pi — THIRD-PARTY notice
 
 This package depends on and embeds `@earendil-works/pi-coding-agent`, `@earendil-works/pi-agent-core`, and `@earendil-works/pi-ai` version 0.85.1. pi is Copyright Earendil Inc., Mario Zechner, and Armin Ronacher and is distributed under the MIT License. The dependency packages retain the full MIT copyright and license text. pi-acp itself is Apache-2.0.
+
+## Model discovery preferences
+
+The ACP model catalog continues to expose every authenticated available model. Native merged Pi
+`enabledModels` settings add presentation metadata to the model config option at
+`_meta["@automatalabs/agentprism.modelDiscovery"]`:
+`{ source:"enabledModels", preferred:string[], unmatched:string[] }`. Native pattern order and
+matching semantics are preserved, then preferences intersect the authenticated catalog. Unmatched
+patterns remain visible. Preferences do not restrict execution; without a configured preference
+list, the MCP summary shows available provider groups. The current model is distinct from preferred
+models, and `thinkingLevel` options must be discovered for the exact selected model.

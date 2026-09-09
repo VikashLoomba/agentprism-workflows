@@ -281,6 +281,8 @@ test("config, journal metadata, and call-record provenance follow the nested pro
         hashMatched: true,
       },
       modelRequested: allSecrets,
+      modeRequested: allSecrets,
+      configOptionsRequested: { effort: "high", fast: true, password: "hidden", detail: allSecrets },
       modelResolved: allSecrets,
       backendId: allSecrets,
       resolvedCwd: allSecrets,
@@ -295,6 +297,10 @@ test("config, journal metadata, and call-record provenance follow the nested pro
     assert.equal(callRecord.event.record.hash, "hash-copied-verbatim");
     assert.equal(callRecord.event.record.inputsHash, "inputs-hash-copied-verbatim");
     assert.equal(callRecord.event.record.provenance?.source, "replay");
+    assert.ok(callRecord.event.record.modeRequested?.includes("[REDACTED]"));
+    assert.deepEqual(callRecord.event.record.configOptionsRequested, {
+      detail: callRecord.event.record.modeRequested, effort: "high", fast: true, password: "[REDACTED]",
+    });
   }
 });
 

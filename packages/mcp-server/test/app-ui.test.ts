@@ -23,16 +23,6 @@ function runIdOf(res: Awaited<ReturnType<Awaited<ReturnType<typeof connect>>["cl
   return runId as string;
 }
 
-async function acceptTestConfiguration(client: Awaited<ReturnType<typeof connect>>["client"], runId: string): Promise<void> {
-  const response = await waitForRun(client, runId, (status) => Boolean((status.setup as { request?: unknown } | undefined)?.request));
-  const request = (structured(response)?.setup as { request: { id: string; kind: string; requestedSchema: { properties: Record<string, { oneOf?: Array<{ const: string }> }>; required: string[] } } }).request;
-  assert.equal(request.kind, "agent-configuration");
-  assert.deepEqual(request.requestedSchema.required, ["agent_0_model"]);
-  assert.ok(request.requestedSchema.properties.agent_0_model?.oneOf?.some((choice) => choice.const === "claude"));
-  const accepted = await client.callTool({ name: "workflow", arguments: { action: "setup-response", runId, setupId: request.id, response: { action: "accept", content: { agent_0_model: "claude" } } } });
-  assert.equal(accepted.isError, false, textOf(accepted));
-}
-
 test("legacy initialize advertises this server's MCP Apps extension support", async () => {
   const { client, dispose } = await connect(okRunner(), { uiCapability: "matching" });
   try {
@@ -192,7 +182,6 @@ test("workflow-events pages an accepted asynchronous run to terminal state", asy
     });
     assert.equal(accepted.isError ?? false, false, textOf(accepted));
     const runId = runIdOf(accepted);
-    await acceptTestConfiguration(client, runId);
     const settled = await waitForRun(client, runId);
     assert.equal(structured(settled)?.status, "completed", textOf(settled));
 
@@ -256,7 +245,6 @@ test("workflow-runs returns one bounded active/recent project dashboard", async 
       arguments: { action: "run", requestId: randomUUID(), script: ONE_AGENT_SCRIPT },
     });
     const secondRunId = runIdOf(second);
-    await Promise.all([acceptTestConfiguration(client, firstRunId), acceptTestConfiguration(client, secondRunId)]);
     await Promise.all([waitForRun(client, firstRunId), waitForRun(client, secondRunId)]);
     const listed = await client.callTool({
       name: WORKFLOW_RUNS_TOOL_NAME,

@@ -16,7 +16,7 @@ import {
   type WorkflowPreparation,
 } from "../src/workflow-preparation.js";
 
-const script = (body: string) => `export const meta = { name: 'Prepared workflow', description: 'Durable setup' }\n${body}`;
+const script = (body: string) => `export const meta = { name: 'Prepared workflow', description: 'Durable setup', model: 'fixture' }\n${body}`;
 const fingerprint = (value: string) => createHash("sha256").update(value).digest("hex");
 const operation = (value = randomUUID()): WorkflowOperationIdentity => ({ id: value, fingerprint: fingerprint(value) });
 const preparing = (data: Record<string, unknown> = {}): WorkflowPreparation => ({ format: 1, state: "preparing", data });
@@ -58,7 +58,7 @@ test("acceptance persists frozen source, args, operation and empty events before
     assert.equal(manager.inspectRun(accepted.runId)?.runId, accepted.runId, "public redaction must preserve the opaque run ID");
 
     const started = manager.admitPreparedRun(accepted.runId, {
-      agentConfigurations: { 0: { model: "fixture" } }, requireAgentConfiguration: true,
+      requireAgentConfiguration: true,
     });
     const result = await started.promise;
     assert.equal(started.runId, accepted.runId);
@@ -66,7 +66,7 @@ test("acceptance persists frozen source, args, operation and empty events before
     assert.equal(liveCalls, 1);
     const completed = manager.getPersistence().load(accepted.runId)!;
     assert.equal(completed.status, "completed");
-    assert.equal(completed.admission?.format, 2);
+    assert.equal(completed.admission?.format, 3);
     assert.equal(completed.preparation, undefined);
     assert.deepEqual(completed.acceptanceOperation, request);
     assert.equal(manager.activeExecutionCount(), 0);
@@ -155,7 +155,7 @@ test("pending setup survives cold restore and old owner cannot overwrite the cla
     cold.updatePreparation(accepted.runId, preparing({ approved: true }), 0);
     assert.throws(() => cold.updatePreparation(accepted.runId, preparing(), 0), /preparation changed/);
     const result = await cold.admitPreparedRun(accepted.runId, {
-      requireAgentConfiguration: true, agentConfigurations: {},
+      requireAgentConfiguration: true,
     }).promise;
     assert.equal(result.result, 7);
   });
@@ -173,7 +173,7 @@ test("response receipts survive admission, settlement and cold reads; conflicts 
       }, 1), /response conflict/);
       manager.updatePreparation(accepted.runId, preparing({ next: true }), 1);
       if (terminal === "completed") {
-        await manager.admitPreparedRun(accepted.runId, { requireAgentConfiguration: true, agentConfigurations: {} }).promise;
+        await manager.admitPreparedRun(accepted.runId, { requireAgentConfiguration: true }).promise;
       } else {
         manager.settlePreparedRun(accepted.runId, "aborted", "User declined setup");
       }
@@ -209,7 +209,7 @@ test("initial save and canonical-admission save failures cannot acknowledge or e
     const accepted = manager.prepareRun(source, undefined, { operation: request, preparation: preparing() });
     reject = "admission";
     assert.throws(() => manager.admitPreparedRun(accepted.runId, {
-      requireAgentConfiguration: true, agentConfigurations: { 0: { model: "fixture" } },
+      requireAgentConfiguration: true,
     }), /failed to persist/);
     assert.equal(manager.getRun(accepted.runId)?.status, "pending");
     assert.equal(disk.load(accepted.runId)?.status, "pending");
@@ -270,7 +270,7 @@ test("invalid accepted source becomes inspectable failed setup; stop and delete 
     const request = operation();
     const invalid = manager.prepareRun("this is not workflow JavaScript", undefined, { operation: request, preparation: preparing() });
     assert.equal(manager.getPersistence().load(invalid.runId)?.status, "pending");
-    assert.throws(() => manager.admitPreparedRun(invalid.runId, { requireAgentConfiguration: true, agentConfigurations: {} }));
+    assert.throws(() => manager.admitPreparedRun(invalid.runId, { requireAgentConfiguration: true }));
     assert.equal(manager.settlePreparedRun(invalid.runId, "failed", "Workflow static validation failed"), true);
     assert.match(manager.inspectRun(invalid.runId)?.reason ?? "", /static validation failed/);
     assert.equal(manager.deleteRun(invalid.runId), true);
@@ -282,7 +282,7 @@ test("invalid accepted source becomes inspectable failed setup; stop and delete 
     assert.equal(manager.getPersistence().load(pending.runId)?.status, "aborted");
     assert.equal(manager.getPersistence().readEvents(pending.runId).events.at(-1)?.event.type, "stopped");
     assert.throws(() => manager.updatePreparation(pending.runId, preparing()), /not owned pending/);
-    assert.throws(() => manager.admitPreparedRun(pending.runId, { requireAgentConfiguration: true, agentConfigurations: {} }), /not owned pending/);
+    assert.throws(() => manager.admitPreparedRun(pending.runId, { requireAgentConfiguration: true }), /not owned pending/);
   });
 });
 
@@ -306,7 +306,7 @@ test("continuation operation and explicit checkpoint reply commit together, and 
     const accepted = manager.prepareRun(script("const a = await checkpoint('First'); const b = await checkpoint('Second'); return [a,b]"), undefined, {
       operation: operation(), preparation: preparing(),
     });
-    await assert.rejects(manager.admitPreparedRun(accepted.runId, { requireAgentConfiguration: true, agentConfigurations: {} }).promise,
+    await assert.rejects(manager.admitPreparedRun(accepted.runId, { requireAgentConfiguration: true }).promise,
       (error: unknown) => (error as { code?: string }).code === WorkflowErrorCode.CHECKPOINT_REQUIRED);
     const firstOperation = operation();
     const first = await manager.continueRun(accepted.runId, { operation: firstOperation, checkpointReplies: { 0: true } });
@@ -358,7 +358,7 @@ test("failed continuation save preserves the unanswered checkpoint and leaves re
       },
     } });
     const accepted = manager.prepareRun(script("return await checkpoint('Confirm')"), undefined, { operation: operation(), preparation: preparing() });
-    await assert.rejects(manager.admitPreparedRun(accepted.runId, { requireAgentConfiguration: true, agentConfigurations: {} }).promise);
+    await assert.rejects(manager.admitPreparedRun(accepted.runId, { requireAgentConfiguration: true }).promise);
     const request = operation();
     denyContinuation = true;
     await assert.rejects(manager.continueRun(accepted.runId, { operation: request, checkpointReplies: { 0: true } }), /failed to persist/);
@@ -380,7 +380,7 @@ test("setup data and continuation history have finite non-evicting limits", asyn
       operation: operation(), preparation: preparing({ oversized: "x".repeat(MAX_WORKFLOW_PREPARATION_BYTES) }),
     }), /preparation exceeds/);
     const accepted = manager.prepareRun(script("return await checkpoint('Confirm')"), undefined, { operation: operation(), preparation: preparing() });
-    await assert.rejects(manager.admitPreparedRun(accepted.runId, { requireAgentConfiguration: true, agentConfigurations: {} }).promise);
+    await assert.rejects(manager.admitPreparedRun(accepted.runId, { requireAgentConfiguration: true }).promise);
     const persisted = manager.getPersistence().load(accepted.runId)!;
     persisted.continuationOperations = Array.from({ length: MAX_WORKFLOW_CONTINUATION_OPERATIONS }, (_, index) => ({
       ...operation(`older-${index}`), acceptedAt: new Date().toISOString(), continuation: { generation: index + 1, replayedPrefix: 0 },

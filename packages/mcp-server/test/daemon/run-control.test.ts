@@ -23,7 +23,7 @@ import { connectHttp, makeProjectDir, waitUntil } from "../_http-harness.js";
 import "../_harness.js";
 
 const SCRIPT = [
-  'export const meta = { name: "daemon-route-stop", description: "daemon route stop" };',
+  'export const meta = { model: "claude", name: "daemon-route-stop", description: "daemon route stop" };',
   'return await agent("block");',
 ].join("\n");
 
@@ -424,7 +424,7 @@ test("a lost setup forwarding acknowledgement preserves one durable answer and o
   try {
     const accepted = await session.client.callTool({ name: "workflow", arguments: {
       action: "run", requestId: randomUUID(), projectDir: cwd,
-      script: 'export const meta = { name: "setup-once", description: "lost setup reply", backends: { custom: { command: "fixture" } } }; return await agent("work", { model: "custom" });',
+      script: 'export const meta = { model: "claude", name: "setup-once", description: "lost setup reply", backends: { custom: { command: "fixture" } } }; return await agent("work", { model: "custom" });',
     } });
     const runId = String(structured(accepted)?.runId);
     const waiting = structured(await waitForRun(session.client, runId, (state) =>

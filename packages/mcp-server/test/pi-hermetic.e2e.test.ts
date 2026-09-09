@@ -14,13 +14,13 @@ const PI_FIXTURE = fileURLToPath(new URL("../../pi-acp/test/fixtures/hermetic-pi
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 
 const SCRIPT = [
-  'export const meta = { name: "pi-hermetic-e2e", description: "exercise the first-class Pi ladder" };',
+  'export const meta = { model: "pi", name: "pi-hermetic-e2e", description: "exercise the first-class Pi ladder" };',
   'const answer = await agent("Reply with hermetic pong.");',
   "return answer;",
 ].join("\n");
 
 const STRUCTURED_SCRIPT = [
-  'export const meta = { name: "pi-hermetic-structured-e2e", description: "exercise Pi StructuredOutput injection" };',
+  'export const meta = { model: "pi", name: "pi-hermetic-structured-e2e", description: "exercise Pi StructuredOutput injection" };',
   'const answer = await agent("Return the requested structured answer.", { schema: { type: "object", additionalProperties: false, required: ["answer"], properties: { answer: { type: "string" } } } });',
   "return answer;",
 ].join("\n");

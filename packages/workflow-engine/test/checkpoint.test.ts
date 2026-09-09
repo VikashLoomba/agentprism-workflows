@@ -249,17 +249,16 @@ return { r }`;
   ]);
 });
 
-test("checkpoints do not shift strict host configuration ordinals across cold continuation", withTempPersistenceDirs(async (persistenceRoot, cwd) => {
+test("checkpoints preserve actual authored routes across cold continuation", withTempPersistenceDirs(async (persistenceRoot, cwd) => {
   const models: Array<string | undefined> = [];
   const runner = { async run(_prompt: string, options?: { model?: string }) { models.push(options?.model); return "done"; } };
-  const script = `export const meta = { name: "checkpoint-routing", description: "host selections after a gate" }
-await agent("before")
+  const script = `export const meta = { name: "checkpoint-routing", description: "authored routes after a gate" }
+await agent("before", { model: "claude/first" })
 await checkpoint("Continue?")
-return await agent("after")`;
+return await agent("after", { model: "codex/second" })`;
   const first = new WorkflowManager({ cwd, persistenceRoot, agent: runner });
   const paused = await first.runSync(script, undefined, {
     requireAgentConfiguration: true,
-    agentConfigurations: { 0: { model: "claude/first" }, 1: { model: "codex/second" } },
   });
   assert.equal(paused.status, "paused");
   assert.deepEqual(models, ["claude/first"]);

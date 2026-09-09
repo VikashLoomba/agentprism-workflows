@@ -48,8 +48,8 @@ pnpm add @automatalabs/workflows
 
 You only need auth for the backend(s) your scripts actually route to. Direct SDK runners retain
 the historical Claude default (override with `AGENTPRISM_DEFAULT_BACKEND`; see
-[Backend selection](#backend-selection)). The bundled MCP server auto-selects a pinned project
-default from no-prompt readiness probes when that environment variable is absent.
+[Backend selection](#backend-selection)). The bundled MCP server requires an effective model on every actual call,
+with no automatic backend selection or agent-configuration setup.
 
 ---
 
@@ -307,8 +307,9 @@ boolean).
 The SDK retains promise-based `runDynamicWorkflow`, `runSync`, and `startInBackground` APIs, plus
 its explicit host `executionAdmission` barrier. MCP uses separate bounded Run/Resume controls and
 durable setup; no SDK callback is an MCP execution-mode selector. Strict `continueRun()` requires
-format-2 canonical admission with an agent-only occurrence map. Checkpoints never shift that map's
-indexes. Checkpoint input fingerprints are format 2, and journaled checkpoint results, result call
+format-3 immutable routing admission capturing tier configuration, named-agent definitions, optional
+host default and approved backends with an integrity hash. Each actual call must resolve a model;
+additional configured live calls are valid. Old admissions remain readable but cannot execute. Checkpoint input fingerprints are format 2, and journaled checkpoint results, result call
 records, and reply injections carry `checkpointDecision:"explicit-v1"`. Historical automatic or
 ambiguous checkpoint records cannot authorize continuation/replay/isolation: they fail with
 `checkpoint-provenance-incompatible` and require a fresh run. Historical reads remain supported.
@@ -803,7 +804,38 @@ report.harnessOptions; // [{ backendId, model?, probed, modes?: SessionModeState
 formatHarnessConfigReport(report); // the CLI's human table
 ```
 
-`probeHarnessConfig({ harnesses?, modelSpecs?, backends?, cwd?, probeRunner? })` — `modelSpecs` selects exact routed models before reading their model-specific option domains; `probeRunner` reuses a host-owned live runner without disposing it; `backends` merges over `AGENTPRISM_BACKENDS` exactly like `createAcpRunner({ backends })`.
+`probeHarnessConfig({ harnesses?, modelSpecs?, backends?, cwd?, probeRunner?, probeTimeoutMs?, probeConcurrency?, signal? })` — `modelSpecs` selects exact routed models before reading their model-specific option domains; `probeRunner` reuses a host-owned live runner without disposing it; `backends` merges over `AGENTPRISM_BACKENDS` exactly like `createAcpRunner({ backends })`.
+
+Probes run concurrently with independent cancellation deadlines. `probeTimeoutMs` defaults to
+60,000 ms and must be a positive timer-safe integer; `probeConcurrency` defaults to 4 and accepts
+1–16. Results retain request order and healthy catalogs when another backend fails. An optional
+`signal` shares cancellation across probes, retaining completed catalogs and skipping queued targets.
+MCP missing-route diagnostics use a 5,000 ms per-probe bound and concurrency 4. Explicit MCP config requests allow 15,000 ms per probe with a shared 40,000 ms discovery budget inside the 45,000 ms request deadline. Initial and exact-model fallback probes share that budget. Discovery cannot select a route.
+
+`buildHarnessConfigSummary(report)` and `formatHarnessConfigSummary(summary)` expose the compact
+view programmatically. `authoringSummary` adds bounded guidance alongside the complete supported
+programmatic catalog.
+The current model is shown separately as `currentModel`, with `currentRoute` only when it is an
+advertised executable leaf; it need not belong to a preference shortlist. `omittedCurrentModel`
+reports a value excluded by presentation bounds. Claude and Codex show their small live model
+catalogs. Pi's native merged `enabledModels` patterns
+produce an ordered preference shortlist intersected with authenticated available models, with
+unmatched patterns reported. This is presentation only, never an execution allowlist. Without a
+preference list, Pi shows available provider groups. OpenCode shows configured direct-provider models
+first, representing each direct provider before filling additional rows when the list is bounded.
+Exact provider IDs `openrouter`, `opencode`, `opencode-go`, `huggingface`, `amazon-bedrock`, and
+`github-copilot` are classified as aggregators, with browse selectors such as `openrouter/*` and counts. Omitted entries carry counts and expansion guidance.
+Browse selectors are not executable models. Expand the full leaf catalog with `modelFilter`
+(case-insensitive substring or slash-delimited regex), for example:
+
+```json
+{ "action":"config", "harnesses":["opencode"], "modelFilter":"/^openrouter\\//" }
+```
+
+Use an exact route such as `opencode/openrouter/openai/gpt-5.6-sol` for execution. Leaf IDs stay
+verbatim; do not shorten provider prefixes or infer models from display names. Backend-only probes
+report options for the default model only. Probe `modelSpecs:["codex/gpt-5.6-sol"]` (or another exact
+returned route) before choosing model-specific mode, effort, or `configOptions`.
 
 ---
 
@@ -921,9 +953,8 @@ once; a custom registration wins on a built-in-name collision. A registered harn
 backend-only and preserves that harness's configured default model. Any other first segment sends
 the entire authored string unchanged to `AGENTPRISM_DEFAULT_BACKEND` (default `claude`). Omitting
 the spec also uses the configured default backend and its default model. This paragraph describes
-the SDK runner. The bundled MCP composition root adds an operator-friendly policy: when the env var
-is truly unset and a workflow reaches a model-less call, it probes backend readiness without
-prompting and injects a pinned backend-only default before validation/execution and resume.
+the SDK runner. The bundled MCP composition root requires effective authored or inherited routing on every actual
+call. Missing routes fail with bounded discovery guidance; no default is selected automatically.
 
 ```ts
 import { selectBackend } from "@automatalabs/workflows";

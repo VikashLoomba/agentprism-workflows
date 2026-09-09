@@ -10,7 +10,7 @@ import { WorkflowNotificationClaims } from "../src/workflow-notifications.js";
 test("run acknowledges the durable script before preparation; a lost acknowledgement never duplicates work", async () => {
   let calls = 0;
   const conn = await connect(makeRunner(() => { calls++; return "done"; }), { listTools: true });
-  const input = { action: "run", requestId: randomUUID(), script: 'export const meta = { name: "retry", description: "retry identity" }; return await agent("work");' };
+  const input = { action: "run", requestId: randomUUID(), script: 'export const meta = { name: "retry", description: "retry identity", model: "claude" }; return await agent("work");' };
   try {
     const accepted = await conn.client.callTool({ name: "workflow", arguments: input });
     assert.equal(accepted.isError, false, textOf(accepted));

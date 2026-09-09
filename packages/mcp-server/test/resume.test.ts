@@ -46,11 +46,11 @@ test("action resume continues the exact run with persisted inputs and admitted c
     const file = persistedRunFile(runId);
     assert.ok(file);
     const admitted = JSON.parse(await (await import("node:fs/promises")).readFile(file, "utf8"));
-    assert.equal(admitted.admission.format, 2);
+    assert.equal(admitted.admission.format, 3);
     assert.equal(admitted.admission.strict, true);
-    assert.equal(admitted.admission.agentConfigurations["0"].model, "claude");
-    assert.equal(admitted.admission.agentConfigurations["1"].model, "claude");
-    assert.match(admitted.admission.selectionHash, /^[a-f0-9]{64}$/);
+    assert.ok(admitted.admission.routingSnapshot);
+    assert.equal(admitted.admission.agentConfigurations, undefined);
+    assert.match(admitted.admission.routingHash, /^[a-f0-9]{64}$/);
     assert.doesNotMatch(JSON.stringify(admitted.admission), /agent_0_model|agent_1_model/);
 
     const second = await client.callTool({
@@ -141,7 +141,7 @@ test("corrupt canonical admission metadata fails closed without provider re-elic
     assert.ok(file);
     const fs = await import("node:fs/promises");
     const state = JSON.parse(await fs.readFile(file, "utf8"));
-    state.admission.selectionHash = "not-a-canonical-hash";
+    state.admission.routingHash = "not-a-canonical-hash";
     await fs.writeFile(file, JSON.stringify(state), "utf8");
     await fs.writeFile(`${file}.bak`, JSON.stringify(state), "utf8");
 
@@ -155,4 +155,27 @@ test("corrupt canonical admission metadata fails closed without provider re-elic
   } finally {
     await dispose();
   }
+});
+
+test("old positional admission remains inspectable but cannot authorize continuation", async () => {
+  const { client, dispose } = await connect(makeRunner((prompt) => {
+    if (prompt === "beta") throw new Error("leave resumable");
+    return "ok";
+  }), { listTools: true });
+  try {
+    const first = await runAndObserve(client, {script:RECOVERABLE_SCRIPT, args:{value:"old admission"}});
+    const runId = String(structured(first)?.runId);
+    const file = persistedRunFile(runId)!;
+    const fs = await import("node:fs/promises");
+    const state = JSON.parse(await fs.readFile(file, "utf8"));
+    state.admission = {format:2, strict:true, source:"mcp-routing", agentConfigurations:{0:{model:"claude"}, 1:{model:"claude"}}, selectionHash:"0".repeat(64), recordedAt:new Date().toISOString()};
+    await fs.writeFile(file, JSON.stringify(state), "utf8");
+    await fs.writeFile(`${file}.bak`, JSON.stringify(state), "utf8");
+    const inspected = await client.callTool({name:"workflow", arguments:{action:"status", runId}});
+    assert.equal(inspected.isError, false, textOf(inspected));
+    const resumed = await client.callTool({name:"workflow", arguments:{action:"resume", requestId:randomUUID(), runId}});
+    assert.equal(resumed.isError, true, textOf(resumed));
+    assert.match(textOf(resumed), /admission-invalid/);
+    assert.match(textOf(resumed), /fresh run/);
+  } finally { await dispose(); }
 });

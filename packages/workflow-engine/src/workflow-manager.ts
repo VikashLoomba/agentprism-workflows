@@ -79,14 +79,13 @@ import {
   type CheckpointOptions,
   type EngineRunResult,
   type WorkflowAgentAttemptControl,
-  type WorkflowAgentConfiguration,
   type WorkflowRunOptions,
-  canonicalizeWorkflowAgentConfigurations,
-  hashWorkflowAdmissionSelection,
+  hashWorkflowAdmissionRouting,
   parseWorkflowScript,
   resolveWorkflowRunLimits,
   runWorkflow,
 } from "./workflow.js";
+import { captureWorkflowRouting, isWorkflowRoutingSnapshot } from "./workflow-routing.js";
 import { createWorkflowLogTail, projectWorkflowRunStatus } from "./run-observability.js";
 import {
   LiveAgentObservability,
@@ -264,7 +263,6 @@ export type WorkflowContinuationRefusalReason =
   | "not-continuable"
   | "admission-missing"
   | "admission-invalid"
-  | "admission-uncovered"
   | "checkpoint-required"
   | "checkpoint-mismatch"
   | "auth-required";
@@ -357,12 +355,10 @@ export interface ExecOptions {
    * tier, or phase/meta route. Persisted with the run and included in call identity.
    */
   defaultModel?: string;
-  /** Host-selected configuration for each root-execution-wide agent occurrence ordinal. */
-  agentConfigurations?: Readonly<Record<number, WorkflowAgentConfiguration>>;
-  /** Refuse any live occurrence that was not covered by agentConfigurations. */
+  /** Refuse actual agent calls that have no effective configured model route. */
   requireAgentConfiguration?: boolean;
-  /** Records who made the canonical strict selection persisted at admission. */
-  agentConfigurationSource?: PersistedRunAdmission["source"];
+  /** Optional host diagnostic enrichment for a rejected missing route; never persisted. */
+  onMissingAgentConfiguration?: WorkflowRunOptions["onMissingAgentConfiguration"];
   /** Retry attempts after recoverable agent failures for this execution. */
   agentRetries?: number;
   /** Resolve a checkpoint() question with a human reply (only for UI-bearing runs). */
@@ -882,10 +878,13 @@ export class WorkflowManager extends EventEmitter {
     try {
       const source = this.persistence.load(runId);
       if (!source) throw this.persistenceError(`resume source does not exist: ${runId}`);
+      if (source.admission !== undefined && validatePersistedAdmission(source)) {
+        throw this.scriptValidationError(`resume source ${runId} has an incompatible routing admission; inspect it and start a fresh configured run`);
+      }
       return { lease, source };
     } catch (error) {
       this.persistence.releaseRunLease(lease);
-      if (error instanceof WorkflowError && error.code === WorkflowErrorCode.PERSISTENCE_ERROR) throw error;
+      if (error instanceof WorkflowError) throw error;
       throw this.persistenceError(`failed to load resume source ${runId}: ${errorMessage(error)}`, error);
     }
   }
@@ -1469,8 +1468,8 @@ export class WorkflowManager extends EventEmitter {
     if (
       exec.runId !== undefined || exec.resumeFromRunId !== undefined || exec.resumePolicy !== undefined ||
       exec.resumeJournal !== undefined || exec.resumeCalls !== undefined || exec.checkpointReplies !== undefined ||
-      exec.executionMode !== undefined || exec.agentConfigurations !== undefined ||
-      exec.requireAgentConfiguration !== undefined || exec.agentConfigurationSource !== undefined ||
+      exec.executionMode !== undefined ||
+      exec.requireAgentConfiguration !== undefined ||
       exec.scriptBackends !== undefined || exec.defaultModel !== undefined
     ) {
       throw this.scriptValidationError("prepared acceptance accepts new immutable inputs and runtime limits only");
@@ -1615,7 +1614,7 @@ export class WorkflowManager extends EventEmitter {
       throw this.scriptValidationError("prepared admission requires canonical configuration and preserves accepted inputs");
     }
     if (exec.operation) assertWorkflowOperationMatches(managed.acceptanceOperation, captureWorkflowOperation(exec.operation));
-    const admission = createRunAdmission(exec, new Date().toISOString());
+    const admission = createRunAdmission(exec, new Date().toISOString(), managed.effectiveCwd, managed.agentsDir, managed.mainModel);
     if (!admission) throw this.scriptValidationError("prepared admission requires canonical configuration");
     const previous = {
       preparation: managed.preparation,
@@ -1781,7 +1780,7 @@ export class WorkflowManager extends EventEmitter {
     const capturedArgs = snapshotArgs(args);
     const effectiveCwd = exec.cwd ?? this.cwd;
     const startedAt = new Date();
-    const admission = createRunAdmission(exec, startedAt.toISOString());
+    const admission = createRunAdmission(exec, startedAt.toISOString(), effectiveCwd, this.agentsDir, this.mainModel);
     return {
       runId: identity.runId,
       cwd: exec.cwd,
@@ -2113,8 +2112,9 @@ export class WorkflowManager extends EventEmitter {
         agent,
         mainModel: managed.mainModel,
         defaultModel: managed.admission?.defaultModel ?? managed.defaultModel,
-        agentConfigurations: managed.admission?.agentConfigurations ?? exec.agentConfigurations,
+        routingSnapshot: managed.admission?.routingSnapshot,
         requireAgentConfiguration: managed.admission?.strict ?? exec.requireAgentConfiguration,
+        onMissingAgentConfiguration: exec.onMissingAgentConfiguration,
         agentsDir: managed.agentsDir,
         signal: managed.controller.signal,
         concurrency: resolvedConcurrency,
@@ -2364,14 +2364,6 @@ export class WorkflowManager extends EventEmitter {
         error instanceof WorkflowError
           ? error
           : new WorkflowError(errorMessage(error), WorkflowErrorCode.UNKNOWN, { recoverable: false });
-      const uncovered = readUncoveredOccurrence(workflowError.details);
-      if (managed.admission && uncovered) {
-        managed.admission = deepFreeze({
-          ...managed.admission,
-          uncoveredOccurrence: { ...uncovered, recordedAt: new Date().toISOString() },
-        });
-      }
-
       // Three recoverable-by-external-action fault codes checkpoint the run as PAUSED (not failed),
       // so resume() replays the journaled prefix instead of restarting from scratch (§2.12):
       //  - PROVIDER_USAGE_LIMIT: a provider quota refills over time.
@@ -3047,9 +3039,7 @@ export class WorkflowManager extends EventEmitter {
       exec.resumeCalls !== undefined ||
       exec.cwd !== undefined ||
       exec.defaultModel !== undefined ||
-      exec.agentConfigurations !== undefined ||
       exec.requireAgentConfiguration !== undefined ||
-      exec.agentConfigurationSource !== undefined ||
       exec.scriptBackends !== undefined ||
       exec.executionMode !== undefined ||
       exec.journaling === false
@@ -3157,7 +3147,7 @@ export class WorkflowManager extends EventEmitter {
       this.persistence.releaseRunLease(lease);
       return { accepted: false, reason: "not-continuable" };
     }
-    if (requireCanonicalAdmission) {
+    if (requireCanonicalAdmission || persisted.admission !== undefined) {
       const admissionProblem = validatePersistedAdmission(persisted);
       if (admissionProblem) {
         this.persistence.releaseRunLease(lease);
@@ -3468,6 +3458,7 @@ export class WorkflowManager extends EventEmitter {
       onProgress: exec.onProgress,
       confirm: exec.confirm,
       onNestedWorkflow: exec.onNestedWorkflow,
+      onMissingAgentConfiguration: exec.onMissingAgentConfiguration,
       resumeJournal,
     }, checkpointReplies.accepted
       ? {
@@ -3864,91 +3855,47 @@ export class WorkflowManager extends EventEmitter {
 function createRunAdmission(
   exec: ExecOptions,
   recordedAt: string,
+  cwd: string,
+  agentsDir?: string,
+  mainModel?: string,
 ): PersistedRunAdmission | undefined {
   if (exec.requireAgentConfiguration !== true) return undefined;
-  if (exec.agentConfigurations === undefined) {
-    throw new WorkflowError(
-      "strict host admission requires a canonical agentConfigurations map",
-      WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-      { recoverable: false },
-    );
-  }
-  const agentConfigurations = canonicalizeWorkflowAgentConfigurations(exec.agentConfigurations);
-  let scriptBackends: Record<string, WorkflowBackendConfig> | undefined;
-  if (exec.scriptBackends !== undefined) {
-    const captured = cloneFrozenStrictJson(exec.scriptBackends);
-    if (!captured.ok) {
-      throw new WorkflowError(
-        `scriptBackends are not strict JSON at ${captured.path}`,
-        WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-        { recoverable: false },
-      );
-    }
-    scriptBackends = captured.clone as unknown as Record<string, WorkflowBackendConfig>;
-  }
-  const selectionHash = hashWorkflowAdmissionSelection({
-    format: 2,
-    agentConfigurations,
+  const routingSnapshot = captureWorkflowRouting(cwd, agentsDir, mainModel);
+  const captured = cloneFrozenStrictJson({
+    format: 3,
+    routingSnapshot,
     ...(exec.defaultModel === undefined ? {} : { defaultModel: exec.defaultModel }),
-    ...(scriptBackends === undefined ? {} : { scriptBackends }),
+    ...(exec.scriptBackends === undefined ? {} : { scriptBackends: exec.scriptBackends }),
   });
-  return deepFreeze({
-    format: 2 as const,
-    strict: true as const,
-    agentConfigurations,
-    ...(exec.defaultModel === undefined ? {} : { defaultModel: exec.defaultModel }),
-    ...(scriptBackends === undefined ? {} : { scriptBackends }),
-    selectionHash,
-    source: exec.agentConfigurationSource ?? "host",
-    recordedAt,
-  });
-}
-
-function readUncoveredOccurrence(
-  details: unknown,
-): { ordinal: number; label: string; phase?: string } | undefined {
-  const candidate = details && typeof details === "object"
-    ? (details as { uncoveredOccurrence?: unknown }).uncoveredOccurrence
-    : undefined;
-  if (!candidate || typeof candidate !== "object") return undefined;
-  const value = candidate as { ordinal?: unknown; label?: unknown; phase?: unknown };
-  if (!Number.isSafeInteger(value.ordinal) || Number(value.ordinal) < 0 || typeof value.label !== "string") {
-    return undefined;
+  if (!captured.ok) {
+    throw new WorkflowError(`workflow routing is not strict JSON at ${captured.path}`, WorkflowErrorCode.SCRIPT_VALIDATION_ERROR, { recoverable: false });
   }
-  if (value.phase !== undefined && typeof value.phase !== "string") return undefined;
-  return {
-    ordinal: Number(value.ordinal),
-    label: value.label,
-    ...(value.phase === undefined ? {} : { phase: value.phase }),
-  };
+  const routing = captured.clone as unknown as Parameters<typeof hashWorkflowAdmissionRouting>[0];
+  return deepFreeze({ ...routing, strict: true as const, routingHash: hashWorkflowAdmissionRouting(routing), recordedAt });
 }
 
 function validatePersistedAdmission(state: PersistedRunState): WorkflowContinuationRefusalReason | undefined {
   const admission = state.admission;
   if (!admission) return "admission-missing";
   if (typeof admission !== "object" || Array.isArray(admission)) return "admission-invalid";
-  if (admission.uncoveredOccurrence) return "admission-uncovered";
-  if (admission.format !== 2 || admission.strict !== true) return "admission-invalid";
+  if (admission.format !== 3 || admission.strict !== true) return "admission-invalid";
   if (
-    !/^[0-9a-f]{64}$/.test(admission.selectionHash) ||
-    !["mcp-setup", "mcp-routing", "host"].includes(admission.source) ||
+    Object.keys(admission).some((key) => !["format", "strict", "routingSnapshot", "defaultModel", "scriptBackends", "routingHash", "recordedAt"].includes(key)) ||
+    !/^[0-9a-f]{64}$/.test(admission.routingHash) ||
+    !isWorkflowRoutingSnapshot(admission.routingSnapshot) ||
     typeof admission.recordedAt !== "string" ||
     !Number.isFinite(Date.parse(admission.recordedAt)) ||
-    (admission.defaultModel !== undefined &&
-      (typeof admission.defaultModel !== "string" || admission.defaultModel.trim() === ""))
+    (admission.defaultModel !== undefined && (typeof admission.defaultModel !== "string" || admission.defaultModel.trim() === ""))
   ) return "admission-invalid";
   try {
-    const canonical = canonicalizeWorkflowAgentConfigurations(admission.agentConfigurations);
-    const selectionHash = hashWorkflowAdmissionSelection({
-      format: 2,
-      agentConfigurations: canonical,
+    const routingHash = hashWorkflowAdmissionRouting({
+      format: 3,
+      routingSnapshot: admission.routingSnapshot,
       ...(admission.defaultModel === undefined ? {} : { defaultModel: admission.defaultModel }),
       ...(admission.scriptBackends === undefined ? {} : { scriptBackends: admission.scriptBackends }),
     });
-    return selectionHash === admission.selectionHash ? undefined : "admission-invalid";
-  } catch {
-    return "admission-invalid";
-  }
+    return routingHash === admission.routingHash ? undefined : "admission-invalid";
+  } catch { return "admission-invalid"; }
 }
 
 interface CheckpointReplyClassification {

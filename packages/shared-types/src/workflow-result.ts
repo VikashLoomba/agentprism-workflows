@@ -502,6 +502,10 @@ export interface WorkflowCallRecord {
   /** The REQUESTED (script-resolved) model spec the engine passed to the runner.
    *  This is what the hash proves. NOT the served model. */
   modelRequested?: string;
+  /** Effective optional ACP mode included in this actual call's identity. */
+  modeRequested?: string;
+  /** Effective optional ACP settings included in this actual call's identity. */
+  configOptionsRequested?: Record<string, string | boolean>;
   /** The runner-reported concrete model id from the terminal attempt. */
   modelResolved?: string;
   /** The terminal attempt's runner-reported backendId, when reported. */

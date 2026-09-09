@@ -14,9 +14,11 @@ sorted `configOptions`, `tier`, `phase`, `agentType`, resolved agent definition,
 Exact journal hits reconstruct completed calls without current provider usage. Eligible interrupted
 ACP calls may reattach at the live boundary. New live usage is added to the prior cumulative total.
 
-The host persists a format-2 canonical admission snapshot before execution. Same-ID continuation
-uses it without new provider/model elicitation. Missing, invalid, or uncovered admission metadata
-fails closed. Checkpoint replies are first-writer-wins under the run lease and become permanent
+The host persists format-3 immutable routing admission before execution, capturing tier configuration,
+named-agent definitions, optional host default and approved backends with an integrity hash.
+Same-ID continuation reuses these inputs without discovery or rereading changed routing files.
+Every actual call must resolve a model; additional configured calls are allowed. Missing, invalid,
+or old-format admission fails closed. Checkpoint replies are first-writer-wins under the run lease and become permanent
 journal facts with `checkpointDecision:"explicit-v1"`. Historical ambiguous/automatic answers and
 missing admission metadata cannot authorize execution; inspect them read-only and start a fresh
 run. Retry the same request ID with identical inputs after a lost acknowledgement; a new
@@ -26,7 +28,8 @@ continuation needs a fresh ID.
 
 ```js
 export const meta = {
-  name: "…", description: "…",
+  name: "browser-qa", description: "Run browser quality checks",
+  model: "browser",
   backends: {
     browser: {
       command: "browser-acp",          // required: executable (absolute or on PATH)
@@ -63,6 +66,6 @@ isolation: worktree
 You are a security auditor. Report findings; never modify files.
 ```
 
-The body is prepended to the task. An unknown type warns and degrades to defaults. The resolved
+The body is prepended to the task. An unknown type warns and uses the remaining authored routing; MCP still requires an effective model. The resolved
 definition participates in agent identity, so a same-run continuation only replays the exact
 definition captured by its journal and admitted configuration.

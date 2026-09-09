@@ -157,13 +157,13 @@ test("runtime and published schemas isolate acceptance, setup, observation, and 
   };
   const resumed = { ...accepted, action: "resume", scriptSource: "stored", continuation: { generation: 1, replayedPrefix: 0 } };
   const setupRequest = {
-    id: "00000000-0000-4000-8000-000000000001", kind: "agent-configuration",
-    title: "Select agent configuration", message: "Choose the model", requestedSchema: {
-      type: "object", properties: { model: { type: "string", enum: ["claude/opus"] } }, required: ["model"], additionalProperties: false,
+    id: "00000000-0000-4000-8000-000000000001", kind: "backend-approval",
+    title: "Approve workflow backend", message: "Approve the custom command", requestedSchema: {
+      type: "object", properties: { approve: { type: "boolean" } }, required: ["approve"], additionalProperties: false,
     },
   };
   const setup = { action: "setup-response", runId: baseRun.runId, setupId: setupRequest.id, status: "pending", scriptUri: resources.scriptUri };
-  const config = { action: "config", ok: true, harnessOptions: [], omittedHarnesses: 0, models: [] };
+  const config = { action: "config", ok: true, harnessOptions: [], omittedHarnesses: 0, models: [], authoringSummary: { harnesses: [], omittedHarnesses: 0 } };
   const result = { action: "result", runId: baseRun.runId, status: "completed", resultUri: resources.resultUri, mimeType: "application/json", encoding: "utf-8", totalBytes: 2, offset: 0, endOffset: 2, hasMore: false, chunk: "42" };
   const terminal = observation(toWorkflowExecutionOutcome(baseRun, resources));
   const stopped = { ...observation(), status: "aborted", stopped: true, alreadyTerminal: false };
@@ -196,6 +196,7 @@ test("runtime and published schemas isolate acceptance, setup, observation, and 
     "result missing chunk": without(result, "chunk"),
     "result carries scriptUri": { ...result, scriptUri: resources.scriptUri },
     "config carries runId": { ...config, runId: baseRun.runId },
+    "obsolete agent configuration setup": { ...accepted, setup: { state: "input-required", request: { ...setupRequest, kind: "agent-configuration" } } },
     "waiting missing request": { ...accepted, setup: { state: "input-required" } },
     "preparing carries request": { ...accepted, setup: { state: "preparing", request: setupRequest } },
     "setup response without setupId": without(setup, "setupId"),

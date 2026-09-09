@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 import type { CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { PiAcpAgent } from "../src/agent.js";
+import { MODEL_DISCOVERY_META_KEY } from "../src/config.js";
 import { context, fakeDeps, fakeSession } from "./helpers/fakes.js";
 
 const modelShape = (id: string, name = id) => ({
@@ -39,6 +42,9 @@ test("C1 real Pi model writer never publishes its configured-provider provisiona
   });
   const correctiveRefresh = deferred<ReturnType<typeof modelShape>[]>();
   const setup = fakeDeps();
+  writeFileSync(join(setup.agentDir, "settings.json"), JSON.stringify({
+    enabledModels: ["github-copilot/filtered", "github-copilot/allowed"],
+  }));
   setup.deps.modelRuntime = runtime;
   let provisional: readonly { id: string }[] = [];
   setup.deps.createAgentSession = async (options: CreateAgentSessionOptions) => {
@@ -65,6 +71,11 @@ test("C1 real Pi model writer never publishes its configured-provider provisiona
   const modelOption = opened.configOptions[1];
   assert.equal(modelOption?.id, "model");
   assert.equal(modelOption?.type, "select");
+  assert.deepEqual(modelOption?._meta?.[MODEL_DISCOVERY_META_KEY], {
+    source: "enabledModels",
+    preferred: ["github-copilot/allowed"],
+    unmatched: ["github-copilot/filtered"],
+  });
   assert.deepEqual(modelOption?.type === "select"
     ? modelOption.options.filter(({ value }) => value.startsWith("github-copilot/"))
     : [], [

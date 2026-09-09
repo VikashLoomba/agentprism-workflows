@@ -65,6 +65,11 @@ Acceptance criteria:
 
 ## 3. Open the monitor against an accepted run and observe setup and execution immediately
 
+**Routing revision:** [explicit agent routing](explicit-agent-routing.md) supersedes the model-selection
+setup portion of this design. Setup now covers backend approval only; format-3 immutable routing
+admission and actual-call checks replace selected configurations. The historical source request
+below is preserved; acceptance, checkpoints, permissions, monitor, and retry contracts still apply.
+
 The useful requirement is live observation of an accepted run, including preparation before execution admission. A preview of partially authored JavaScript is a different product feature and is not required by this issue.
 
 Use durable acceptance followed by explicit presentation:
@@ -77,9 +82,9 @@ workflow({ action: "resume", runId, ... }) -> promptly acknowledges same-run con
 workflow({ action: "status" | "result" | "stop" | ..., runId }) -> bounded lifecycle response
 ```
 
-The existing background path provides a starting implementation, not a complete solution by merely changing a default. After bounded structural/source checks, create the durable run and return its ID before slow mock validation, provider probing, backend approval, or model selection. Show preparation and any pending setup request in the monitor and status. A declined setup remains an inspectable cancelled run; setup failure remains an inspectable failed run. Preserve the accepted source so a later file edit cannot change what the pending approval authorizes.
+The existing background path provides a starting implementation, not a complete solution by merely changing a default. After bounded structural/source checks, create the durable run and return its ID before slow mock validation, provider probing, or backend approval. Show preparation and any pending setup request in the monitor and status. A declined setup remains an inspectable cancelled run; setup failure remains an inspectable failed run. Preserve the accepted source so a later file edit cannot change what the pending approval authorizes.
 
-Distinguish durable acceptance from execution admission: the acknowledgement guarantees persisted ownership of preparation, not that the script is ready or authorized to execute. Live agent execution remains blocked until required validation and approvals succeed and the complete canonical configuration snapshot is durably saved. This deliberately replaces the old guarantee that all preflight and setup refusals occur before any run exists; it preserves the safety boundary before live execution. A setup response is a separate bounded operation tied to the exact run and pending request. Setup remains actionable without an open app; neither observation nor monitor opening implicitly approves it.
+Distinguish durable acceptance from execution admission: the acknowledgement guarantees persisted ownership of preparation, not that the script is ready or authorized to execute. Live agent execution remains blocked until required validation and approvals succeed and format-3 immutable routing admission is durably saved. This deliberately replaces the old guarantee that all preflight and setup refusals occur before any run exists; it preserves the safety boundary before live execution. A setup response is a separate bounded operation tied to the exact run and pending request. Setup remains actionable without an open app; neither observation nor monitor opening implicitly approves it.
 
 An unanswered script-authored `checkpoint()` always pauses for an explicit answer. In MCP, persist the pending question, return control, and accept its answer through a subsequent bounded same-run continuation. Remove the `headless` option and every value it previously accepted, including `"pause"`; there is no longer a policy selector. Remove the checkpoint `default` option and automatic default/true responses. Detachment, lack of a panel, dismissal, and interaction timeouts must not invent an answer or choose to abort the run. Explicit user stop/cancellation remains available, and an explicit negative answer still follows the script's authored control flow.
 
@@ -100,7 +105,7 @@ Acceptance criteria:
 - [ ] In hosts that retain separate instances, opening run B preserves run A's live updates, selection, and viewport. Navigation between runs remains optional. Define behavior for opening the same run again and for explicit user navigation.
 - [ ] One shared UI resource is declared on the monitor tool. Each instance obtains its run ID from its monitor invocation, with no run-specific resource routing or mutable global run selection. Host reuse/replacement is handled and documented rather than assuming every host retains multiple panels.
 - [ ] A newly accepted run can be monitored during preparation, required setup input, and execution, including runs that settle before the monitor opens. Validation or setup refusal after acceptance preserves its run record and reason.
-- [ ] No live agent execution occurs before required validation/approval and durable canonical configuration. Pending setup survives loss of the initiating request and has bounded inspect/respond/stop paths outside the app.
+- [ ] No live agent execution occurs before required validation/approval and durable immutable routing admission. Pending setup survives loss of the initiating request and has bounded inspect/respond/stop paths outside the app.
 - [ ] Every unanswered script-authored checkpoint pauses for an explicit answer across MCP and SDK execution. App presence, panel teardown, lack of a live callback, and interaction timeout cannot auto-answer or automatically abort the workflow.
 - [ ] Remove `headless`, checkpoint `default`, and redundant `pauseOnCheckpoint` opt-in plumbing from the public/runtime contract. Reject retired authored fields clearly, including `headless: "pause"`; do not silently ignore or normalize them.
 - [ ] Explicit durable replies replay once under the current contract. Historical automatic defaults and ambiguous decision provenance cannot bypass the checkpoint via continuation or reuse; test cold restart, journal replay, and dry-run/live isolation.
@@ -117,7 +122,7 @@ Acceptance criteria:
 Excalidraw supports direct editing, saving, and export through app-originated tool calls. Extend AgentPrism's existing inspection and Stop surface to cover the corresponding workflow actions:
 
 - Answer an already-pending permission request using its exact advertised options and scopes.
-- Resolve pending setup using the server's exact backend approval/model selection request.
+- Resolve pending setup using the server's exact backend approval request.
 - Answer a checkpoint and resume the same run.
 - Stop a selected live agent.
 - Inspect and copy the authoritative completed result.

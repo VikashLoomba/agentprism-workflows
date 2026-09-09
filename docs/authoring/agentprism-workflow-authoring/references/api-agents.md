@@ -27,7 +27,7 @@ Returns the agent's final assistant text, or the schema-validated object when `s
 
 Agent attempts have no model-facing wall-clock or idle timeout. They remain live until they complete,
 fail, or the host explicitly cancels the call or run. Same-ID MCP continuation may apply new runtime
-limits, but it cannot change the persisted script, args, or effective agent configuration.
+limits, but it cannot change the persisted script, args, or immutable routing inputs.
 
 ## Model specs & routing
 
@@ -35,10 +35,12 @@ A `model` string is resolved solely from its first segment, then delegated to th
 
 | spec shape | routes to | notes |
 |---|---|---|
-| *(omitted)* | host-pinned/default backend | MCP: explicit `AGENTPRISM_DEFAULT_BACKEND` wins; when truly unset, zero-token readiness discovery pins one project default before validation/execution and preserves it across resume. SDK runner: configured default, historical fallback `claude`. The selected harness keeps its session default model. Most portable. |
+| *(omitted)* | inherited effective route | MCP requires a model from a named-agent definition, resolved tier, phase, or `meta.model`; otherwise the call fails before dispatch. No automatic backend selection. Non-strict SDK runner: configured default, historical fallback `claude`. |
 | `claude`, `codex`, `opencode`, `pi`, or `<custom-name>` | that registered harness | Backend-only: no model config call; the harness default remains active. |
 | `claude/<id>`, `codex/<id>`, `opencode/<id>`, `pi/<id>`, or `<custom-name>/<id>` | that registered harness | Match the first segment ASCII-case-insensitively and strip exactly one segment. Custom names take priority on collision. The remaining `<id>` is sent verbatim, including further `/` characters. For Pi, that remainder is its `<provider>/<model-id>` and Pi preserves any further slashes in the model id. |
 | any other string, including `anthropic/…`, `openai/…`, bare `opus`, or bare `gpt-…` | host default backend | The **entire** authored string is sent verbatim; these are not routing aliases. |
+
+Browse selectors ending in `/*` cannot dispatch. Expand them through Config `modelFilter` and use an exact returned leaf route.
 
 Selection is a single `session/set_config_option` with `configId: "model"` and the exact remaining string. There is no catalog matching, case folding, normalization, bracket parsing, nearest-neighbor selection, sibling effort/Fast option driving, retry, or echo verification. Brackets, dots, and provider-style prefixes are ordinary model-id characters.
 
