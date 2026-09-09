@@ -22,6 +22,7 @@ import { Client } from "@modelcontextprotocol/client";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -156,6 +157,7 @@ interface PerResult {
 
 interface LiveOutcome {
   ran: boolean;
+  runId: string | null;
   status: unknown;
   isError: boolean;
   resultCount: number;
@@ -178,6 +180,91 @@ interface LiveOutcome {
 type Json = Record<string, unknown>;
 const asObject = (v: unknown): Json | undefined =>
   v !== null && typeof v === "object" ? (v as Json) : undefined;
+
+type ToolResult = Awaited<ReturnType<Client["callTool"]>>;
+
+function resourceText(result: Awaited<ReturnType<Client["readResource"]>>): string {
+  const content = result.contents[0];
+  assert.ok(content && "text" in content && typeof content.text === "string", JSON.stringify(result));
+  return content.text;
+}
+
+// Do not import _harness: it replaces HOME at module load, which would hide real credentials.
+// The live transport retains its environment and observes the same durable lifecycle directly.
+async function acceptAndObserve(
+  client: Client,
+  input: Json & { requestId: string },
+  timeoutMs: number,
+): Promise<ToolResult> {
+  const deadline = Date.now() + timeoutMs;
+  const request = { name: "workflow", arguments: { ...input, action: "run" } };
+  const call = (params: Parameters<Client["callTool"]>[0]) => {
+    const remaining = deadline - Date.now();
+    assert.ok(remaining > 0, `Workflow observation timed out after ${timeoutMs}ms`);
+    return client.callTool(params, { timeout: remaining, maxTotalTimeout: remaining });
+  };
+  const accepted = await call(request);
+  assert.equal(accepted.isError, false, JSON.stringify(accepted));
+  const acknowledgement = asObject(accepted.structuredContent)!;
+  assert.equal(acknowledgement.accepted, true, JSON.stringify(accepted));
+  assert.equal(acknowledgement.requestId, input.requestId);
+  assert.equal(typeof acknowledgement.runId, "string");
+  assert.equal(acknowledgement.result, undefined, "acceptance must not contain a completed result");
+  const runId = acknowledgement.runId as string;
+
+  // A lost acknowledgement can be replayed without adding another run or live agent turn.
+  const retry = await call(request);
+  assert.equal(retry.isError, false, JSON.stringify(retry));
+  assert.equal(asObject(retry.structuredContent)?.runId, runId);
+  assert.equal(asObject(retry.structuredContent)?.duplicate, true);
+
+  let last: ToolResult | undefined;
+  while (Date.now() < deadline) {
+    last = await call({ name: "workflow", arguments: { action: "status", runId, lastN: 4 } });
+    assert.equal(last.isError, false, JSON.stringify(last));
+    const status = asObject(last.structuredContent)!;
+    assert.equal(status.runId, runId);
+    if (["completed", "paused", "failed", "aborted"].includes(String(status.status))) return last;
+    assert.equal(asObject(status.setup)?.state === "input-required", false,
+      `Explicit live routing unexpectedly requires setup input: ${JSON.stringify(status)}`);
+    await new Promise((resolve) => setTimeout(resolve, Math.min(250, deadline - Date.now())));
+  }
+  assert.fail(`Workflow ${runId} did not settle after ${timeoutMs}ms: ${JSON.stringify(last)}`);
+}
+
+interface DurableEventsPage {
+  runId: string;
+  streamId: string;
+  after: number;
+  cursor: number;
+  hasMore: boolean;
+  events: Array<{ seq: number; event: { type: string; callIndex?: number; label?: string } }>;
+}
+
+async function readDurableEvents(client: Client, runId: string): Promise<DurableEventsPage["events"]> {
+  const uri = `workflow://runs/${runId}/events`;
+  const initial = JSON.parse(resourceText(await client.readResource({ uri }))) as DurableEventsPage;
+  assert.equal(initial.runId, runId);
+  assert.equal(typeof initial.streamId, "string");
+  const events: DurableEventsPage["events"] = [];
+  let after = 0;
+  let page = initial;
+  for (;;) {
+    // The canonical URI returns a bounded tail; explicitly page from zero to prove all calls.
+    if (page.after !== after) {
+      page = JSON.parse(resourceText(await client.readResource({
+        uri: `${uri}?after=${after}&limit=500&streamId=${initial.streamId}`,
+      }))) as DurableEventsPage;
+    }
+    assert.equal(page.runId, runId);
+    assert.equal(page.streamId, initial.streamId);
+    assert.equal(page.after, after);
+    events.push(...page.events);
+    if (!page.hasMore) return events;
+    assert.ok(page.cursor > after, "durable event pagination must advance");
+    after = page.cursor;
+  }
+}
 
 /**
  * Drive ONE backend end to end: spawn the real mcp-server over stdio, list tools (so the
@@ -205,6 +292,7 @@ async function runLiveBackend(backend: Backend): Promise<LiveOutcome> {
 
   const out: LiveOutcome = {
     ran: false,
+    runId: null,
     status: null,
     isError: false,
     resultCount: 0,
@@ -247,14 +335,14 @@ async function runLiveBackend(backend: Backend): Promise<LiveOutcome> {
   // pid -> count of poll samples in which we saw it (a DIRECT child of the server carrying
   // the backend marker). Distinct keys = distinct backend processes over the whole run.
   const pidSamples = new Map<number, number>();
-  function pollOnce(): void {
-    if (out.serverPid === null) return;
+  function pollOnce(): boolean {
+    if (out.serverPid === null) return false;
     out.pollSamples++;
     let psOut = "";
     try {
       psOut = execSync("ps -eo pid=,ppid=,args=", { encoding: "utf8" });
     } catch {
-      return;
+      return false;
     }
     let sawAny = false;
     for (const line of psOut.split("\n")) {
@@ -269,7 +357,7 @@ async function runLiveBackend(backend: Backend): Promise<LiveOutcome> {
       pidSamples.set(pid, (pidSamples.get(pid) ?? 0) + 1);
     }
     if (sawAny) out.samplesWithBackend++;
-    return;
+    return sawAny;
   }
 
   const timeoutMs = 240_000;
@@ -277,19 +365,14 @@ async function runLiveBackend(backend: Backend): Promise<LiveOutcome> {
   let poller: NodeJS.Timeout | undefined;
   try {
     await client.connect(transport);
+    await client.listTools();
     out.serverPid = transport.pid ?? null;
 
     poller = setInterval(pollOnce, 150);
 
-    const callPromise = client.callTool({ name: "workflow", arguments: { action: "run", script, concurrency: 3 } }, {
-      onprogress: () => {
-        out.progressEvents++;
-      },
-      timeout: timeoutMs,
-      maxTotalTimeout: timeoutMs,
-    });
+    const callPromise = acceptAndObserve(client, { requestId: randomUUID(), script, concurrency: 3 }, timeoutMs);
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`callTool timed out after ${timeoutMs}ms`)), timeoutMs);
+      timer = setTimeout(() => reject(new Error(`Workflow observation timed out after ${timeoutMs}ms`)), timeoutMs);
     });
 
     let res: Awaited<ReturnType<Client["callTool"]>>;
@@ -299,15 +382,28 @@ async function runLiveBackend(backend: Backend): Promise<LiveOutcome> {
       if (poller) clearInterval(poller);
       // Trailing sample: the pooled process must STILL be a live child right after the calls
       // (pooling keeps it; a per-session spawn/kill model would have torn it down).
-      pollOnce();
-      out.trailingSawBackend = pidSamples.size > 0 && out.samplesWithBackend > 0;
+      out.trailingSawBackend = pollOnce();
     }
 
     out.ran = true;
     const sc = asObject(res.structuredContent) ?? {};
+    out.runId = typeof sc.runId === "string" ? sc.runId : null;
     out.status = sc.status ?? null;
     out.isError = res.isError === true;
-    const result = asObject(sc.result) ?? {};
+    const outcome = asObject(sc.outcome);
+    assert.equal(outcome?.runId, out.runId, JSON.stringify(sc));
+    assert.equal(outcome?.status, out.status, JSON.stringify(sc));
+    if (out.status !== "completed") {
+      out.errors.push(`Workflow did not complete: ${JSON.stringify(sc)}`);
+      return out;
+    }
+    assert.equal(sc.resultUri, `workflow://runs/${out.runId}/result`, JSON.stringify(sc));
+    const result = asObject(JSON.parse(resourceText(await client.readResource({ uri: sc.resultUri as string })))) ?? {};
+    const events = await readDurableEvents(client, out.runId!);
+    // Progress is persisted independently of any short-lived MCP request.
+    out.progressEvents = events.filter(({ event }) => event.type === "agentProgress" || event.type === "agentTranscript").length;
+    assert.deepEqual(events.filter(({ event }) => event.type === "agentStart").map(({ event }) => event.label).sort(),
+      ["a1", "a2", "a3", "smoke"], "acceptance retry must not create extra live agent calls");
     const arr = Array.isArray(result.structured) ? result.structured : [];
     out.smokeValue = result.smoke;
     // The model must reply with exactly LIVE_SMOKE_OK, but agent CLIs may
@@ -357,7 +453,7 @@ async function runLiveBackend(backend: Backend): Promise<LiveOutcome> {
 function diag(backend: Backend, out: LiveOutcome): string {
   return [
     `\n--- live ${backend} e2e diagnostics ---`,
-    `ran=${out.ran} status=${JSON.stringify(out.status)} isError=${out.isError}`,
+    `ran=${out.ran} runId=${out.runId} status=${JSON.stringify(out.status)} isError=${out.isError}`,
     `resultCount=${out.resultCount} allValidated=${out.allValidated} progressEvents=${out.progressEvents}`,
     `smokePass=${out.smokePass} smokeValue=${JSON.stringify(out.smokeValue)}`,
     `serverPid=${out.serverPid} backendPids=${JSON.stringify(out.backendPids)} backendProcCount=${out.backendProcCount}`,
@@ -394,7 +490,7 @@ function assertBackend(backend: Backend, out: LiveOutcome): void {
 
   // The run must reach the handler with no harness/timeout error and no tool-level error.
   assert.equal(out.errors.length, 0, `live ${backend} run threw before assertion${d()}`);
-  assert.equal(out.ran, true, `live ${backend} run did not complete the callTool${d()}`);
+  assert.equal(out.ran, true, `live ${backend} run did not reach a durable outcome${d()}`);
   assert.equal(
     out.isError,
     false,
@@ -413,8 +509,8 @@ function assertBackend(backend: Backend, out: LiveOutcome): void {
   // Schema-less seam: the same registry-routed backend also returns ordinary assistant text.
   assert.equal(out.smokePass, true, `live ${backend} schema-less smoke must return LIVE_SMOKE_OK${d()}`);
 
-  // Progress fired.
-  assert.ok(out.progressEvents > 0, `live ${backend} emitted at least one progress event${d()}`);
+  // The live backend produced durable progress, independent of acceptance/status requests.
+  assert.ok(out.progressEvents > 0, `live ${backend} persisted at least one backend progress event${d()}`);
 
   // Crux 2: pooling shape. Native-channel backends (Claude/Codex) multiplex all four sessions
   // on EXACTLY ONE long-lived subprocess; >1 distinct child PID would mean a per-session spawn.
@@ -471,7 +567,7 @@ test("live-backend e2e: pi drives injected StructuredOutput with process-exclusi
   assertBackend("pi", out);
 });
 
-test("live workflow config discovery: every backend exposes its no-prompt catalog without a run", {
+test("live workflow config discovery: no-prompt catalogs create no run and invalid modes fail before execution", {
   skip: SKIP,
   timeout: 300_000,
 }, async () => {
@@ -506,23 +602,23 @@ test("live workflow config discovery: every backend exposes its no-prompt catalo
     assert.ok(rows.every((row) => Object.hasOwn(row, "modes")), `every successful row explicitly reports modes: ${JSON.stringify(rows)}`);
     assert.equal(rows.find((row) => row.backendId === "pi")?.modes, null, "Pi explicitly advertises no ACP session modes");
 
-    const guessedMode = await client.callTool({
-      name: "workflow",
-      arguments: {
-        action: "run",
-        projectDir,
-        script: [
-          'export const meta = { name: "live-pi-mode-rejection", description: "reject guessed mode before admission" };',
-          `return agent("x", { label: "pi-mode", model: ${JSON.stringify(`pi/${PI_E2E_MODEL}`)}, mode: "default" });`,
-        ].join("\n"),
-      },
-    }, { timeout: 240_000, maxTotalTimeout: 240_000 });
-    assert.equal(guessedMode.isError, true, JSON.stringify(guessedMode));
+    const guessedMode = await acceptAndObserve(client, {
+      requestId: randomUUID(),
+      projectDir,
+      script: [
+        'export const meta = { name: "live-pi-mode-rejection", description: "reject guessed mode before execution" };',
+        `return agent("x", { label: "pi-mode", model: ${JSON.stringify(`pi/${PI_E2E_MODEL}`)}, mode: "default" });`,
+      ].join("\n"),
+    }, 240_000);
+    assert.equal(guessedMode.isError, false, "status observes preparation failure without failing the observation request");
     const rejected = guessedMode.structuredContent as Record<string, unknown>;
-    assert.equal(rejected.status, "rejected");
-    assert.equal(rejected.runId, undefined);
+    assert.equal(rejected.status, "failed");
+    assert.equal(typeof rejected.runId, "string", "the accepted source remains addressable after failed preparation");
+    assert.equal(asObject(rejected.outcome)?.status, "failed");
     assert.match(JSON.stringify(rejected), /mode authored value \\"default\\" is not advertised/);
     assert.match(JSON.stringify(rejected), /advertised modes: \(none advertised\)/);
+    assert.deepEqual((await readDurableEvents(client, rejected.runId as string)).filter(({ event }) => event.type === "agentStart"), [],
+      "an invalid mode must fail preparation before any live agent prompt");
 
     const exactPi = await client.callTool({
       name: "workflow",

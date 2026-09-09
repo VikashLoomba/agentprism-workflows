@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
-import type { JsonSchemaType } from "@modelcontextprotocol/server";
 import { WorkflowError, WorkflowErrorCode } from "@automatalabs/shared-types";
 
-import { workflowToolOutputShape } from "../src/workflow-tool-output.js";
+import { randomUUID } from "node:crypto";
 
 import {
   connect,
   makeRunner,
+  runAndObserve,
+  waitForRun,
   NO_AGENT_SCRIPT,
   okRunner,
   ONE_AGENT_SCRIPT,
@@ -28,252 +28,34 @@ const LIMITS = {
   agentRetries: 0,
 } as const;
 
-function inspectionFixture(status: "running" | "completed" | "failed" | "aborted" = "running") {
-  return {
-    runId: "fixture-run",
-    status,
-    scriptUri: "workflow://runs/fixture-run/script",
-    workflowName: "fixture",
-    phases: [],
-    limits: LIMITS,
-    logTail: {
-      lines: [],
-      totalLines: 0,
-      omittedLines: 0,
-      truncatedLines: 0,
-      redactedLines: 0,
-    },
-    calls: [],
-    filter: { lastN: 10, logLines: 20 },
-    truncation: {
-      maxStructuredBytes: 24_576,
-      byteCapApplied: false,
-      phases: { total: 0, returned: 0, shortened: 0 },
-      logs: { total: 0, returned: 0, shortened: 0, redacted: 0 },
-      calls: { total: 0, matched: 0, returned: 0, shortenedResults: 0, redactedResults: 0 },
-    },
-  };
-}
-
-const terminalOutcomeFixture = {
-  runId: "fixture-run",
-  status: "completed" as const,
-  scriptUri: "workflow://runs/fixture-run/script",
-  limits: LIMITS,
-};
-
-function outputVariantFixtures() {
-  const inspection = inspectionFixture();
-  const terminalStatus = {
-    ...inspectionFixture("completed"),
-    outcome: terminalOutcomeFixture,
-  };
-  const nonterminalStatus = {
-    ...inspection,
-    tokenUsage: { input: 1, output: 2, total: 3, cost: 0 },
-  };
-  const stop = {
-    ...inspectionFixture("aborted"),
-    stopped: true,
-    alreadyTerminal: false,
-  };
-  const pendingStop = {
-    ...inspectionFixture("running"),
-    stopped: false,
-    alreadyTerminal: false,
-    control: {
-      state: "pending" as const,
-      operationId: "00000000-0000-4000-8000-000000000000",
-      requestedAt: "2026-08-28T00:00:00.000Z",
-      owner: { pid: 42, instanceId: "owner-generation", version: "1.0.0", lameDuck: true, controlProtocol: 1 as const },
-    },
-  };
-  const background = {
-    runId: "fixture-run",
-    status: "running" as const,
-    scriptSource: "inline" as const,
-    scriptUri: "workflow://runs/fixture-run/script",
-    eventsUri: "workflow://runs/fixture-run/events",
-    limits: LIMITS,
-  };
-  const execution = {
-    ...terminalOutcomeFixture,
-    scriptSource: "inline" as const,
-    eventsUri: "workflow://runs/fixture-run/events",
-  };
-  const resultRetrieval = {
-    action: "result" as const,
-    runId: "fixture-run",
-    status: "completed" as const,
-    resultUri: "workflow://runs/fixture-run/result",
-    mimeType: "application/json" as const,
-    encoding: "utf-8" as const,
-    totalBytes: 2,
-    offset: 0,
-    endOffset: 2,
-    hasMore: false,
-    chunk: "42",
-  };
-  const config = {
-    action: "config" as const,
-    ok: true,
-    harnessOptions: [],
-    omittedHarnesses: 0,
-    models: [],
-  };
-  const rejected = {
-    action: "run" as const,
-    status: "rejected" as const,
-    validation: {
-      ok: false as const,
-      exitCode: 1 as const,
-      parse: { ok: false, error: "bad script" },
-      warnings: [],
-      omittedWarnings: 0,
-    },
-  };
-  return { resultRetrieval, config, rejected, execution, background, terminalStatus, nonterminalStatus, stop, pendingStop };
-}
-
 // Engine-owned run id shape (run-persistence.generateRunId): `${base36ts}-${base36rand}`.
 const RUN_ID = /^[a-z0-9]+-[a-z0-9]+$/;
 
-test("tool registration: one `workflow` tool advertises config plus the run lifecycle union", async () => {
-  const { client, dispose } = await connect(okRunner(), { listTools: true });
+test("tool discovery exposes asynchronous lifecycle separately from the dedicated monitor", async () => {
+  const { client, dispose } = await connect(okRunner(), { listTools: true, uiCapability: "matching" });
   try {
     const { tools } = await client.listTools();
-    // The model-facing tools are `workflow` and `repl` (the persistent workspace tool), plus
-    // app-only event and run-list queries (visibility
-    // ["app"] — Apps hosts keep them out of the model's tool loop; see app-ui.ts).
-    assert.deepEqual(
-      tools.map((candidate) => candidate.name).sort(),
-      ["repl", "workflow", "workflow-events", "workflow-runs"],
-    );
-    const tool = tools.find((candidate) => candidate.name === "workflow");
-    assert.ok(tool, "the workflow tool is registered");
-    assert.equal(tool.title, "Run and manage deterministic agent workflows");
-    assert.match(tool.description ?? "", /skill:\/\/agentprism-workflow-authoring\/SKILL\.md/);
-    assert.match(tool.description ?? "", /skill-loading path/);
-    assert.match(tool.description ?? "", /status for an immediate snapshot/);
-    assert.doesNotMatch(tool.description ?? "", /action:\"(?:inspect|await)\"/);
-    assert.doesNotMatch(tool.description ?? "", /parallel\(|Minimal script|first statement|agent option keys/);
-    assert.doesNotMatch(tool.description ?? "", /npx|CLI|shell out/i);
-    assert.ok((tool.description ?? "").length < 1_200, "the model-facing description stays compact");
-
-    assert.deepEqual(Object.keys(tool.inputSchema).sort(), ["$schema", "oneOf", "type"].sort());
-    assert.equal(tool.inputSchema.type, "object");
-    const inputVariants = field(tool.inputSchema, "oneOf") as Array<Record<string, unknown>>;
-    assert.equal(inputVariants.length, 7, "one published branch per canonical action");
-    const actions = inputVariants.map((variant) => {
-      const direct = field(field(variant, "properties"), "action");
-      if (direct !== undefined) return field(direct, "const");
-      const nested = field(variant, "oneOf") as Array<Record<string, unknown>>;
-      const nestedActions = new Set(
-        nested.map((candidate) => field(field(field(candidate, "properties"), "action"), "const")),
-      );
-      assert.equal(nestedActions.size, 1, "structural sub-variants retain one action discriminator");
-      return [...nestedActions][0];
-    });
-    assert.deepEqual(actions, ["config", "run", "resume", "status", "result", "permissions-response", "stop"]);
-    assert.doesNotMatch(JSON.stringify(tool.inputSchema), /inspect|await|startInBackground|agentTimeoutMs|agentIdleTimeoutMs/);
-
-    // The machine-readable output core includes structured pause contexts.
-    assert.ok(tool.outputSchema, "an output schema is declared");
-    const outProps = Object.keys(field(tool.outputSchema, "properties") ?? {});
-    for (const k of [
-      "runId",
-      "status",
-      "result",
-      "resultUri",
-      "eventsUri",
-      "tokenUsage",
-      "logs",
-      "authContext",
-      "checkpointContext",
-      "fallbacks",
-      "checkpointsTaken",
-      "limits",
-      "workflowName",
-      "phases",
-      "logTail",
-      "calls",
-      "filter",
-      "truncation",
-      "outcome",
-      "action",
-      "validation",
-      "harnessOptions",
-      "models",
-      "control",
-      "pendingPermissions",
-      "interaction",
-      "permissionResponse",
-      "latestActivity",
-      "mimeType",
-      "encoding",
-      "totalBytes",
-      "offset",
-      "endOffset",
-      "hasMore",
-      "chunk",
-    ]) {
-      assert.ok(outProps.includes(k), `output schema exposes ${k}`);
-    }
-    assert.deepEqual(field(tool.outputSchema, "required"), undefined);
-    const variants = field(tool.outputSchema, "oneOf") as Array<Record<string, unknown>>;
-    assert.equal(variants.length, 9);
-    assert.deepEqual(variants.map((variant) => variant.required), [
-      ["action", "runId", "status", "resultUri", "mimeType", "encoding", "totalBytes", "offset", "endOffset", "hasMore", "chunk"],
-      ["action", "ok", "harnessOptions", "omittedHarnesses", "models"],
-      ["action", "status", "validation"],
-      ["runId", "status", "scriptUri", "eventsUri", "scriptSource", "limits"],
-      ["runId", "status", "scriptUri", "eventsUri", "scriptSource", "limits"],
-      ["runId", "status", "scriptUri", "workflowName", "phases", "logTail", "calls", "filter", "truncation"],
-      [
-        "runId",
-        "status",
-        "scriptUri",
-        "workflowName",
-        "phases",
-        "logTail",
-        "calls",
-        "filter",
-        "truncation",
-        "permissionResponse",
-      ],
-      [
-        "runId",
-        "status",
-        "scriptUri",
-        "workflowName",
-        "phases",
-        "logTail",
-        "calls",
-        "filter",
-        "truncation",
-        "stopped",
-        "alreadyTerminal",
-      ],
-      [
-        "runId",
-        "status",
-        "scriptUri",
-        "workflowName",
-        "phases",
-        "logTail",
-        "calls",
-        "filter",
-        "truncation",
-        "stopped",
-        "alreadyTerminal",
-        "control",
-      ],
-    ]);
-    const outcome = field(field(tool.outputSchema, "properties"), "outcome");
-    assert.deepEqual(field(outcome, "required"), ["runId", "status", "scriptUri"]);
-  } finally {
-    await dispose();
-  }
+    assert.deepEqual(tools.map(tool => tool.name).sort(), ["repl", "workflow", "workflow-events", "workflow-notifications", "workflow-runs", "workflow_monitor"]);
+    const workflow = tools.find(tool => tool.name === "workflow")!;
+    const monitor = tools.find(tool => tool.name === "workflow_monitor")!;
+    assert.equal(field(workflow._meta, "ui"), undefined);
+    assert.equal(typeof field(field(monitor._meta, "ui"), "resourceUri"), "string");
+    assert.match(workflow.description ?? "", /skill:\/\/agentprism-workflow-authoring\/SKILL\.md/);
+    assert.ok((workflow.description ?? "").length < 1200);
+    assert.doesNotMatch(JSON.stringify(workflow.inputSchema), /background|foreground|startInBackground|agentTimeoutMs|agentIdleTimeoutMs/);
+    const branches = workflow.inputSchema.oneOf as Array<Record<string, unknown>>;
+    assert.equal(branches.length, 8);
+    const action = (variant: Record<string, unknown>): unknown => {
+      const variants = variant.oneOf as Array<Record<string, unknown>> | undefined;
+      return variants ? action(variants[0]) : field(field(variant.properties, "action"), "const");
+    };
+    assert.deepEqual(branches.map(action), ["config", "run", "resume", "setup-response", "status", "result", "permissions-response", "stop"]);
+    assert.ok(workflow.outputSchema);
+    const properties = Object.keys(field(workflow.outputSchema, "properties") ?? {});
+    for (const name of ["accepted", "requestId", "duplicate", "continuation", "setup", "outcome", "pendingPermissions"]) assert.ok(properties.includes(name));
+    for (const retired of ["validation", "interaction", "background"]) assert.equal(properties.includes(retired), false);
+    assert.equal((field(workflow.outputSchema, "oneOf") as unknown[]).length, 8);
+  } finally { await dispose(); }
 });
 
 test("action=config discovers the live runner catalog without creating or executing a workflow", async () => {
@@ -471,17 +253,15 @@ test("model-less MCP workflows auto-select and cache the first backend with posi
   );
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const first = await client.callTool({ name: "workflow", arguments: { action: "run", script: ONE_AGENT_SCRIPT } });
+    const first = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
     assert.notEqual(first.isError, true);
     assert.deepEqual(liveModels, ["codex"]);
-    assert.match(textOf(first), /auto-selected backend "codex"/);
-    assert.match(textOf(first), /will not switch providers automatically/);
     assert.equal(probes.filter(({ spec }) => spec === "claude").length, 1);
     assert.equal(probes.filter(({ spec }) => spec === "opencode").length, 1);
     assert.equal(probes.filter(({ spec }) => spec === "pi").length, 1);
     assert.equal(probes.filter(({ spec }) => spec === "codex").length, 2, "discovery plus routed preflight");
 
-    const second = await client.callTool({ name: "workflow", arguments: { action: "run", script: ONE_AGENT_SCRIPT } });
+    const second = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
     assert.notEqual(second.isError, true);
     assert.deepEqual(liveModels, ["codex", "codex"]);
     assert.equal(probes.filter(({ spec }) => spec === "claude").length, 1, "project discovery is cached");
@@ -516,7 +296,7 @@ test("an explicit AGENTPRISM_DEFAULT_BACKEND wins and skips automatic candidate 
   );
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const result = await client.callTool({ name: "workflow", arguments: { action: "run", script: ONE_AGENT_SCRIPT } });
+    const result = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
     assert.notEqual(result.isError, true);
     assert.deepEqual(liveModels, ["pi"]);
     assert.deepEqual(probes, ["pi"], "only the normal routed preflight probes the explicit backend");
@@ -528,7 +308,7 @@ test("an explicit AGENTPRISM_DEFAULT_BACKEND wins and skips automatic candidate 
   }
 });
 
-test("automatic default discovery rejects admission when every backend is definitely unavailable", async () => {
+test("automatic default discovery leaves an inspectable failed run when every backend is unavailable", async () => {
   const previousDefault = process.env.AGENTPRISM_DEFAULT_BACKEND;
   delete process.env.AGENTPRISM_DEFAULT_BACKEND;
   let liveCalls = 0;
@@ -553,9 +333,10 @@ test("automatic default discovery rejects admission when every backend is defini
   );
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const result = await client.callTool({ name: "workflow", arguments: { action: "run", script: ONE_AGENT_SCRIPT } });
-    assert.equal(result.isError, true);
-    assert.equal(structured(result), undefined, "no run or validation artifact is created");
+    const result = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
+    assert.equal(result.isError, false, "status reads succeed independently of execution outcome");
+    assert.equal(structured(result)?.status, "failed");
+    assert.match(String(structured(result)?.runId), RUN_ID);
     assert.equal(liveCalls, 0);
     assert.match(textOf(result), /No usable default ACP backend/);
     assert.match(textOf(result), /claude login required/);
@@ -588,32 +369,26 @@ test("fully pinned and agent-less workflows do not trigger automatic backend dis
   );
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const pinned = await client.callTool({
-      name: "workflow",
-      arguments: {
+    const pinned = await runAndObserve(client, {
         action: "run",
         script: [
           'export const meta = { name: "pinned", description: "d" };',
           'return agent("work", { label: "work", model: "pi" });',
         ].join("\n"),
-      },
-    });
+      });
     assert.notEqual(pinned.isError, true);
     assert.deepEqual(liveModels, ["pi"]);
     assert.deepEqual(probes, ["pi"], "the explicit call receives only its normal preflight probe");
 
     probes.length = 0;
-    const deterministic = await client.callTool({
-      name: "workflow",
-      arguments: {
+    const deterministic = await runAndObserve(client, {
         action: "run",
         script: [
           'export const meta = { name: "unused-agent", description: "d" };',
           'if (false) return agent("unreachable");',
           'return "no agents";',
         ].join("\n"),
-      },
-    });
+      });
     assert.notEqual(deterministic.isError, true);
     assert.deepEqual(probes, []);
   } finally {
@@ -656,17 +431,14 @@ test("spread-built explicit models need only their routed probe, even without a 
   );
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const result = await client.callTool({
-      name: "workflow",
-      arguments: {
+    const result = await runAndObserve(client, {
         action: "run",
         script: [
           'export const meta = { name: "spread-model", description: "d" };',
           'const shared = { model: "pi/deepseek/deepseek-v4-flash" };',
           'return agent("work", { label: "work", ...shared });',
         ].join("\n"),
-      },
-    });
+      });
     assert.notEqual(result.isError, true);
     assert.deepEqual(liveModels, ["pi/deepseek/deepseek-v4-flash"]);
     assert.deepEqual(probes, ["pi/deepseek/deepseek-v4-flash"]);
@@ -710,9 +482,7 @@ test("a live branch not covered by canonical preflight configuration fails close
   );
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const result = await client.callTool({
-      name: "workflow",
-      arguments: {
+    const result = await runAndObserve(client, {
         action: "run",
         script: [
           'export const meta = { name: "hidden-default", description: "d" };',
@@ -720,9 +490,8 @@ test("a live branch not covered by canonical preflight configuration fails close
           'if (decision === "take-live-branch") return agent("hidden", { label: "hidden" });',
           'return "dry-path";',
         ].join("\n"),
-      },
-    });
-    assert.equal(result.isError, true);
+      });
+    assert.equal(result.isError, false, "status reads succeed independently of execution outcome");
     assert.equal(structured(result)?.status, "failed");
     assert.deepEqual(liveModels, ["claude"]);
     assert.deepEqual(probes, ["claude"], "uncovered calls need no speculative default probe");
@@ -734,160 +503,34 @@ test("a live branch not covered by canonical preflight configuration fails close
   }
 });
 
-test("runtime and advertised output schemas enforce exact result branches", async () => {
-  const fixtures = outputVariantFixtures();
-  for (const [name, fixture] of Object.entries(fixtures)) {
-    assert.equal(workflowToolOutputShape.safeParse(fixture).success, true, `${name} runtime fixture`);
-  }
-
-  const invalid = {
-    "result retrieval without chunk": (() => {
-      const { chunk: _chunk, ...withoutChunk } = fixtures.resultRetrieval;
-      return withoutChunk;
-    })(),
-    "result retrieval with script URI": { ...fixtures.resultRetrieval, scriptUri: "workflow://runs/fixture-run/script" },
-    "result retrieval with run limits": { ...fixtures.resultRetrieval, limits: LIMITS },
-    "failed status with result URI": {
-      ...inspectionFixture("failed"),
-      resultUri: "workflow://runs/fixture-run/result",
-    },
-    "failed status outcome with result URI": {
-      ...inspectionFixture("failed"),
-      outcome: {
-        ...terminalOutcomeFixture,
-        status: "failed" as const,
-        resultUri: "workflow://runs/fixture-run/result",
-      },
-    },
-    "config with a run id": { ...fixtures.config, runId: "bad-run" },
-    "config without models": (() => {
-      const { models: _models, ...withoutModels } = fixtures.config;
-      return withoutModels;
-    })(),
-    "rejection with a run id": { ...fixtures.rejected, runId: "bad-run" },
-    "execution without limits": (() => {
-      const { limits: _limits, ...withoutLimits } = fixtures.execution;
-      return withoutLimits;
-    })(),
-    "execution without events URI": (() => {
-      const { eventsUri: _eventsUri, ...withoutEventsUri } = fixtures.execution;
-      return withoutEventsUri;
-    })(),
-    "background without limits": (() => {
-      const { limits: _limits, ...withoutLimits } = fixtures.background;
-      return withoutLimits;
-    })(),
-    "background without events URI": (() => {
-      const { eventsUri: _eventsUri, ...withoutEventsUri } = fixtures.background;
-      return withoutEventsUri;
-    })(),
-    "background with execution logs": { ...fixtures.background, logs: [] },
-    "background with execution usage": {
-      ...fixtures.background,
-      tokenUsage: { input: 1, output: 2, total: 3, cost: 0 },
-    },
-    "background with status outcome": { ...fixtures.background, outcome: terminalOutcomeFixture },
-    "status with execution result": { ...fixtures.nonterminalStatus, result: 42 },
-    "nonterminal status with outcome": {
-      ...fixtures.nonterminalStatus,
-      outcome: terminalOutcomeFixture,
-    },
-    "terminal status without outcome": (() => {
-      const { outcome: _outcome, ...withoutOutcome } = fixtures.terminalStatus;
-      return withoutOutcome;
-    })(),
-    "nonterminal status with execution logs": { ...fixtures.nonterminalStatus, logs: [] },
-    "stop with execution logs": { ...fixtures.stop, logs: [] },
-    "stop with execution usage": {
-      ...fixtures.stop,
-      tokenUsage: { input: 1, output: 2, total: 3, cost: 0 },
-    },
-    "stop with status outcome": { ...fixtures.stop, outcome: terminalOutcomeFixture },
-    "pending stop claiming terminal status": { ...fixtures.pendingStop, status: "aborted" },
-    "pending stop claiming completion": { ...fixtures.pendingStop, stopped: true },
-    "terminal status with top-level logs": { ...fixtures.terminalStatus, logs: [] },
-  };
-  for (const [name, fixture] of Object.entries(invalid)) {
-    assert.equal(workflowToolOutputShape.safeParse(fixture).success, false, `${name} runtime rejection`);
-  }
-
-  const { client, dispose } = await connect(okRunner(), { listTools: true });
-  try {
-    const workflow = (await client.listTools()).tools.find((tool) => tool.name === "workflow");
-    assert.ok(workflow?.outputSchema);
-    const validate = new AjvJsonSchemaValidator().getValidator(
-      workflow.outputSchema as JsonSchemaType,
-    );
-    for (const [name, fixture] of Object.entries(fixtures)) {
-      assert.equal(validate(fixture).valid, true, `${name} advertised-schema fixture`);
-    }
-    for (const [name, fixture] of Object.entries(invalid)) {
-      assert.equal(validate(fixture).valid, false, `${name} advertised-schema rejection`);
-    }
-  } finally {
-    await dispose();
-  }
-});
-
-test("foreground and terminal status outcomes expose result observability while status stays bounded", async () => {
-  let sessions = 0;
+test("terminal status exposes replay and checkpoint details separately from acceptance", async () => {
   const runner = makeRunner((_prompt, options) => {
-    options.onSessionOpen?.({
-      sessionId: `observable-${sessions++}`,
-      backendId: "codex",
-      cwd: "/workspace",
-      reopen: { load: true, resume: true, list: true },
-    });
     options.onModelResolved?.("gpt-5.6-sol");
     options.onModelFallback?.("codex/gpt-5.6-sol");
     return "ok";
   });
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const script = [
-      'export const meta = { name: "result-observability", description: "result observability" };',
-      'await agent("review", { label: "review", model: "codex/gpt-5.6-sol" });',
-      'return await checkpoint("Release?", { kind: "select", choices: ["ship", "hold"], default: "hold" });',
-    ].join("\n");
-
-    const foreground = await client.callTool({ name: "workflow", arguments: { action: "run", script } });
-    const foregroundResult = structured(foreground);
-    assert.equal((foregroundResult?.fallbacks as unknown[])?.length, 1);
-    assert.deepEqual(foregroundResult?.checkpointsTaken, [
-      { callIndex: 1, kind: "select", decision: "hold", source: "headless-default" },
-    ]);
-
-    const inspected = await client.callTool({
-      name: "workflow",
-      arguments: { action: "status", runId: String(foregroundResult?.runId) },
-    });
-    const status = structured(inspected);
+    const script = `export const meta = { name: "result-observability", description: "result observability" };
+await agent("review", { label: "review", model: "codex/gpt-5.6-sol" });
+return await checkpoint("Release?", { kind: "select", choices: ["ship", "hold"] });`;
+    const accepted = await client.callTool({ name: "workflow", arguments: { action: "run", requestId: randomUUID(), script } });
+    assert.equal(structured(accepted)?.accepted, true);
+    assert.equal(structured(accepted)?.fallbacks, undefined);
+    assert.equal(structured(accepted)?.checkpointsTaken, undefined);
+    const runId = String(structured(accepted)?.runId);
+    const paused = structured(await waitForRun(client, runId));
+    assert.equal(paused?.status, "paused");
+    assert.equal((field(paused?.outcome, "fallbacks") as unknown[]).length, 1);
+    await client.callTool({ name: "workflow", arguments: { action: "resume", requestId: randomUUID(), runId, checkpointReplies: { "1": "hold" } } });
+    const status = structured(await waitForRun(client, runId, status => status.status === "completed"));
     assert.equal(Object.hasOwn(status ?? {}, "fallbacks"), false);
     assert.equal(Object.hasOwn(status ?? {}, "checkpointsTaken"), false);
-
-    const accepted = await client.callTool({ name: "workflow", arguments: { action: "run", script, background: true } });
-    const backgroundRunId = String(structured(accepted)?.runId);
-    let awaitResult: Record<string, unknown> | undefined;
-    for (let attempt = 0; attempt < 100; attempt++) {
-      const statusResult = await client.callTool({
-        name: "workflow",
-        arguments: { action: "status", runId: backgroundRunId },
-      });
-      awaitResult = structured(statusResult);
-      if (awaitResult?.status === "completed") break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.equal(awaitResult?.status, "completed");
-    assert.equal(Object.hasOwn(awaitResult ?? {}, "fallbacks"), false);
-    assert.equal(Object.hasOwn(awaitResult ?? {}, "checkpointsTaken"), false);
-    const outcome = field(awaitResult?.outcome, "fallbacks") as unknown[];
-    assert.equal(outcome.length, 1);
-    assert.deepEqual(field(awaitResult?.outcome, "checkpointsTaken"), [
-      { callIndex: 1, kind: "select", decision: "hold", source: "headless-default" },
+    assert.deepEqual(field(status?.outcome, "checkpointsTaken"), [
+      { callIndex: 1, kind: "select", decision: "hold", source: "injected" },
     ]);
-  } finally {
-    await dispose();
-  }
+    assert.equal(field(status?.outcome, "result"), "hold");
+  } finally { await dispose(); }
 });
 
 test("run and status both validate after listTools caching; status is read-only and chronologically filtered", async () => {
@@ -916,7 +559,7 @@ test("run and status both validate after listTools caching; status is read-only 
       'await agent("three", { label: "review-three" });',
       'return true;',
     ].join("\n");
-    const run = await client.callTool({ name: "workflow", arguments: { action: "run", script } });
+    const run = await runAndObserve(client, { action: "run", script });
     const runStatus = structured(run);
     assert.equal(runStatus?.status, "completed");
     assert.equal(calls, 3);
@@ -965,7 +608,7 @@ test("status surfaces a live run's in-flight agent calls", async () => {
       'await agent("hold", { label: "held-agent" });',
       'return true;',
     ].join("\n");
-    const accepted = await client.callTool({ name: "workflow", arguments: { action: "run", script, background: true } });
+    const accepted = await client.callTool({ name: "workflow", arguments: { requestId: randomUUID(), action: "run", script } });
     const runId = String(structured(accepted)?.runId);
 
     // Wait until the held agent is actually in flight (its start is durable in the event log).
@@ -1027,8 +670,8 @@ test("unknown status is an exact tool error; reading a failed run is successful"
       'No workflow run found for runId "missing-run" in this server\'s project-scoped run store.',
     );
 
-    const failed = await client.callTool({ name: "workflow", arguments: { action: "run", script: ONE_AGENT_SCRIPT } });
-    assert.equal(failed.isError, true);
+    const failed = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
+    assert.equal(failed.isError, false, "status reads succeed independently of execution outcome");
     const failedRun = structured(failed);
     const inspected = await client.callTool({
       name: "workflow",
@@ -1053,7 +696,7 @@ test("status keeps its observation projection within 24 KiB and text within 8 Ki
       'for (let i = 0; i < 50; i++) { phase(`dynamic-${i}-${"x".repeat(600)}`); log(`line-${i}-${"😀".repeat(1000)}`); await agent(`prompt-${i}`, { label: `call-${i}` }); }',
       'return true;',
     ].join("\n");
-    const run = await client.callTool({ name: "workflow", arguments: { action: "run", script } });
+    const run = await runAndObserve(client, { action: "run", script });
     assert.equal(structured(run)?.status, "completed");
     const runId = String(structured(run)?.runId);
     const inspected = await client.callTool({
@@ -1082,13 +725,10 @@ test("paused and failed terminal summaries carry redacted final-20 log tails and
   });
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const paused = await client.callTool({
-      name: "workflow",
-      arguments: {
+    const paused = await runAndObserve(client, {
         action: "run",
-        script: `export const meta = { name: "paused-tail", description: "paused" };\n${logs}\nawait checkpoint("q", { headless: "pause" });`,
-      },
-    });
+        script: `export const meta = { name: "paused-tail", description: "paused" };\n${logs}\nawait checkpoint("q");`,
+      });
     assert.equal(paused.isError, false);
     const pausedTail = field(structured(paused)?.logTail, "lines") as string[];
     assert.equal(pausedTail.length, 20);
@@ -1101,25 +741,19 @@ test("paused and failed terminal summaries carry redacted final-20 log tails and
     assert.doesNotMatch(textOf(paused), /ghp_/);
     assert.match(textOf(paused), /action="resume"/);
 
-    const failed = await client.callTool({
-      name: "workflow",
-      arguments: {
+    const failed = await runAndObserve(client, {
         action: "run",
         script: `export const meta = { name: "failed-tail", description: "failed" };\n${logs}\nawait agent("fail");`,
-      },
-    });
-    assert.equal(failed.isError, true);
+      });
+    assert.equal(failed.isError, false, "status reads succeed independently of execution outcome");
     const failedTail = field(structured(failed)?.logTail, "lines") as string[];
     assert.equal(failedTail[0], "line-7");
     assert.match(textOf(failed), /recent run log \(last 20 of 26\):/);
 
-    const empty = await client.callTool({
-      name: "workflow",
-      arguments: {
+    const empty = await runAndObserve(client, {
         action: "run",
         script: 'export const meta = { name: "empty-tail", description: "empty" };\nawait agent("fail");',
-      },
-    });
+      });
     const emptyLines = field(structured(empty)?.logTail, "lines") as string[];
     assert.equal(emptyLines.length, 1);
     assert.match(textOf(empty), /recent run log \(last 1 of 1\):/);
@@ -1128,12 +762,12 @@ test("paused and failed terminal summaries carry redacted final-20 log tails and
   }
 });
 
-test("completed run -> isError:false, structuredContent is the WorkflowRunResult core (status completed)", async () => {
+test("completed status exposes the result through its terminal outcome", async () => {
   // listTools:true caches the client-side output-schema validator, so a green result here
   // also proves the completed structuredContent VALIDATES against the advertised schema.
   const { client, dispose } = await connect(okRunner(), { listTools: true });
   try {
-    const res = await client.callTool({ name: "workflow", arguments: { action: "run", script: ONE_AGENT_SCRIPT } });
+    const res = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
 
     assert.equal(res.isError, false, "a completed run is not an error");
     const sc = structured(res);
@@ -1142,8 +776,8 @@ test("completed run -> isError:false, structuredContent is the WorkflowRunResult
     assert.equal(typeof sc.runId, "string");
     assert.match(String(sc.runId), RUN_ID, "the engine owns/stamps the run id");
     assert.equal(sc.status, "completed", "the engine stamped a terminal completed status");
-    assert.equal(sc.result, "stub:hello", "result is the script's resolved value (raw agent text)");
-    assert.ok(Array.isArray(sc.logs), "logs is a string array");
+    assert.equal(field(sc.outcome, "result"), "stub:hello", "result is the script's resolved value (raw agent text)");
+    assert.ok(Array.isArray(field(sc.outcome, "logs")), "logs is a string array");
 
     // tokenUsage is schema-optional, but the engine always summarizes a completed run.
     const usage = sc.tokenUsage;
@@ -1154,7 +788,7 @@ test("completed run -> isError:false, structuredContent is the WorkflowRunResult
     // A human-readable text block accompanies the structured core.
     const text = textOf(res);
     assert.match(text, /completed/, "summary names the terminal status");
-    assert.match(text, /agents:/, "summary reflects engine-computed run stats");
+    assert.match(text, /recent calls \(/, "summary reflects observed run calls");
     assert.ok(text.includes(String(sc.runId)), "summary echoes the engine run id");
   } finally {
     await dispose();
@@ -1166,16 +800,13 @@ test("tool boundary: over-max concurrency/agentRetries are CLAMPED, not rejected
   try {
     // If the boundary rejected these, the SDK would surface an isError result whose text
     // begins "Input validation error: ...". Instead the run executes to completion.
-    const res = await client.callTool({
-      name: "workflow",
-      arguments: { action: "run", script: NO_AGENT_SCRIPT, concurrency: 1000, agentRetries: 99 },
-    });
+    const res = await runAndObserve(client, { action: "run", script: NO_AGENT_SCRIPT, concurrency: 1000, agentRetries: 99 });
 
     assert.equal(res.isError, false, "over-max knobs are accepted, not rejected");
     assert.doesNotMatch(textOf(res), /Input validation error/i, "no InvalidParams was raised");
     const sc = structured(res);
     assert.equal(sc?.status, "completed");
-    assert.equal(sc?.result, 42, "the script ran with clamped knobs");
+    assert.equal(field(sc?.outcome, "result"), 42, "the script ran with clamped knobs");
   } finally {
     await dispose();
   }
@@ -1196,7 +827,7 @@ test("paused run -> shell does NOT throw: isError:false, status 'paused', resetH
   );
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const res = await client.callTool({ name: "workflow", arguments: { action: "run", script: ONE_AGENT_SCRIPT } });
+    const res = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
 
     assert.equal(res.isError, false, "paused is resumable, NOT an error");
     const sc = structured(res);
@@ -1216,20 +847,16 @@ test("paused run -> shell does NOT throw: isError:false, status 'paused', resetH
   }
 });
 
-test("failed run -> shell does NOT throw: returns isError:true with status 'failed' (engine-stamped)", async () => {
-  // A non-recoverable, non-usage-limit failure -> the engine stamps status 'failed' and
-  // runSync RESOLVES (does not reject); the handler maps failed -> isError:true. The shell
-  // never throws on fail. Regression: listTools:true (output-schema fix — a failed run omits
-  // `result`) AND the reason is the REAL error, not "Unhandled error" (the engine now persists/
-  // releases the lease and guards the unheard 'error' emit, so the real WorkflowError propagates).
+test("execution failure remains inspectable through a successful status request", async () => {
+  // Failure belongs to the accepted execution. Reading that failure is a successful tool request.
   const runner = throwingRunner(
     () => new WorkflowError("schema never satisfied", WorkflowErrorCode.SCHEMA_NONCOMPLIANCE, { recoverable: false }),
   );
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const res = await client.callTool({ name: "workflow", arguments: { action: "run", script: ONE_AGENT_SCRIPT } });
+    const res = await runAndObserve(client, { action: "run", script: ONE_AGENT_SCRIPT });
 
-    assert.equal(res.isError, true, "a failed run maps to isError:true");
+    assert.equal(res.isError, false, "status reads succeed independently of execution outcome");
     const sc = structured(res);
     assert.ok(sc, "a failed run still returns a structured terminal result (not a thrown error)");
     assert.equal(sc.status, "failed", "the engine stamped a failed status");
@@ -1266,21 +893,18 @@ test("automatic routed config validation rejects unknown options before the live
   );
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const result = await client.callTool({
-      name: "workflow",
-      arguments: {
+    const result = await runAndObserve(client, {
         action: "run",
         script: [
           'export const meta = { name: "bad-config", description: "must not admit" };',
           'return await agent("work", { label: "work", model: "claude", configOptions: { invented: true } });',
         ].join("\n"),
-      },
-    });
-    assert.equal(result.isError, true);
+      });
+    assert.equal(result.isError, false, "status reads succeed independently of execution outcome");
     const output = structured(result);
-    assert.equal(output?.status, "rejected");
-    assert.equal(field(output?.validation, "exitCode"), 2);
-    assert.equal(output?.runId, undefined);
+    assert.equal(output?.status, "failed");
+    assert.equal(output?.errorCode, "SCRIPT_VALIDATION_ERROR");
+    assert.match(String(output?.runId), RUN_ID);
     assert.equal(probes, 1);
     assert.equal(realCalls, 0);
     assert.match(textOf(result), /invented/);
@@ -1322,18 +946,15 @@ test("automatic mode validation rejects a guessed default when the selected back
     assert.match(textOf(discovered), /modes: \(none advertised — omit mode\)/);
     probes = 0;
 
-    const result = await client.callTool({
-      name: "workflow",
-      arguments: {
+    const result = await runAndObserve(client, {
         action: "run",
         script: [
           'export const meta = { name: "bad-mode", description: "must not admit" };',
           'return agent("work", { label: "pi-call", model: "pi/openai/model", mode: "default", configOptions: { thinkingLevel: "high" } });',
         ].join("\n"),
-      },
-    });
-    assert.equal(result.isError, true);
-    assert.equal(structured(result)?.status, "rejected");
+      });
+    assert.equal(result.isError, false, "status reads succeed independently of execution outcome");
+    assert.equal(structured(result)?.status, "failed");
     assert.equal(probes, 1);
     assert.equal(realCalls, 0);
     assert.match(textOf(result), /mode authored value "default" is not advertised/);
@@ -1344,7 +965,7 @@ test("automatic mode validation rejects a guessed default when the selected back
   }
 });
 
-test("unknown workflow agent option keys reject before config probing or admission", async () => {
+test("unknown workflow agent option keys fail preparation before config probing or execution", async () => {
   let realCalls = 0;
   let probes = 0;
   const runner = Object.assign(makeRunner(() => {
@@ -1358,18 +979,15 @@ test("unknown workflow agent option keys reject before config probing or admissi
   });
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const result = await client.callTool({
-      name: "workflow",
-      arguments: {
+    const result = await runAndObserve(client, {
         action: "run",
         script: [
           'export const meta = { name: "foreign-options", description: "must not admit" };',
           'return agent("work", { label: "pi-call", backend: "pi", model: "openai/model", config: { thinkingLevel: "high" } });',
         ].join("\n"),
-      },
-    });
-    assert.equal(result.isError, true);
-    assert.equal(structured(result)?.status, "rejected");
+      });
+    assert.equal(result.isError, false, "status reads succeed independently of execution outcome");
+    assert.equal(structured(result)?.status, "failed");
     assert.equal(probes, 0);
     assert.equal(realCalls, 0);
     assert.match(textOf(result), /agent "pi-call" options contain unknown keys "backend", "config"/);
@@ -1378,51 +996,44 @@ test("unknown workflow agent option keys reject before config probing or admissi
   }
 });
 
-test("mocked dry-run failure is rejected before real agent execution or background admission", async () => {
+test("mocked dry-run failure persists its accepted run without executing a real agent", async () => {
   let realCalls = 0;
   const { client, dispose } = await connect(makeRunner(() => {
     realCalls += 1;
     return "real";
   }), { listTools: true });
   try {
-    const result = await client.callTool({
-      name: "workflow",
-      arguments: {
+    const result = await runAndObserve(client, {
         action: "run",
-        background: true,
         script: [
           'export const meta = { name: "preflight-failure", description: "must not admit" };',
           'await agent("mock-only", { label: "mock-only" });',
           'throw new Error("dry-run boom");',
         ].join("\n"),
-      },
-    });
-    assert.equal(result.isError, true);
+      });
+    assert.equal(result.isError, false, "status reads succeed independently of execution outcome");
     const output = structured(result);
-    assert.equal(output?.status, "rejected");
-    assert.equal(output?.runId, undefined);
-    assert.equal(field(output?.validation, "exitCode"), 2);
+    assert.equal(output?.status, "failed");
+    assert.match(String(output?.runId), RUN_ID);
+    assert.equal(output?.errorCode, "SCRIPT_VALIDATION_ERROR");
     assert.equal(realCalls, 0, "the live AgentRunner is never invoked");
     assert.match(textOf(result), /dry-run boom/);
-    assert.match(textOf(result), /No run was created/);
+    assert.match(String(output?.runId), RUN_ID, "failed setup retains its accepted run");
   } finally {
     await dispose();
   }
 });
 
-test("malformed script is rejected with structured pre-admission diagnostics and no run ID", async () => {
+test("malformed script fails bounded structural acceptance without creating a run", async () => {
   const { client, dispose } = await connect(okRunner());
   try {
-    const res = await client.callTool({ name: "workflow", arguments: { action: "run", script: 'await agent("hi");' } });
+    const res = await client.callTool({ name: "workflow", arguments: { requestId: randomUUID(), action: "run", script: 'await agent("hi");' } });
 
     assert.equal(res.isError, true, "a parse failure is a tool error");
     const output = structured(res);
-    assert.equal(output?.action, "run");
-    assert.equal(output?.status, "rejected");
+    assert.equal(output, undefined);
     assert.equal(output?.runId, undefined, "pre-admission rejection creates no run ID");
-    assert.equal(field(output?.validation, "exitCode"), 1);
     assert.match(textOf(res), /must be the first statement in the script/, "the parse error explains the meta requirement");
-    assert.match(textOf(res), /No run was created/);
   } finally {
     await dispose();
   }
@@ -1433,14 +1044,13 @@ test("malformed script (meta present but invalid) -> isError:true with the valid
   try {
     const res = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: 'export const meta = { description: "missing a name" };\nreturn 1;' },
+      arguments: { requestId: randomUUID(), action: "run", script: 'export const meta = { description: "missing a name" };\nreturn 1;' },
     });
 
     assert.equal(res.isError, true);
     const output = structured(res);
-    assert.equal(output?.status, "rejected");
+    assert.equal(output, undefined);
     assert.equal(output?.runId, undefined);
-    assert.equal(field(output?.validation, "exitCode"), 1);
     assert.match(textOf(res), /meta\.name must be a non-empty string/, "meta validation rejects a nameless workflow");
   } finally {
     await dispose();

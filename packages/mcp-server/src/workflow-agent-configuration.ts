@@ -66,7 +66,7 @@ interface CallFields {
 
 export interface WorkflowAgentConfigurationPlan {
   request: WorkflowAgentConfigurationRequest;
-  /** Binds modern multi-round-trip input to this exact discovered form/catalog. */
+  /** Binds a durable setup request to this exact discovered form/catalog. */
   selectionHash: string;
   callIndexes: number[];
   /** Complete occurrence map: accepted selections plus preserved authored configurations. */
@@ -136,6 +136,21 @@ function routeChoices(harnesses: readonly ValidateHarnessOptions[]): RouteChoice
     }
   }
   return choices;
+}
+
+/** A user-selected model must still be advertised when preparation admits execution. */
+export function assertSelectedWorkflowModels(
+  selectedOccurrences: readonly number[],
+  configurations: Record<number, WorkflowAgentConfiguration>,
+  harnesses: readonly ValidateHarnessOptions[],
+): void {
+  const available = new Set(routeChoices(harnesses).map((choice) => choice.value));
+  for (const index of selectedOccurrences) {
+    const model = configurations[index]?.model;
+    if (!model || !available.has(model)) {
+      throw new Error(`Selected provider/model ${JSON.stringify(model)} for agent occurrence ${index} is no longer advertised; start a fresh run to choose from the current catalog`);
+    }
+  }
 }
 
 function optionDescription(option: SessionConfigOption): string | undefined {

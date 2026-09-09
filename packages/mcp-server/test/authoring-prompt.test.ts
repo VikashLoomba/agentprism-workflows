@@ -64,13 +64,13 @@ test("MCP-facing prompt contains no terminal validation or config instructions",
   }
 });
 
-test("prompt registration includes only core tools and app-only monitor queries", async () => {
+test("prompt registration leaves a non-Apps client's core tool inventory unchanged", async () => {
   const { client, dispose } = await connect(okRunner());
   try {
     const { tools } = await client.listTools();
     assert.deepEqual(
       tools.map((tool) => tool.name).sort(),
-      ["repl", "workflow", "workflow-events", "workflow-runs"],
+      ["repl", "workflow"],
     );
   } finally {
     await dispose();

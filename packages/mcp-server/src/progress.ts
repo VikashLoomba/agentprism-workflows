@@ -2,7 +2,7 @@ import type { ServerContext } from "@modelcontextprotocol/server";
 
 // packages/mcp-server/src/progress.ts
 //
-// Bridges live foreground snapshots onto the MCP progress notification. MCP correlates each
+// Optional embedding helper that maps workflow snapshots to MCP progress notifications. MCP correlates each
 // notification to the tools/call request via
 // the client's progressToken; without one there is no addressable progress channel.
 import type { RunAgentProgressPayload } from "@automatalabs/shared-types";

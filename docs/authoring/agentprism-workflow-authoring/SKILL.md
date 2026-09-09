@@ -1,6 +1,6 @@
 ---
 name: agentprism-workflow-authoring
-description: Write and run deterministic AgentPrism workflow scripts through the MCP workflow tool. Use for workflow DSL syntax, agent routing, structured output, checkpoints, composition, validation, background runs, status, stop, result retrieval, and same-run resume.
+description: Write and run deterministic AgentPrism workflow scripts through the MCP workflow tool. Use for workflow DSL syntax, agent routing, structured output, explicit checkpoints, composition, validation, durable setup, monitoring, status, stop, result retrieval, and same-run resume.
 ---
 
 # Workflow scripts: quickstart
@@ -63,21 +63,21 @@ Omit `model` for the server default, or use a backend-only value such as `"codex
 
 ## Validation and execution
 
-Every `{ action:"run", ... }` request is statically parsed, mock-executed, and checked against no-prompt backend configuration before admission. A rejection creates no run ID, reserves no background slot, and spends no tokens. Read the diagnostic, correct the script, and submit it again.
+Every Run requires a caller-generated `requestId`. After bounded input/source checks, the server durably accepts the immutable source and args and returns its `runId` before mock validation, backend probes, or human setup. An early malformed-input/source rejection creates no run. Later preparation failure remains an inspectable failed run, and declined setup remains an inspectable aborted run. No live worker starts until validation and any required approval/configuration finish.
 
-Use foreground execution for short work. Use `background:true` for work that may outlive one tool request; retain the returned `runId`, then use immediate `status` snapshots or `stop` calls.
+Run and Resume always return bounded acknowledgements. Reuse the same `requestId` and identical inputs when an acknowledgement is lost; a new logical operation needs a fresh ID. Retain `runId` for status, setup, checkpoint replies, stop, and results. No workflow execution-mode field is accepted.
 
 The input is a strict action union: send only fields belonging to the selected action. In particular, `projectDir` belongs to `config` and `run`, not `status`, `result`, `resume`, or `stop`. Some MCP clients report every rejected union branch; when that happens, first check the branch matching your `action` and remove cross-action fields.
 
 ## Minimal MCP lifecycle
 
-This is the complete long-running loop. First admit a background run and retain its `runId`:
+Accept a run and retain its `runId`:
 
 ```json
 {
   "action": "run",
+  "requestId": "review-2026-09-08-1",
   "projectDir": "/absolute/project",
-  "background": true,
   "script": "export const meta = { name: 'review', description: 'Review a target' }; return await agent(`Review ${args.target}`, { label: 'review' });",
   "args": { "target": "packages/core" }
 }
@@ -89,6 +89,12 @@ Observe the current state. Status is always an immediate snapshot; issue it agai
 { "action": "status", "runId": "RUN_ID" }
 ```
 
+If `setup.state` is `"input-required"`, answer the exact `setup.request.id` with `action:"setup-response"` and fields matching its `requestedSchema`. Setup acceptance is `{ action:"accept", content:{ ... } }`; decline/cancel has no content. A checkpoint is different: it appears in `outcome.checkpointContext` and requires a new Resume with `checkpointReplies`.
+
+Every unanswered `checkpoint()` pauses. For example, answer the exact observed checkpoint index with `{ action:"resume", requestId:"review-answer-1", runId:"RUN_ID", checkpointReplies:{ "1":false } }`. The explicit value follows the script's authored control flow. Timeouts, absent panels, and dismissed interactions cannot supply an answer.
+
+To open an App, call the separate `workflow_monitor` tool with `{ "runId":"RUN_ID" }`. Lifecycle operations carry no UI attachment. A monitor can switch among active/recent runs; status and results remain available without an App.
+
 After completion, retrieve the exact result. If `hasMore` is true, repeat with `offset` set to the previous `endOffset`:
 
 ```json
@@ -98,12 +104,13 @@ After completion, retrieve the exact result. If `hasMore` is true, repeat with `
 Continue an incomplete run in place; do not resend `script` or `args`:
 
 ```json
-{ "action": "resume", "runId": "RUN_ID", "background": true }
+{ "action": "resume", "requestId": "review-recovery-1", "runId": "RUN_ID" }
 ```
 
 The response keeps the same `runId` without exposing an execution-attempt identity. It reuses the
 admitted script, args, effective agent configuration, journal, event stream, cumulative usage, and
 durable checkpoint decisions. Use `status` on that same ID, then `result` after completion.
+Explicitly stop with `{ action:"stop", runId:"RUN_ID" }`. Client disconnection or a request timeout leaves accepted work owned by the server; process loss preserves durable state for later inspection/recovery.
 
 ## What to read next
 

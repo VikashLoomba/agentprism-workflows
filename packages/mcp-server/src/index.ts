@@ -20,7 +20,7 @@ import { createWorkflowServer, type WorkflowServer } from "./server.js";
 import { workflowRunEventsUri } from "./workflow-resources.js";
 import { WorkflowPermissionBroker } from "./workflow-permissions.js";
 
-export { BackgroundRunRegistry, createWorkflowServer, MAX_BACKGROUND_RUNS } from "./server.js";
+export { ActiveRunRegistry, createWorkflowServer, MAX_ACTIVE_RUNS } from "./server.js";
 export { WorkflowPermissionBroker } from "./workflow-permissions.js";
 export type {
   WorkflowPendingPermission,
@@ -30,7 +30,6 @@ export type {
 } from "./workflow-permissions.js";
 export type {
   CreateWorkflowServerOptions,
-  WorkflowCheckpointOptions,
   WorkflowServer,
 } from "./server.js";
 export {
@@ -49,6 +48,7 @@ export type {
   WorkflowExecuteToolInput,
   WorkflowPermissionResponseToolInput,
   WorkflowResumeToolInput,
+  WorkflowSetupResponseToolInput,
   WorkflowResultToolInput,
   WorkflowStatusToolInput,
   WorkflowStopToolInput,
@@ -56,17 +56,15 @@ export type {
 } from "./workflow-tool-input.js";
 export {
   toWorkflowExecutionOutcome,
-  toWorkflowToolResult,
   workflowToolOutputShape,
 } from "./workflow-tool-output.js";
 export type {
-  WorkflowBackgroundAccepted,
+  WorkflowOperationAccepted,
+  WorkflowSetupResponseResult,
   WorkflowConfigToolResult,
   WorkflowExecutionOutcome,
   WorkflowExecutionScriptResourceFields,
-  WorkflowExecutionToolResult,
   WorkflowInspectionToolResult,
-  WorkflowPermissionInteraction,
   WorkflowPermissionResponseResult,
   WorkflowResultRetrieval,
   WorkflowRunLatestActivity,
@@ -76,8 +74,8 @@ export type {
   WorkflowStopPendingResult,
   WorkflowStopResult,
   WorkflowToolResult,
-  WorkflowValidationRejected,
 } from "./workflow-tool-output.js";
+export type { WorkflowSetup, WorkflowSetupRequest } from "./workflow-lifecycle.js";
 export { createProgressReporter } from "./progress.js";
 export type { WorkflowProgressCallback, WorkflowToolExtra } from "./progress.js";
 export {
@@ -132,13 +130,14 @@ export {
   RUN_MONITOR_RESOURCE_URI,
   WORKFLOW_EVENTS_TOOL_NAME,
   WORKFLOW_RUNS_TOOL_NAME,
+  WORKFLOW_MONITOR_TOOL_NAME,
+  WORKFLOW_NOTIFICATIONS_TOOL_NAME,
   registerWorkflowAppUi,
 } from "./app-ui.js";
 export type { WorkflowAppUiDeps, WorkflowRunListItem } from "./app-ui.js";
 export {
   EXTENSION_ID,
   RESOURCE_MIME_TYPE,
-  RESOURCE_URI_META_KEY,
   appResourceToolMeta,
   getUiCapability,
   supportsMcpApps,
@@ -205,7 +204,7 @@ export async function main(): Promise<void> {
     ({ era }) => {
       const server = createWorkflowServer(runner, {
         manager: defaultContext.manager,
-        backgroundRuns: defaultContext.backgroundRuns,
+        activeRuns: defaultContext.activeRuns,
         projects,
         replPresence,
         replClientId: () => "stdio-client",

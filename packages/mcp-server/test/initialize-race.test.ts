@@ -12,12 +12,13 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 // These tests pin the invariant at the seam where it broke: the tool is registered at
 // construction, and only the negotiated MCP Apps surface waits for client capabilities.
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "../src/mcp-apps.js";
 
 import { createWorkflowServer } from "../src/index.js";
-import { WORKFLOW_EVENTS_TOOL_NAME } from "../src/app-ui.js";
-import { okRunner } from "./_harness.js";
+import { WORKFLOW_EVENTS_TOOL_NAME, WORKFLOW_MONITOR_TOOL_NAME } from "../src/app-ui.js";
+import { okRunner, structured, waitForRun } from "./_harness.js";
 
 /**
  * Connect while making the initialized notification arrive LATE, the way a pipelined client
@@ -66,10 +67,13 @@ test("the workflow tool is listable and callable before notifications/initialize
   // failure surfaced precisely as a missing structuredContent here.
   const result = await client.callTool({
     name: "workflow",
-    arguments: { action: "run", script: 'export const meta = { name: "x", description: "x" };\nreturn 1;' },
+    arguments: { action: "run", requestId: randomUUID(), script: 'export const meta = { name: "x", description: "x" };\nreturn 1;' },
   });
   assert.equal(result.isError ?? false, false, JSON.stringify(result.content));
   assert.ok(result.structuredContent, "a first tools/call must carry structuredContent");
+  assert.equal(structured(result)?.accepted, true);
+  const completed = await waitForRun(client, String(structured(result)?.runId));
+  assert.equal(structured(completed)?.status, "completed", "execution also works before initialized lands");
 
   await client.close();
 });
@@ -81,7 +85,7 @@ test("the negotiated MCP Apps surface still waits for client capabilities, then 
     -1, // hold indefinitely until we release it
   );
   const before = await capable.client.listTools();
-  assert.ok(before.tools.some((tool) => tool.name === "workflow"));
+  assert.deepEqual(before.tools.map((tool) => tool.name).sort(), ["repl", "workflow"]);
   assert.equal(
     before.tools.some((tool) => tool.name === WORKFLOW_EVENTS_TOOL_NAME),
     false,
@@ -97,10 +101,12 @@ test("the negotiated MCP Apps surface still waits for client capabilities, then 
     "a negotiating client must get the app-only events tool once initialized lands",
   );
   const workflow = after.tools.find((tool) => tool.name === "workflow");
+  assert.equal(workflow?._meta, undefined, "lifecycle tools never attach an App");
+  const monitor = after.tools.find((tool) => tool.name === WORKFLOW_MONITOR_TOOL_NAME);
   assert.deepEqual(
-    (workflow?._meta as { ui?: { resourceUri?: string } } | undefined)?.ui,
+    (monitor?._meta as { ui?: { resourceUri?: string } } | undefined)?.ui,
     { resourceUri: "ui://agentprism-workflow/run-monitor.html" },
-    "the workflow tool must carry UI metadata for a negotiating client",
+    "the separate workflow_monitor tool carries UI metadata for a negotiating client",
   );
   await capable.client.close();
 
@@ -108,6 +114,7 @@ test("the negotiated MCP Apps surface still waits for client capabilities, then 
   const plain = await connectWithDelayedInitialized({}, 0);
   await new Promise((resolve) => setTimeout(resolve, 150));
   const plainTools = await plain.client.listTools();
+  assert.deepEqual(plainTools.tools.map((tool) => tool.name).sort(), ["repl", "workflow"]);
   assert.equal(
     plainTools.tools.some((tool) => tool.name === WORKFLOW_EVENTS_TOOL_NAME),
     false,

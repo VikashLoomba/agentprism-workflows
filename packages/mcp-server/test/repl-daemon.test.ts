@@ -44,6 +44,7 @@
  */
 
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -62,7 +63,7 @@ import { z } from "zod";
 import { replToolInputShape, replToolOutputShape } from "../src/index.js";
 import { createDaemon, type DaemonHandle } from "../src/daemon/http-daemon.js";
 import { connectHttp, makeProjectDir } from "./_http-harness.js";
-import { okRunner, textOf } from "./_harness.js";
+import { okRunner, textOf, waitForRun } from "./_harness.js";
 
 /** The fake held-open ACP session (the broker's structural seam; the
  *  same shape as repl-tool.test.ts's fake, kept local so this suite
@@ -295,8 +296,8 @@ test("the repl tool registers alongside workflow with the redesign's two-action 
       const tools = await session.client.listTools();
       assert.deepEqual(
         tools.tools.map((t) => t.name).sort(),
-        ["repl", "workflow", "workflow-events", "workflow-runs"],
-        "repl registers alongside workflow (and both app-only monitor tools)",
+        ["repl", "workflow"],
+        "plain clients receive the repl and workflow tools",
       );
       const wire = tools.tools.find((t) => t.name === "repl")!;
       const schema = wire.inputSchema as { properties: Record<string, unknown>; required?: string[] };
@@ -741,11 +742,15 @@ test("workflow calls register project presence: a workflow-only client B keeps t
         name: "workflow",
         arguments: {
           action: "run",
+          requestId: randomUUID(),
           projectDir: PROJECT,
           script: 'export const meta = { name: "empty", description: "empty script" };',
         },
       });
       assert.ok(!(ran as { isError?: boolean }).isError, textOf(ran));
+      assert.equal(structuredOf(ran).accepted, true);
+      const completed = await waitForRun(sessionB.client, String(structuredOf(ran).runId));
+      assert.equal(structuredOf(completed).status, "completed");
       // A's connection drops while B is still connected to the project
       // through workflow calls: NO drain may fire — the post-workflow
       // child stays warm.

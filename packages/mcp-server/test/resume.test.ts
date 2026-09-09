@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import test from "node:test";
 
 import {
   connect,
   makeRunner,
   persistedRunFile,
+  runAndObserve,
   structured,
   textOf,
+  waitForRun,
 } from "./_harness.js";
 
 function field(value: unknown, key: string): unknown {
@@ -32,9 +35,8 @@ test("action resume continues the exact run with persisted inputs and admitted c
   });
   const { client, dispose } = await connect(runner, { listTools: true });
   try {
-    const first = await client.callTool({
-      name: "workflow",
-      arguments: { action: "run", script: RECOVERABLE_SCRIPT, args: { value: "kept" } },
+    const first = await runAndObserve(client, {
+      script: RECOVERABLE_SCRIPT, args: { value: "kept" },
     });
     const failed = structured(first);
     assert.equal(failed?.status, "failed");
@@ -44,7 +46,7 @@ test("action resume continues the exact run with persisted inputs and admitted c
     const file = persistedRunFile(runId);
     assert.ok(file);
     const admitted = JSON.parse(await (await import("node:fs/promises")).readFile(file, "utf8"));
-    assert.equal(admitted.admission.format, 1);
+    assert.equal(admitted.admission.format, 2);
     assert.equal(admitted.admission.strict, true);
     assert.equal(admitted.admission.agentConfigurations["0"].model, "claude");
     assert.equal(admitted.admission.agentConfigurations["1"].model, "claude");
@@ -53,15 +55,18 @@ test("action resume continues the exact run with persisted inputs and admitted c
 
     const second = await client.callTool({
       name: "workflow",
-      arguments: { action: "resume", runId },
+      arguments: { action: "resume", requestId: randomUUID(), runId },
     });
-    const completed = structured(second);
     assert.equal(second.isError, false);
+    assert.equal(structured(second)?.accepted, true);
+    assert.equal(structured(second)?.runId, runId);
+    const completed = structured(await waitForRun(client, runId));
     assert.equal(completed?.runId, runId);
     assert.equal(completed?.status, "completed");
-    assert.equal(field(completed?.result, "original"), "kept");
-    assert.equal(field(completed?.result, "a"), "ok:alpha");
-    assert.equal(field(completed?.result, "b"), "ok:beta");
+    const result = field(completed?.outcome, "result");
+    assert.equal(field(result, "original"), "kept");
+    assert.equal(field(result, "a"), "ok:alpha");
+    assert.equal(field(result, "b"), "ok:beta");
     assert.deepEqual(prompts, ["alpha", "beta", "beta"], "the exact journal prefix replays");
   } finally {
     await dispose();
@@ -72,8 +77,8 @@ test("resume rejects fields outside its exact public branch", async () => {
   const { client, dispose } = await connect(makeRunner(() => "ok"), { listTools: true });
   try {
     for (const arguments_ of [
-      { action: "resume", runId: "source-1", script: RECOVERABLE_SCRIPT },
-      { action: "resume", runId: "source-1", offset: 0 },
+      { action: "resume", requestId: randomUUID(), runId: "source-1", script: RECOVERABLE_SCRIPT },
+      { action: "resume", requestId: randomUUID(), runId: "source-1", offset: 0 },
       { action: "status", runId: "source-1", checkpointReplies: { "0": true } },
     ]) {
       const result = await client.callTool({ name: "workflow", arguments: arguments_ });
@@ -91,9 +96,8 @@ test("old persisted runs without canonical admission remain observable but requi
     return "ok";
   }), { listTools: true });
   try {
-    const first = await client.callTool({
-      name: "workflow",
-      arguments: { action: "run", script: RECOVERABLE_SCRIPT, args: { value: "legacy" } },
+    const first = await runAndObserve(client, {
+      script: RECOVERABLE_SCRIPT, args: { value: "legacy" },
     });
     const runId = String(structured(first)?.runId);
     const file = persistedRunFile(runId);
@@ -113,7 +117,7 @@ test("old persisted runs without canonical admission remain observable but requi
 
     const resumed = await client.callTool({
       name: "workflow",
-      arguments: { action: "resume", runId },
+      arguments: { action: "resume", requestId: randomUUID(), runId },
     });
     assert.equal(resumed.isError, true);
     assert.match(textOf(resumed), /admission-missing/);
@@ -129,9 +133,8 @@ test("corrupt canonical admission metadata fails closed without provider re-elic
     return "ok";
   }), { listTools: true });
   try {
-    const first = await client.callTool({
-      name: "workflow",
-      arguments: { action: "run", script: RECOVERABLE_SCRIPT, args: { value: "corrupt" } },
+    const first = await runAndObserve(client, {
+      script: RECOVERABLE_SCRIPT, args: { value: "corrupt" },
     });
     const runId = String(structured(first)?.runId);
     const file = persistedRunFile(runId);
@@ -144,7 +147,7 @@ test("corrupt canonical admission metadata fails closed without provider re-elic
 
     const resumed = await client.callTool({
       name: "workflow",
-      arguments: { action: "resume", runId },
+      arguments: { action: "resume", requestId: randomUUID(), runId },
     });
     assert.equal(resumed.isError, true);
     assert.match(textOf(resumed), /admission-invalid/);

@@ -119,7 +119,8 @@ test("inspection is live-first, cold-readable, ordered, missing-safe, and read-o
   });
   const manager = new WorkflowManager({ persistence: store.persistence, agent: runner });
   const checkpointOnly = await manager.runSync(
-    'export const meta = { name: "checkpoint-metadata", description: "checkpoint", phases: [{ title: "Review" }] };\nphase("Review");\nreturn await checkpoint("continue?", { default: true });',
+    'export const meta = { name: "checkpoint-metadata", description: "checkpoint", phases: [{ title: "Review" }] };\nphase("Review");\nreturn await checkpoint("continue?");',
+    undefined, { confirm: async () => true },
   );
   assert.deepEqual(store.persistence.load(checkpointOnly.runId)?.journal?.[0]?.call, {
     kind: "checkpoint",
@@ -227,7 +228,7 @@ test("journal attribution covers agents, checkpoints, synthetic replies, and rep
   const script = [
     'export const meta = { name: "metadata", description: "metadata", phases: [{ title: "Review" }] };',
     'phase("Review");',
-    'const approved = await checkpoint("continue?", { headless: "pause" });',
+    'const approved = await checkpoint("continue?", { });',
     'const answer = await agent("work", { label: "reviewer" });',
     'return { approved, answer };',
   ].join("\n");
@@ -457,7 +458,7 @@ test("terminal results get exact redacted final-20 tails while completed results
     'for (let i = 1; i <= 25; i++) log(i === 10 ? `line-${i} ghp_abcdefgh12345678` : i === 11 ? `line-${i} ${"😀".repeat(1000)}` : `line-${i}`);';
   const manager = new WorkflowManager({ persistence: memoryPersistence().persistence, agent: runnerFrom(() => "ok") });
   const paused = await manager.runSync(
-    `export const meta = { name: "paused", description: "paused" };\n${loggingPrefix}\nawait checkpoint("q", { headless: "pause" });`,
+    `export const meta = { name: "paused", description: "paused" };\n${loggingPrefix}\nawait checkpoint("q", { });`,
   );
   assert.equal(paused.status, "paused");
   assert.equal(paused.logs.length, 25, "the compatibility logs remain complete and raw");

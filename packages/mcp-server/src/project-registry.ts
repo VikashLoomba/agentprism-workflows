@@ -24,20 +24,21 @@ import type { ReplProjectState } from "./repl-project.js";
 import { disposeReplProjectState } from "./repl-project.js";
 import { SHUTDOWN_DEADLINE_MS } from "./lifecycle.js";
 import { deleteRunControlSidecars } from "./daemon/run-control-store.js";
+import { WorkflowNotificationClaims } from "./workflow-notifications.js";
 
-export const MAX_BACKGROUND_RUNS = 4;
+export const MAX_ACTIVE_RUNS = 4;
 
 /**
- * Tracks live background-run promises against the MAX_BACKGROUND_RUNS admission cap. One
+ * Tracks preparing and executing runs against the MAX_ACTIVE_RUNS admission cap. One
  * registry per project: every session/server sharing a project shares its cap, and a
  * cross-session `action:"status"` can find the live promise instead of falling back to polling.
  */
-export class BackgroundRunRegistry {
+export class ActiveRunRegistry {
   private starting = 0;
-  private readonly active = new Map<string, Promise<WorkflowRunResult>>();
+  private readonly active = new Map<string, Promise<WorkflowRunResult> | undefined>();
 
   reserve(): boolean {
-    if (this.starting + this.active.size >= MAX_BACKGROUND_RUNS) return false;
+    if (this.starting + this.active.size >= MAX_ACTIVE_RUNS) return false;
     this.starting++;
     return true;
   }
@@ -50,12 +51,22 @@ export class BackgroundRunRegistry {
     if (this.starting > 0) this.starting--;
   }
 
-  track(runId: string, promise: Promise<WorkflowRunResult>): void {
+  has(runId: string): boolean { return this.active.has(runId); }
+
+  hold(runId: string): void {
     this.releaseReservation();
+    this.active.set(runId, undefined);
+  }
+
+  track(runId: string, promise: Promise<WorkflowRunResult>): void {
+    if (!this.active.has(runId)) this.releaseReservation();
     this.active.set(runId, promise);
+    const release = () => {
+      if (this.active.get(runId) === promise) this.active.delete(runId);
+    };
     void promise.then(
-      () => this.active.delete(runId),
-      () => this.active.delete(runId),
+      release,
+      release,
     );
   }
 
@@ -79,7 +90,7 @@ export interface AutoDefaultBackendSelection {
 export interface ProjectContext {
   projectDir: string;
   manager: WorkflowManager;
-  backgroundRuns: BackgroundRunRegistry;
+  activeRuns: ActiveRunRegistry;
   /** Successful MCP-only automatic default discovery, cached for this project/daemon. */
   autoDefaultBackend?: AutoDefaultBackendSelection;
   /** Coalesces concurrent first-run discovery; failures are never cached. */
@@ -129,6 +140,7 @@ export function resolveProjectDir(raw: unknown): ProjectDirResolution {
 }
 
 export class WorkflowProjectRegistry implements RunStoreRouter {
+  readonly notificationClaims = new WorkflowNotificationClaims();
   private readonly contexts = new Map<string, ProjectContext>();
   private readonly deletionListeners = new Set<(event: { runId: string }) => void>();
   private readonly persistedEventListeners = new Set<(record: RunEventLogRecord) => void>();
@@ -140,13 +152,13 @@ export class WorkflowProjectRegistry implements RunStoreRouter {
   ) {}
 
   /** Adopt an externally built manager as its project's context (composition back-compat). */
-  adopt(manager: WorkflowManager, backgroundRuns?: BackgroundRunRegistry): ProjectContext {
+  adopt(manager: WorkflowManager, activeRuns?: ActiveRunRegistry): ProjectContext {
     const existing = this.contexts.get(manager.cwd);
     if (existing !== undefined) return existing;
     return this.register({
       projectDir: manager.cwd,
       manager,
-      backgroundRuns: backgroundRuns ?? new BackgroundRunRegistry(),
+      activeRuns: activeRuns ?? new ActiveRunRegistry(),
     });
   }
 
@@ -161,13 +173,14 @@ export class WorkflowProjectRegistry implements RunStoreRouter {
         cwd: projectDir,
         leaseOwnerId: this.options.leaseOwnerId,
       }),
-      backgroundRuns: new BackgroundRunRegistry(),
+      activeRuns: new ActiveRunRegistry(),
     });
   }
 
   private register(context: ProjectContext): ProjectContext {
     this.contexts.set(context.projectDir, context);
     context.manager.on("runDeleted", (event: { runId: string }) => {
+      this.notificationClaims.deleteRun(event.runId);
       deleteRunControlSidecars(context.manager, event.runId);
       for (const listener of this.deletionListeners) listener(event);
     });
@@ -175,6 +188,7 @@ export class WorkflowProjectRegistry implements RunStoreRouter {
       for (const listener of this.persistedEventListeners) listener(record);
     });
     context.manager.on("stopped", (event: { runId: string }) => {
+      context.activeRuns.evict(event.runId);
       for (const listener of this.stoppedListeners) listener(event);
     });
     return context;
@@ -296,7 +310,7 @@ export class WorkflowProjectRegistry implements RunStoreRouter {
 
 /** A fixed single-store router for hosts that construct WorkflowScriptResources directly. */
 export function singleStoreRouter(manager: WorkflowManager): RunStoreRouter {
-  const context: ProjectContext = { projectDir: manager.cwd, manager, backgroundRuns: new BackgroundRunRegistry() };
+  const context: ProjectContext = { projectDir: manager.cwd, manager, activeRuns: new ActiveRunRegistry() };
   const hasRun = (runId: string) => manager.getRun(runId) !== undefined || Boolean(manager.getPersistence().load(runId));
   return {
     storeFor: (runId) => (hasRun(runId) ? context : undefined),

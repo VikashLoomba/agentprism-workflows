@@ -2,6 +2,7 @@
 // real pi-acp transport -> real Pi AgentSession with its documented injected stream seam.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
@@ -23,6 +24,46 @@ const STRUCTURED_SCRIPT = [
   'const answer = await agent("Return the requested structured answer.", { schema: { type: "object", additionalProperties: false, required: ["answer"], properties: { answer: { type: "string" } } } });',
   "return answer;",
 ].join("\n");
+
+async function runAndReadExactResult(client: Client, script: string): Promise<unknown> {
+  const requestId = randomUUID();
+  const deadline = Date.now() + 45_000;
+  const call = (arguments_: Record<string, unknown>) => {
+    const remaining = deadline - Date.now();
+    assert.ok(remaining > 0, "Pi workflow observation exceeded 45 seconds");
+    return client.callTool({ name: "workflow", arguments: arguments_ }, {
+      timeout: remaining, maxTotalTimeout: remaining,
+    });
+  };
+  const accepted = await call({ action: "run", requestId, script });
+  assert.equal(accepted.isError, false, JSON.stringify(accepted));
+  const acknowledgement = accepted.structuredContent as Record<string, unknown>;
+  assert.equal(acknowledgement.accepted, true);
+  assert.equal(acknowledgement.requestId, requestId);
+  assert.equal(typeof acknowledgement.runId, "string");
+  assert.equal(acknowledgement.result, undefined);
+  const runId = acknowledgement.runId as string;
+  let status: Record<string, unknown> = {};
+  while (Date.now() < deadline) {
+    const response = await call({ action: "status", runId });
+    assert.equal(response.isError, false, JSON.stringify(response));
+    status = response.structuredContent as Record<string, unknown>;
+    assert.equal(status.runId, runId);
+    if (["completed", "paused", "failed", "aborted"].includes(String(status.status))) break;
+    assert.notEqual((status.setup as Record<string, unknown> | undefined)?.state, "input-required",
+      `The configured hermetic Pi backend must execute without setup input: ${JSON.stringify(status)}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(status.status, "completed", JSON.stringify(status));
+  const outcome = status.outcome as Record<string, unknown>;
+  assert.equal(outcome.runId, runId);
+  assert.equal(outcome.status, "completed");
+  assert.equal(status.resultUri, `workflow://runs/${runId}/result`);
+  const result = await client.readResource({ uri: status.resultUri as string });
+  const content = result.contents[0];
+  assert.ok(content && "text" in content && typeof content.text === "string");
+  return JSON.parse(content.text);
+}
 
 test("first-class pi runs end to end through pi-acp's credential-free AgentSession seam", {
   timeout: 60_000,
@@ -50,14 +91,7 @@ test("first-class pi runs end to end through pi-acp's credential-free AgentSessi
   try {
     await client.connect(transport);
     await client.listTools();
-    const response = await client.callTool({
-      name: "workflow",
-      arguments: { action: "run", script: SCRIPT },
-    }, { timeout: 45_000, maxTotalTimeout: 45_000 });
-    const result = response.structuredContent as Record<string, unknown> | undefined;
-    assert.equal(response.isError, false, stderr);
-    assert.equal(result?.status, "completed", stderr);
-    assert.equal(result?.result, "hermetic pong", stderr);
+    assert.equal(await runAndReadExactResult(client, SCRIPT), "hermetic pong", stderr);
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n${stderr}`);
   } finally {
@@ -92,14 +126,8 @@ test("first-class pi captures schema output through the injected HTTP MCP tool",
   transport.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-8_000); });
   try {
     await client.connect(transport);
-    const response = await client.callTool({ name: "workflow", arguments: { action: "run", script: STRUCTURED_SCRIPT } }, {
-      timeout: 45_000,
-      maxTotalTimeout: 45_000,
-    });
-    const result = response.structuredContent as Record<string, unknown> | undefined;
-    assert.equal(response.isError, false, stderr);
-    assert.equal(result?.status, "completed", stderr);
-    assert.deepEqual(result?.result, { answer: "pong" }, stderr);
+    await client.listTools();
+    assert.deepEqual(await runAndReadExactResult(client, STRUCTURED_SCRIPT), { answer: "pong" }, stderr);
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n${stderr}`);
   } finally {

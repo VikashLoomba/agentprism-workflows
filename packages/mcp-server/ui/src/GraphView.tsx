@@ -79,6 +79,10 @@ function WaveGraph({
                     : `node status-${item.status ?? "running"}`
               }
               style={{ left: item.x, top: item.y, width: item.w, height: item.h }}
+              role="button"
+              tabIndex={0}
+              aria-label={`Inspect ${item.label}`}
+              onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); handleClick(item); } }}
               onClick={() => handleClick(item)}
             >
               <div className="node-side" />
@@ -249,6 +253,10 @@ function SkeletonGraph({
               key={item.id}
               className={skelNodeClass(item)}
               style={{ left: item.x, top: item.y, width: item.w, height: item.h }}
+              role={item.kind === "site" || (item.kind === "phase" && item.phaseIndex === undefined) ? undefined : "button"}
+              tabIndex={item.kind === "site" || (item.kind === "phase" && item.phaseIndex === undefined) ? undefined : 0}
+              aria-label={item.kind === "site" || (item.kind === "phase" && item.phaseIndex === undefined) ? undefined : `Inspect ${item.label}`}
+              onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); handleClick(item); } }}
               onClick={() => handleClick(item)}
             >
               <div className="node-side" />

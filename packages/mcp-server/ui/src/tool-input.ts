@@ -1,36 +1,8 @@
-import { extractSkeleton } from "./skeleton.js";
-import type { Skeleton } from "./skeleton.js";
-
-/** Every existing-run action, including same-ID resume, observes its input run. */
-export function observedRunIdFromArgs(
-  args: Record<string, unknown> | null,
-): string | undefined {
-  const action = args?.["action"];
-  if (action === undefined || action === "run" || action === "config") {
-    return undefined;
-  }
-  const runId = args?.["runId"];
-  return typeof runId === "string" && runId.length > 0 ? runId : undefined;
-}
-
-/** Same-ID resume can use the run's durable script to seed the plan view. */
-export function skeletonSourceRunIdFromArgs(
-  args: Record<string, unknown> | null,
-): string | undefined {
-  if (args?.["action"] !== "resume") return undefined;
+/** Only workflow_monitor's final input can bind a view. Partial input and lifecycle inputs cannot. */
+export function observedRunIdFromArgs(args: Record<string, unknown> | null): string | undefined {
+  if (!args || Object.keys(args).some((key) => key !== "runId")) return undefined;
   const runId = args["runId"];
-  return typeof runId === "string" && runId.length > 0 ? runId : undefined;
-}
-
-/**
- * Inline run scripts are already present in the MCP Apps tool input. Parse them immediately so
- * foreground calls can show the authored workflow shape before the server can return a run id.
- */
-export function inlineSkeletonFromArgs(
-  args: Record<string, unknown> | null,
-): Skeleton | undefined {
-  const action = args?.["action"];
-  if (action !== "run") return undefined;
-  const script = args?.["script"];
-  return typeof script === "string" ? extractSkeleton(script) : undefined;
+  return typeof runId === "string" && runId.trim().length > 0 && runId === runId.trim()
+    ? runId
+    : undefined;
 }

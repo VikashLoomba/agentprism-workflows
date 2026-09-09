@@ -6,7 +6,7 @@
     }
   },
   "runtime": {
-    "checkpointInputsFormat": 1
+    "checkpointInputsFormat": 2
   },
   "callsAllocated": 1
 }

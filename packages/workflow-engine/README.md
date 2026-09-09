@@ -116,7 +116,7 @@ its bounded `replayEligibility` admission/progress summary. Agent call rows incl
 terminal `errorCode`, which keeps failures such as `AGENT_CANCELLED` visible even though they have no result journal row. The
 projection is allowlisted:
 it never exposes script, args, prompts,
-histories, journal hashes, session IDs, cwd, checkpoint text/defaults, auth context, or raw results.
+histories, journal hashes, session IDs, cwd, checkpoint text, auth context, or raw results.
 Text and result previews are redacted and capped at 512 UTF-8 bytes; results are structurally
 compacted; at most 64 phases are considered; and the serialized status is capped at 24,576 bytes
 by dropping oldest calls, then logs, then phases. `truncation` reports every selection, shortening,
@@ -148,9 +148,8 @@ Inside a workflow body these are available as globals (no imports):
 - `pipeline(items, stage1, stage2, ...)` — map each item through ordered stages.
 - `workflow(nameOrScript, args?)` — run a saved/inline workflow inline (one level deep),
   sharing the parent run's caps.
-- `checkpoint(prompt, opts?)` — a deterministic, journaled human-in-the-loop gate
-  (resolved via the host's live `confirm`; headless defaults to `default ?? true`, can abort
-  with `headless: "abort"`, or durably pause with `headless: "pause"`).
+- `checkpoint(prompt, opts?)` — a deterministic, journaled human gate. It requires an explicit
+  host reply; without one it pauses durably. Options are `kind`, `choices`, and `timeoutMs`.
 - Quality combinators built on the above: `verify`, `judgePanel`, `loopUntilDry`,
   `completenessCheck`, `retry`, and `gate`. A fulfilled `gate` returns
   `{ ok, value, verdict, attempts }`, where `value` is the final producer result and
@@ -185,6 +184,26 @@ uncertain, ambiguous, or mismatched call runs live. Same-ID `manager.resume(runI
 manual `resumeJournal` remain permanently legacy positional paths. Full types, reports, reason
 catalogs, and checkpoint source-index rules are in the
 [incremental resume API](../../docs/api.md#content-addressed-incremental-resume).
+
+Strict `continueRun()` uses format-2 canonical admission and the immutable source/configuration of
+the same run. The host configuration map addresses agent-only occurrence ordinals, so checkpoints
+never shift subsequent agent selections. MCP uses this strict boundary; the SDK retains its
+promise-based execution APIs and generic `executionAdmission` host barrier independently.
+
+Hosts that separate durable acceptance from execution use `prepareRun`, `claimPreparedRun`,
+`updatePreparation`, and `admitPreparedRun`. To finish setup without execution, call
+`settlePreparedRun(runId, "failed" | "aborted", error, { responses?, expectedRevision? })`.
+`responses` maps exact setup request IDs to their canonical response fingerprints; `expectedRevision`
+guards the observed preparation revision. The first mandatory save commits receipts and terminal
+state together. A failed save rolls both back, leaving the same pending question retryable.
+
+Every execution/reuse path checks explicit checkpoint provenance. Checkpoint input fingerprints
+use format 2, binding explicit-answer semantics and `timeoutMs`; prompt, kind, and choices remain
+the checkpoint identity. Checkpoint journal results, result call records, and injected decisions
+carry `checkpointDecision:"explicit-v1"`. Historical automatic or ambiguous answers fail with
+`checkpoint-provenance-incompatible` and a fresh-run instruction, including positional replay and
+isolation. Historical data remains available through read-only APIs; no answer is inferred or
+migrated.
 
 The call identity hashes authored behavior; the separate input fingerprint covers label, per-call
 cwd/isolation/session/tool inputs, metadata, and approved backends. Host `agentRetries` and
@@ -268,21 +287,22 @@ continuation reattach/skip outcomes (and remains compatible with model/modifier 
 selection itself emits no entries because harness errors propagate through the existing
 agent-error path.
 `checkpointsTaken` records each checkpoint
-that resolved in this execution with its journaled decision and source: `live`, `headless-default`,
-`journal-replay`, or `injected` from `checkpointReplies`. Pausing checkpoints are omitted. Both
+that resolved in this execution with its journaled decision and source: `live`, `journal-replay`,
+or `injected` from `checkpointReplies`. Pausing checkpoints are omitted. Both
 arrays are absent when empty, stay outside call hashes, and are deliberately excluded from
 `WorkflowRunStatus`.
 
 The manager treats `PROVIDER_USAGE_LIMIT`, `AUTH_REQUIRED`, and `CHECKPOINT_REQUIRED` as resumable
 pause conditions rather than failed runs. An authentication pause uses `reason: "auth_required"`
 and carries only the non-secret `authContext`; complete authentication through the injected runner,
-then resume the same journal. Checkpoints still default to non-blocking headless behavior: with no
-live `confirm`, they take `default ?? true`, while `headless: "abort"` aborts. The opt-in
-`headless: "pause"` mode instead persists `reason: "checkpoint_required"` plus the non-secret
-`checkpointContext`; resume with `ExecOptions.checkpointReplies[callIndex]`, or supply a live
-`confirm`. The reply is inserted into the journal and replayed, so later cold resumes do not ask
-again. A detached run therefore never hangs or pauses for a checkpoint unless its author explicitly
-chooses `headless: "pause"`.
+then resume the same journal. Every unanswered checkpoint persists `reason:"checkpoint_required"`
+and non-secret `checkpointContext`. Answer with `ExecOptions.checkpointReplies[callIndex]`, or
+supply a live `confirm` callback. Missing callbacks, `undefined`, non-JSON replies, rejection, and interaction timeout
+pause; script `try/catch` cannot bypass the pending gate. Explicit cancellation interrupts even a
+callback that never resolves. An explicit strict-JSON answer, including `false`, `null`, or an
+empty string, is returned verbatim and journaled for cold replay. Authored `headless` and `default`
+fields are rejected; there is no automatic answer or abort policy. The SDK validator may simulate
+answers with journaling disabled, but those simulations cannot become live approval.
 
 When a runner reports `onSessionOpen`, the engine records the non-secret re-attach handle on the
 journal entry and in `WorkflowRunResult.agentSessions`. Auth/usage failures truthfully record

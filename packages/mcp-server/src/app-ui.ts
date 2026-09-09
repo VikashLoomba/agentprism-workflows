@@ -1,5 +1,5 @@
 import { ProtocolError } from "@modelcontextprotocol/server";
-import type { McpServer } from "@modelcontextprotocol/server";
+import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
 
 // packages/mcp-server/src/app-ui.ts
 //
@@ -20,10 +20,13 @@ import { RUN_MONITOR_HTML } from "./generated/run-monitor-html.js";
 import { RESOURCE_MIME_TYPE, appResourceToolMeta } from "./mcp-apps.js";
 import type { WorkflowRunEventsResourceDocument } from "./workflow-resources.js";
 import { workflowEventsOutputShape } from "./workflow-tool-output.js";
+import type { WorkflowNotificationRequest } from "./workflow-notifications.js";
 
 export const RUN_MONITOR_RESOURCE_URI = "ui://agentprism-workflow/run-monitor.html";
 export const WORKFLOW_EVENTS_TOOL_NAME = "workflow-events";
 export const WORKFLOW_RUNS_TOOL_NAME = "workflow-runs";
+export const WORKFLOW_MONITOR_TOOL_NAME = "workflow_monitor";
+export const WORKFLOW_NOTIFICATIONS_TOOL_NAME = "workflow-notifications";
 
 export interface WorkflowRunListItem {
   runId: string;
@@ -36,6 +39,8 @@ export interface WorkflowRunListItem {
 
 /** The dependencies the server shell binds when registering the panel surface. */
 export interface WorkflowAppUiDeps {
+  openMonitor(runId: string): { runId: string; status: WorkflowRunListItem["status"]; scriptUri: string; eventsUri?: string };
+  notification(request: WorkflowNotificationRequest & { scopeId?: string }, ctx: ServerContext): { send: boolean; token?: string } | { ok: true };
   /** Cursor-paged, redacted run events (shared with the events resource). */
   readEventsPage(request: {
     runId: string;
@@ -78,6 +83,29 @@ export function registerWorkflowAppUi(mcp: McpServer, deps: WorkflowAppUiDeps): 
   // the panel to an incapable modern request on a long-lived stdio connection.
   deps.registerResourceReader(RUN_MONITOR_RESOURCE_URI, readRunMonitorHtml);
 
+  mcp.registerTool(WORKFLOW_MONITOR_TOOL_NAME, {
+    title: "Open a workflow run monitor",
+    description: "Open the live monitor for an existing accepted workflow runId. Each invocation binds one App instance to that run. This action does not start or resume execution.",
+    inputSchema: z.object({ runId: z.string().min(1) }).strict(),
+    outputSchema: z.object({ runId: z.string(), status: z.enum(["pending", "running", "paused", "completed", "failed", "aborted"]), scriptUri: z.string(), eventsUri: z.string().optional() }),
+    annotations: { readOnlyHint: true },
+    _meta: appResourceToolMeta(RUN_MONITOR_RESOURCE_URI),
+  }, ({ runId }) => {
+    const run = deps.openMonitor(runId);
+    return { structuredContent: { ...run }, content: [{ type: "text", text: `Monitor opened for workflow run ${runId}.` }], isError: false };
+  });
+
+  mcp.registerTool(WORKFLOW_NOTIFICATIONS_TOOL_NAME, {
+    title: "Coordinate workflow monitor notifications (app-only)",
+    description: "Claim, acknowledge, or release a bounded milestone notification lease shared by monitor views.",
+    inputSchema: z.object({ action: z.enum(["claim", "sent", "release"]), runId: z.string().min(1),
+      eventId: z.string().min(1).max(512), viewId: z.string().uuid(), token: z.string().uuid().optional(), scopeId: z.string().uuid().optional() }).strict(),
+    _meta: { ui: { visibility: ["app"] } },
+  }, (request, ctx) => {
+    const result = deps.notification(request, ctx);
+    return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }], isError: false };
+  });
+
   mcp.registerTool(
     WORKFLOW_EVENTS_TOOL_NAME,
     {
@@ -110,7 +138,7 @@ export function registerWorkflowAppUi(mcp: McpServer, deps: WorkflowAppUiDeps): 
           .describe("Expected event stream generation; mismatch fails so the reader can restart."),
       }),
       outputSchema: z.object(workflowEventsOutputShape),
-      _meta: appResourceToolMeta(RUN_MONITOR_RESOURCE_URI, ["app"]),
+      _meta: { ui: { visibility: ["app"] } },
     },
     ({ runId, after, limit, streamId }) => {
       try {
@@ -155,7 +183,7 @@ export function registerWorkflowAppUi(mcp: McpServer, deps: WorkflowAppUiDeps): 
           currentPhase: z.string().optional(),
         })),
       }),
-      _meta: appResourceToolMeta(RUN_MONITOR_RESOURCE_URI, ["app"]),
+      _meta: { ui: { visibility: ["app"] } },
     },
     ({ anchorRunId, limit }) => {
       try {

@@ -46,7 +46,7 @@ test("run-observability contracts are exported and legacy journals remain valid"
   const entries: JournalEntry[] = [
     legacy,
     { index: 1, hash: "agent", result: { ok: true }, call: agentCall },
-    { index: 2, hash: "checkpoint", result: true, call: checkpointCall },
+    { index: 2, hash: "checkpoint", result: true, kind: "checkpoint", checkpointDecision: "explicit-v1", call: checkpointCall },
   ];
   const options: WorkflowRunInspectionOptions = { lastN: 10, labelGlob: "review*", logLines: 5 };
   const tail: WorkflowLogTail = {

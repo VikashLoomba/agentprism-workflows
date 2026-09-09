@@ -7,6 +7,7 @@ import type { AgentRunner, JournalEntry, WorkflowCallRecord } from "@automatalab
 import { WorkflowError, WorkflowErrorCode } from "../src/errors.js";
 import { createRunPersistence } from "../src/run-persistence.js";
 import { WorkflowManager } from "../src/workflow-manager.js";
+import { projectRecordedError } from "../src/recorded-error.js";
 import { runWorkflow } from "../src/workflow.js";
 
 const script = (body: string) =>
@@ -116,14 +117,14 @@ return value.nested.value`),
   schema: { type: 'object' },
   meta: { flag: null, nested: { order: ['a', 'b'] } }
 })
-const fromCheckpoint = await checkpoint('default', { default: { flag: null } })
+const fromCheckpoint = await checkpoint('explicit')
 return {
   fromAgent,
   agentHasFlag: 'flag' in fromAgent,
   fromCheckpoint,
   checkpointHasFlag: 'flag' in fromCheckpoint
 }`),
-      { agent: runner, persistLogs: false },
+      { agent: runner, persistLogs: false, confirm: async () => ({ flag: null }) },
     );
     assert.deepEqual(JSON.parse(JSON.stringify(result.result)), {
       fromAgent: { flag: null, nested: { order: ["a", "b"] } },
@@ -133,69 +134,40 @@ return {
     });
   });
 
-  it("records confirm/headless reply validation failures with their proper origins", async () => {
-    const confirmed = await runWorkflow(
-      script(`try { await checkpoint('undefined reply') } catch (error) { return error.code }`),
-      {
-        agent: { async run() { return "unused"; } },
-        confirm: async () => undefined,
-        persistLogs: false,
-      },
-    );
-    assert.equal(confirmed.result, WorkflowErrorCode.AGENT_EXECUTION_ERROR);
-    assert.equal(confirmed.calls?.[0].origin, "confirm");
-    assert.equal(confirmed.calls?.[0].outcome, "error");
-    assert.match(confirmed.calls?.[0].error?.message ?? "", /undefined reply.*\$/);
-
-    const headless = await runWorkflow(
-      script(`try { await checkpoint('map reply', { default: new Map([['a', 1]]) }) } catch (error) { return error.code }`),
-      { agent: { async run() { return "unused"; } }, persistLogs: false },
-    );
-    assert.equal(headless.result, WorkflowErrorCode.AGENT_EXECUTION_ERROR);
-    assert.equal(headless.calls?.[0].origin, "headless");
+  it("records invalid explicit JSON replies with the confirm origin", async () => {
+    let call: WorkflowCallRecord | undefined;
+    await assert.rejects(runWorkflow(
+      script(`try { await checkpoint('map reply') } catch (error) { return error.code }`),
+      { agent: { async run() { return "unused"; } }, confirm: async () => new Map([["a", 1]]), persistLogs: false,
+        onCallRecord: (record) => { call = record; } },
+    ), (error: unknown) => error instanceof WorkflowError && error.code === WorkflowErrorCode.CHECKPOINT_REQUIRED);
+    assert.equal(call?.origin, "confirm");
+    assert.equal(call?.outcome, "error");
+    assert.equal(call?.error?.code, WorkflowErrorCode.CHECKPOINT_REQUIRED);
+    assert.equal(call?.checkpointDecision, undefined);
+    assert.match(call?.error?.message ?? "", /map reply/);
   });
 
   it("projects workflow errors, plain errors, thrown values, and lossy guarded reads", async () => {
     const plain = new TypeError("bad route") as TypeError & { route: string; causeData: unknown };
     plain.route = "west";
     plain.causeData = { retry: false };
-    const plainRun = await runWorkflow(
-      script(`try { await checkpoint('plain') } catch {}\nreturn 'caught'`),
-      {
-        agent: { async run() { return "unused"; } },
-        confirm: async () => { throw plain; },
-        persistLogs: false,
-      },
-    );
-    assert.deepEqual(plainRun.calls?.[0].error, {
+    const plainRecord = projectRecordedError(plain);
+    assert.deepEqual(plainRecord, {
       form: "error",
       name: "TypeError",
       message: "bad route",
       props: { route: "west", causeData: { retry: false } },
     });
 
-    const valueRun = await runWorkflow(
-      script(`try { await checkpoint('value') } catch {}\nreturn 'caught'`),
-      {
-        agent: { async run() { return "unused"; } },
-        confirm: async () => { throw { reason: "no" }; },
-        persistLogs: false,
-      },
-    );
-    assert.deepEqual(valueRun.calls?.[0].error, { form: "value", value: { reason: "no" } });
+    const valueRecord = projectRecordedError({ reason: "no" });
+    assert.deepEqual(valueRecord, { form: "value", value: { reason: "no" } });
 
     const hostile = new Error("hostile");
     Object.defineProperty(hostile, "name", { get: () => { throw new Error("getter"); } });
-    const lossyRun = await runWorkflow(
-      script(`try { await checkpoint('hostile') } catch {}\nreturn 'caught'`),
-      {
-        agent: { async run() { return "unused"; } },
-        confirm: async () => { throw hostile; },
-        persistLogs: false,
-      },
-    );
-    assert.equal(lossyRun.calls?.[0].error?.form, "error");
-    assert.equal(lossyRun.calls?.[0].error?.message, "hostile");
-    assert.equal(lossyRun.calls?.[0].error?.lossy, true);
+    const lossyRecord = projectRecordedError(hostile);
+    assert.equal(lossyRecord?.form, "error");
+    assert.equal(lossyRecord?.message, "hostile");
+    assert.equal(lossyRecord?.lossy, true);
   });
 });

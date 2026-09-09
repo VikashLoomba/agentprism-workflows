@@ -1,4 +1,5 @@
 import test from "node:test";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -42,17 +43,17 @@ async function waitForStatus(
   assert.fail(`run ${runId} did not reach the expected status; latest=${JSON.stringify(latest)}`);
 }
 
-test("a foreground call returns action-required without abandoning its live run", async () => {
+test("run acceptance remains separate from a later required permission", async () => {
   const broker = new WorkflowPermissionBroker();
   const runner = makeRunner(async (_prompt, options) => {
     await broker.resolver(
       {
-        sessionId: "foreground-session",
-        toolCall: { toolCallId: "foreground-tool", title: "Run tests", kind: "execute" },
+        sessionId: "accepted-session",
+        toolCall: { toolCallId: "accepted-tool", title: "Run tests", kind: "execute" },
         options: [{ optionId: "allow_once", name: "Allow", kind: "allow_once" }],
       },
       {
-        sessionId: "foreground-session",
+        sessionId: "accepted-session",
         backendId: "codex",
         runId: options.runId,
         callIndex: options.callIndex,
@@ -64,11 +65,13 @@ test("a foreground call returns action-required without abandoning its live run"
   try {
     const result = structured(await connected.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: SCRIPT },
+      arguments: { action: "run", requestId: randomUUID(), script: SCRIPT },
     }));
-    assert.equal(result.status, "running");
-    assert.equal((result.pendingPermissions as unknown[]).length, 1);
+    assert.equal(result.accepted, true);
+    assert.equal(result.pendingPermissions, undefined);
     const runId = result.runId as string;
+    const observed = await waitForStatus(connected.client, runId, status => (status.pendingPermissions as unknown[] | undefined)?.length === 1);
+    assert.equal(observed.status, "running");
     const pending = broker.list(runId)[0]!;
     broker.respond(runId, pending.permissionId, { outcome: { outcome: "cancelled" } });
     const completed = await waitForStatus(connected.client, runId, (status) => status.status === "completed");
@@ -112,7 +115,7 @@ test("status exposes a live permission and permissions-response resumes the work
   try {
     const started = structured(await connected.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: SCRIPT, background: true },
+      arguments: { action: "run", requestId: randomUUID(), script: SCRIPT },
     }));
     const runId = started.runId as string;
     await eventually(() => broker.has(runId));
@@ -125,7 +128,7 @@ test("status exposes a live permission and permissions-response resumes the work
     assert.equal(permissions.length, 1);
     const permissionId = permissions[0]?.permissionId as string;
     assert.equal(inspected.status, "running");
-    assert.equal((inspected.interaction as Record<string, unknown>).respondWith, "permissions-response");
+    assert.equal(Object.hasOwn(inspected, "interaction"), false);
 
     const responded = structured(await connected.client.callTool({
       name: "workflow",
@@ -165,26 +168,14 @@ test("elicitation-capable status stays observation-only and requires permissions
   });
   const connected = await connect(runner, { permissionBroker: broker, elicitation: true });
   let permissionForms = 0;
-  connected.client.setRequestHandler("elicitation/create", async (request) => {
-    const schema = request.params.requestedSchema as {
-      required?: string[];
-      properties?: Record<string, { enum?: string[]; oneOf?: Array<{ const: string }> }>;
-    };
-    if (schema.properties?.optionId) {
-      permissionForms++;
-      return { action: "accept" as const, content: { optionId: "allow_for_session" } };
-    }
-    const content = Object.fromEntries((schema.required ?? []).map((field) => {
-      const selected = schema.properties?.[field]?.oneOf?.[0]?.const;
-      assert.ok(selected);
-      return [field, selected];
-    }));
-    return { action: "accept" as const, content };
+  connected.client.setRequestHandler("elicitation/create", async () => {
+    permissionForms++;
+    throw new Error("workflow operations must never collect request-bound forms");
   });
   try {
     const started = structured(await connected.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: SCRIPT, background: true },
+      arguments: { action: "run", requestId: randomUUID(), script: SCRIPT },
     }));
     const runId = started.runId as string;
     await eventually(() => broker.has(runId));
@@ -195,7 +186,7 @@ test("elicitation-capable status stays observation-only and requires permissions
     }));
     assert.equal(permissionForms, 0);
     assert.equal((inspected.pendingPermissions as unknown[]).length, 1);
-    assert.deepEqual((inspected.interaction as Record<string, unknown>).collectWith, ["run", "resume"]);
+    assert.equal(Object.hasOwn(inspected, "interaction"), false);
     assert.equal(inspected.permissionResponse, undefined);
 
     const [permission] = inspected.pendingPermissions as Array<{ permissionId: string }>;
@@ -263,7 +254,7 @@ test("the real ACP client, broker, and MCP tool preserve a same-kind Codex choic
   try {
     const started = structured(await connected.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: SCRIPT, background: true },
+      arguments: { action: "run", requestId: randomUUID(), script: SCRIPT },
     }));
     const runId = started.runId as string;
     await eventually(() => broker.has(runId));
@@ -337,7 +328,7 @@ test("status immediately exposes an action-required permission snapshot", async 
   try {
     const started = structured(await connected.client.callTool({
       name: "workflow",
-      arguments: { action: "run", script: SCRIPT, background: true },
+      arguments: { action: "run", requestId: randomUUID(), script: SCRIPT },
     }));
     const runId = started.runId as string;
     await eventually(() => broker.has(runId));

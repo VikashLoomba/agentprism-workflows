@@ -3,7 +3,7 @@
 // executes for real in the engine's deterministic realm, but every agent() call is served by
 // an in-process mock AgentRunner that fabricates schema-conforming results. Afterward, each
 // routed ACP backend/model pair is opened once without a prompt to read its advertised modes and config options.
-// No tokens are spent, a mock live confirm resolves checkpoints to their declared defaults,
+// No tokens are spent; mock checkpoint replies inspect control flow without authorizing live runs,
 // and run state is journaled nowhere (journaling off + a throwaway persistence root for the run lease).
 //
 // This is the programmatic core behind `agentprism-workflows validate` (see ./cli.ts).
@@ -172,7 +172,7 @@ export interface ValidateHarnessOptions {
 export interface ValidatedCheckpoint {
   prompt: string;
   kind: string;
-  /** The reply the dry-run mock confirm took (the checkpoint's declared default, else true). */
+  /** Simulated reply used only to inspect control flow; never a live approval. */
   reply: unknown;
 }
 
@@ -1695,14 +1695,9 @@ export async function validateWorkflowScript(
       requireAgentConfiguration: options.requireAgentConfiguration,
       scriptBackends: declaredBackends,
       confirm: async (promptText: string, checkpointOptions: unknown) => {
-        const opts = (checkpointOptions ?? {}) as { kind?: string; default?: unknown; headless?: string };
-        if (opts.headless === "abort") {
-          warnings.push(
-            `checkpoint "${truncate(promptText, 60)}" sets headless: "abort" — unattended runs will fail at it`,
-          );
-        }
-        // Mirror the engine's headless resolution exactly: the declared default, else true.
-        const reply = opts.default ?? true;
+        const opts = (checkpointOptions ?? {}) as { kind?: string; choices?: string[] };
+        // This non-journaled simulation is local to validation, never a live approval.
+        const reply = opts.kind === "input" ? "mock input" : opts.kind === "select" ? opts.choices?.[0] ?? "mock choice" : true;
         checkpoints.push({ prompt: promptText, kind: opts.kind ?? "confirm", reply });
         return reply;
       },

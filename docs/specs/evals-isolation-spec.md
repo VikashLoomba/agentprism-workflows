@@ -1,5 +1,17 @@
 # Evals Isolation Mode — Design Contract (reviewed baseline)
 
+## Checkpoint contract revision — 2026-09-08
+
+The [asynchronous workflow cutover](async-workflow-app-cutover.md) replaces this design's original
+automatic checkpoint policies. Checkpoints require explicit answers everywhere, including SDK,
+replay, and isolation paths. `default` and `headless` options are rejected; a missing, invalid,
+declined, cancelled, or timed-out answer leaves the checkpoint unanswered. Successful recorded
+checkpoint decisions carry `checkpointDecision:"explicit-v1"` on their journal and call records.
+Isolation validates this provenance before admitting a recording. Historical automatic answers,
+missing/unsupported provenance, or pending checkpoints with retired policy fields fail clearly with
+`checkpoint-provenance-incompatible`; they remain inspectable but cannot authorize execution.
+The original review chronology and unrelated isolation contracts below remain unchanged.
+
 ## Status and motivation
 
 **Status: reviewed baseline (revision 7, final-fix pass applied per owner adjudication
@@ -253,13 +265,12 @@ a script can branch on it. This contract never uses index position as a serving 
 (§4.6); order-sensitive target context is caught fail-closed by the input fingerprint
 (§2.7); residual order sensitivity is a §4.12 limitation.
 
-**Checkpoints.** `checkpoint()` allocates an index (`:1007`), hashes (`:1008`), replays
-from the resume journal (`:1010-1013`), then consults `options.confirm(promptText,
-checkpointOptions)` FIRST whenever a confirm is wired (`:1018-1019`; its throw propagates
-RAW and is catchable); headless handling applies only with no confirm (`:1020-1043`);
-the reply journals after it exists (`:1046`). In any run that wires a confirm — an
-isolation run always does — every checkpoint reaches that confirm, including ones that
-resolved headlessly in the recording.
+**Checkpoints.** `checkpoint()` captures validated options, allocates an index, hashes its identity,
+and consults eligible explicit-decision replay before invoking a host `confirm` callback. With no
+callback it records an unanswered `CHECKPOINT_REQUIRED` engine outcome. Unavailable or invalid
+callback responses leave the checkpoint pending; script catch blocks cannot turn that absence into
+a decision. Isolation provides a confirm wrapper, but it serves only recordings admitted by the
+explicit-provenance gate. A successful answer journals only after its strict-JSON snapshot exists.
 
 **Resume.** Replay requires hash match AND `callIndex < state.firstMiss` (`:526-547`).
 Resume re-executes the full script; replayed calls short-circuit without invoking the
@@ -501,13 +512,12 @@ path: callPath }`. `ExecOptions.confirm` (`workflow-manager.ts:115` — today
 are additive under parameter contravariance (a two-parameter host confirm remains
 assignable and never sees the third argument). **What the checkpoint hash covers
 (corrected, r6 B12):** `hashCheckpoint` (`:1327-1335`) hashes `promptText`, the
-NORMALIZED `kind` (`kind ?? "confirm"`), and `choices` ONLY. The remaining
-`CheckpointOptions` fields — `default`, `headless`, `timeoutMs` (`:254-264`) — are NOT
-hashed and are INTENTIONALLY ignored by isolation: they shape only how a live
-confirm/headless path would produce a reply, and under isolation every checkpoint
-reply is served from the recording through the wrapper's confirm (§4.7), so the
-un-hashed options can never influence a served outcome. Checkpoints therefore need no
-input fingerprint.
+NORMALIZED `kind` (`kind ?? "confirm"`), and `choices` ONLY. The remaining supported option,
+`timeoutMs`, is advisory and cannot supply an answer. `hashCheckpointInputs()` records the
+`explicit-v1` decision contract plus an optional timeout, under checkpoint input format 2.
+Isolation serves explicit recorded values through the wrapper's confirm (§4.7); it never generates
+an answer from omitted host input or a recorded automatic policy. The provenance gate applies even
+when structural checkpoint identity matches.
 
 ### 2.5 The call-path key — capture mechanism and honest stability contract
 
@@ -720,15 +730,11 @@ equivalence. Normative replacement, applied at every capture boundary:
   `WorkflowError(AGENT_EXECUTION_ERROR)` naming the label and the first disqualifying
   path — raised inside the attempt `try`, a deterministic, disclosed failure replacing
   today's silent persistence corruption.
-- **Validation failure — checkpoint replies.** `confirm` returns `Promise<unknown>`
-  (`workflow.ts:1017-1019`), so a host can return anything. A reply failing the
-  qualifier (including `undefined`) throws a non-recoverable
-  `WorkflowError(AGENT_EXECUTION_ERROR)` whose message names the checkpoint prompt and
-  the disqualifying path; it propagates into the script like any confirm throw
-  (catchable), and the manifest records outcome `"error"`, origin
-  `"confirm"`/`"headless"`, with the §3.2a projection of that error. (Headless default
-  replies — `checkpointOptions.default ?? true`, `:1043` — are caller-authored data
-  and validate the same way.)
+- **Validation failure — checkpoint replies.** A `confirm` callback may return arbitrary host
+  values. Missing or non-strict-JSON replies do not become decisions: the checkpoint stays pending
+  with `CHECKPOINT_REQUIRED` and no journal result or decision provenance. Callback failure,
+  timeout, decline, or cancellation likewise cannot advance it. Explicit whole-run abort remains
+  `WORKFLOW_ABORTED`, and replay divergence retains its dedicated failure.
 - **Replay boundary.** The isolation wrapper serves fresh clones of recorded values and
   clones `liveResult` before placing it in the report (§4.6.3, §4.3), so neither the
   loaded recording nor the report is reachable through script references.
@@ -800,12 +806,13 @@ export interface WorkflowCallRecord {
    *  "journal-replay" — the resume gate served it (agent :529-543 / checkpoint
    *                     :1010-1013) without re-driving the call;
    *  "confirm"        — the checkpoint's confirm callback produced the outcome;
-   *  "headless"       — checkpoint headless handling produced it;
    *  "engine"         — the engine killed the call after allocation, before any seam
    *                     (cwd validation :561-566; a queued call's pre-seam abort :616;
    *                     checkpoint abort :1045). §4.9 rejects recordings containing
    *                     ANY engine-origin row (r5 B3). */
-  origin: "runner" | "journal-replay" | "confirm" | "headless" | "engine";
+  origin: "runner" | "journal-replay" | "confirm" | "engine";
+  /** Required on successful checkpoint decisions; absent on unanswered checkpoint rows. */
+  checkpointDecision?: "explicit-v1";
   /** REQUIRED on outcome "null"/"error", forbidden on "result": the §3.2a projection
    *  of the terminal error/thrown value. */
   error?: WorkflowRecordedError;
@@ -873,10 +880,11 @@ throwing `onAgentStart` (`:554`, reachable through a throwing manager `onProgres
 `workflow-manager.ts:524-527`, `:581-592`; the throw still propagates into the
 script) — both `"error"`, `"engine"`; the signal-abort rethrow (`:700` — `"error"`,
 `aborted: true`, origin `"runner"` when any attempt ran, else `"engine"`);
-checkpoint reply (`:1046` — `"result"`, `"confirm"`/`"headless"`); checkpoint
-confirm/headless throws, the §3.0 reply-validation throw, and the durable-pause
-throw (`:1018-1043` — `"error"`, `"confirm"`/`"headless"`); checkpoint
-post-allocation abort (`:1045` — `"error"`, `"engine"`, `aborted: true`).
+explicit checkpoint reply (`"result"`, `"confirm"`, `checkpointDecision:"explicit-v1"`);
+unavailable or invalid callback reply (`"error"`, `"confirm"`, `CHECKPOINT_REQUIRED`); no host
+callback (`"error"`, `"engine"`, `CHECKPOINT_REQUIRED`); checkpoint post-allocation abort
+(`"error"`, `"engine"`, `aborted: true`). Successful journal replay preserves explicit decision
+provenance in both the new journal and manifest.
 Identity-computation throws are PRE-allocation by §2.2 rule 1 — no record owed, so
 no "record without a hash" state can exist.
 
@@ -956,7 +964,7 @@ export interface WorkflowRecordedError {
 args, and this projection). REALM-NEUTRAL (r6 B5):** ordinary object literals created
 inside the workflow's `vm` realm carry that realm's `Object.prototype`, so a host
 `=== Object.prototype` test would disqualify every script-authored `meta`, image list,
-MCP config, and checkpoint default — while the fingerprint/checkpoint contracts require
+MCP config, and checkpoint reply — while the fingerprint/checkpoint contracts require
 accepting them. A value qualifies iff it is `null`, a boolean, a finite number, a
 string, an **array**, or a **plain record**, recursively and acyclically:
 
@@ -1984,17 +1992,15 @@ inputs are the only outcome-shaping ones under isolation; the un-hashed
   absent → fatal `path-unavailable`.
 - Latch, binding (keyed `(context.scope, context.callIndex)`), and the foreign-scope
   guard apply verbatim (`context.scope !== rootRunId` → `nested-workflow-call`).
-- Exact serve on `(checkpoint, path, hash)` (identities unique per §4.9); then the
-  unique-path rule over checkpoint rows (all origins `"confirm"`/`"headless"`/
-  `"journal-replay"` — engine-origin rows are inadmissible); all refusal kinds as
-  §4.6.2. Checkpoints are never targets.
-- Outcome semantics, uniform for every recorded origin: `"result"` rows serve the
-  backing journal entry's reply (clone-fresh) — recorded headless defaults and resumed
-  replayed replies included (nothing "reproduces engine-side"; the engine asked the
-  wrapper). `"error"` rows re-throw the §3.2a reconstruction — recorded caught
-  headless-aborts replay as `WORKFLOW_ABORTED`; recorded caught durable pauses replay
-  as `CHECKPOINT_REQUIRED` with their `checkpointContext`; plain confirm throws (Errors
-  or raw values) replay in recorded form, `props` included.
+- Exact serve on `(checkpoint, path, hash)` (identities unique per §4.9), then the unique-path
+  rule over admissible checkpoint rows with origins `"confirm"` or `"journal-replay"`. Engine-origin
+  rows remain inadmissible. Checkpoints are never targets.
+- Result rows serve a fresh clone of the explicit recorded journal reply. The recording must carry
+  `checkpointDecision:"explicit-v1"` on the paired journal and call records. Automatic or ambiguous
+  historical answers are rejected before wrapper creation, not converted into fresh decisions.
+  Unanswered checkpoints are not result candidates. A confirm error reconstructed by the wrapper
+  remains an unanswered checkpoint; it cannot bypass the checkpoint's pending latch. A recording
+  whose no-callback checkpoint produced an engine-origin row fails the existing engine-origin gate.
 - Served checkpoints appear in the report (`kind: "checkpoint"`, `mode: "served"`) and
   in the isolation run's own manifest with origin `"confirm"` (faithful: the wrapper IS
   this run's confirm). No agent events are fabricated for them.
@@ -2100,10 +2106,11 @@ on both API paths. `RECORDING_UNUSABLE` reasons are FROZEN kebab-case literals
    `recoverable: false`;
    agent×journal-replay: outcome `"result"` only, attempts/error/aborted forbidden;
    agent×engine: outcome `"error"` only, error required `form: "workflow-error"`,
-   attempts/usage forbidden; checkpoint×confirm/headless: outcome `"result"`/
-   `"error"`, attempts/usage/worktree forbidden, headless errors
-   `form: "workflow-error"`; checkpoint×journal-replay: `"result"` only;
-   checkpoint×engine: `"error"` + `aborted: true` + `code: WORKFLOW_ABORTED`. Any
+   attempts/usage forbidden; checkpoint×confirm: outcome `"result"`/`"error"`,
+   attempts/usage/worktree forbidden; checkpoint×journal-replay: `"result"` only. Every checkpoint
+   result pair requires `checkpointDecision:"explicit-v1"`. Checkpoint×engine is either
+   `"error"` + `aborted: true` + `code: WORKFLOW_ABORTED`, or `"error"` + no aborted marker +
+   `code: CHECKPOINT_REQUIRED`; the later engine-origin recording gate still rejects both. Any
    other combination → corrupt. `WorkflowRecordedError` values: `form` in enum;
    `"workflow-error"` → `code` REQUIRED and a member of THIS build's enum AND
    `message` REQUIRED a string (r5 B13.2); `"error"` → `name`/`message` strings,
@@ -2302,7 +2309,7 @@ Precisely (resolving r5 advisory 5's ambiguity):
   `onHistory`; explicit abort handling (§3.5, r6 B13);
   `settlementOrdinal` capture (§3.2, §3.5); §3.0 strict-JSON
   validation + deep-freeze at every capture boundary (agent results, checkpoint
-  replies, headless defaults); `onCallRecord` emission at every §3.2 exit;
+  explicit replies); `onCallRecord` emission at every §3.2 exit;
   `WorkflowRunOptions.onCallRecord?`; event payloads per §3.3 (incl. `errorRecord`,
   r6 B8); `calls`/`effectiveLimits`/`callsAllocated`/`abortSignaled` on
   `WorkflowRunResult`.
@@ -2374,7 +2381,7 @@ exhaustively: success; recoverable exhaustion → `"null"` + error + attempts; a
 non-recoverable throw; **[r5 B3 structure]** engine-side cwd-validation death →
 origin `"engine"`; post-allocation abort → `aborted: true`; journal-replay
 short-circuits (agent + checkpoint) with carried usage; checkpoint
-confirm/headless/durable-pause/reply-validation exits with origins and §3.2a
+confirm/durable-pause/reply-validation exits with origins and §3.2a
 projections; `callsAllocated` returned and persisted; `effectiveLimits` carries all
 resolved values (incl. host-derived concurrency); `abortSignaled`; every row carries
 a dense unique `settlementOrdinal`; usage telemetry is preserved without debit fields;
@@ -2437,7 +2444,7 @@ different config) — changes the fingerprint; a non-qualifying component (funct
 `meta`) → fingerprint absent, never partial. **[r6 B5]** every fingerprint fixture
 object is created INSIDE the vm realm (actual script-authored literals), never a
 host lookalike — the same rule applies to the §3.0 frozen-snapshot and §3.3a args
-fixtures (checkpoint defaults, meta, images, MCP configs).
+fixtures (checkpoint replies, meta, images, MCP configs).
 
 **`workflow-engine/test/isolation.test.ts` (new — the contract's core).** Mock-runner
 record → replay, one case per rule:
@@ -2473,9 +2480,10 @@ record → replay, one case per rule:
 - Outcome-faithful serves: recorded `null`; recorded workflow-error/plain-error/
   thrown-value reconstructions (`props` restored, `WorkflowError` fields intact);
   targeting a recorded failure runs live.
-- Checkpoints: served replies for confirm/headless/journal-replay origins; recorded
-  headless default served through the wrapper; durable-pause row replays as
-  `CHECKPOINT_REQUIRED` with `checkpointContext`; checkpoint rows never targetable;
+- Checkpoints: explicit replies from confirm/journal-replay origins serve through the wrapper;
+  missing, unsupported, or historical automatic-answer provenance is rejected before serving.
+  Unanswered no-callback engine rows remain unusable isolation baselines. Invalid callback answers
+  cannot bypass a checkpoint through a script catch. Checkpoint rows remain untargetable;
   **[r6 B9]** a confirm arrival with NO `CheckpointCallContext` → latched
   `checkpoint-context-unavailable` divergence (not `RECORDING_UNUSABLE`).
 - Targets: XOR selector enforced; label resolution (unique/duplicate/absent);

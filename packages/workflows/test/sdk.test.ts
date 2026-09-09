@@ -309,7 +309,7 @@ void (undefined as unknown as IncrementalResumeSurface);
 test("incremental resume constants are re-exported by the SDK facade", () => {
   assert.equal(CALL_PATH_FORMAT, 1);
   assert.equal(CALL_INPUTS_FORMAT, 2);
-  assert.equal(CHECKPOINT_INPUTS_FORMAT, 1);
+  assert.equal(CHECKPOINT_INPUTS_FORMAT, 2);
   assert.deepEqual(RESUME_FALLBACK_REASONS, [
     "legacy-recording",
     "crash-residue",
@@ -578,7 +578,7 @@ const NO_AGENT_SCRIPT = [
 
 const CHECKPOINT_THEN_AGENT_SCRIPT = [
   'export const meta = { name: "checkpoint-then-agent", description: "pause before one subagent" };',
-  'const decision = await checkpoint("q", { headless: "pause" });',
+  'const decision = await checkpoint("q", { });',
   'const result = await agent("after:" + decision);',
   "return { decision, result };",
 ].join("\n");
@@ -1194,7 +1194,7 @@ test("WorkflowManager.startInBackground preserves its public handle, live usage,
     'export const meta = { name: "facade-background", description: "facade background" };',
     'const values = [];',
     'for (let i = 0; i < args.count; i++) values.push(await agent(`call-${i}`, { label: `call-${i}` }));',
-    'if (args.pause) await checkpoint("continue?", { headless: "pause" });',
+    'if (args.pause) await checkpoint("continue?", { });',
     "return values;",
   ].join("\n");
   const manager = new WorkflowManager({ agent: okRunner() });

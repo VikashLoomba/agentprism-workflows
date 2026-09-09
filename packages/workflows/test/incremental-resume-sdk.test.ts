@@ -99,7 +99,7 @@ describe("incremental resume SDK surface", () => {
       });
       const paused = await manager.runSync(script(`
 const one = await agent("one", { label: "one", resume: { filesystem: "read-only" } })
-const approval = await checkpoint("approve", { headless: "pause" })
+const approval = await checkpoint("approve", { })
 return { one, approval }`, "same-run"));
       assert.equal(paused.status, "paused");
       assert.ok(paused.checkpointContext);

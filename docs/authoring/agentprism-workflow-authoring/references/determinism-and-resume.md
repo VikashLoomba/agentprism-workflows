@@ -3,13 +3,13 @@
 **Context:** JavaScript passed to the MCP `workflow` tool. Workflow scripts use `agent(prompt, options?)`; REPL evals use a different API.
 
 One MCP run owns one immutable logical execution. Every `agent()` and `checkpoint()` result is
-journaled under a deterministic call index. `{ action:"resume", runId }` reconstructs and continues
+journaled under a deterministic call index. `{ action:"resume", requestId, runId }` reconstructs and continues
 that exact run; it never forks a child execution and never accepts changed script, args, or agent
 configuration.
 
 - Direct `Date.now()`, `Math.random()`, and no-arg `new Date()` / `Date()` fail validation. Pass nondeterministic values through the original Run `args`.
 - An agent identity hashes the prompt, resolved model, authored mode, non-empty sorted `configOptions`, tier, phase, agent type/definition, and schema. A separate fingerprint covers label, cwd/isolation, session retention, images, MCP servers, metadata, and approved script backends.
-- At admission the host atomically stores a versioned canonical effective occurrence map, default model, approved script backends, stable selection hash, source, and timestamp. Raw elicitation form fields are not stored.
+- After durable source acceptance and setup, the host atomically stores a format-2 canonical effective occurrence map, default model, approved script backends, stable selection hash, source, and timestamp before live dispatch. The map counts only agent occurrences; checkpoints do not shift its indexes. Raw configuration-form fields are not stored.
 - Strict coverage is permanent. If live control flow reaches an occurrence the admission pass did not cover, that occurrence fails before ACP dispatch and is recorded durably. Later continuation refuses; it never shifts a configuration to another ordinal.
 - Exact index/hash journal hits rebuild script state without spawning a provider session, adding provider usage, or appending duplicate journal entries. Live usage is added to the run's existing cumulative total.
 - A usage/auth-interrupted root call may reattach its recorded ACP session when its call identity, inputs, cwd, backend pool identity, and reopen capability agree. Failed eligibility falls back to a fresh live call within the same run, never a child run.
@@ -18,17 +18,30 @@ configuration.
 
 ### Durable checkpoints
 
-For a `headless:"pause"` checkpoint, resume with
-`{ action:"resume", runId, checkpointReplies:{ [checkpointContext.callIndex]: decision } }`.
+Every unanswered checkpoint pauses. Resume with
+`{ action:"resume", requestId, runId, checkpointReplies:{ [checkpointContext.callIndex]: decision } }`.
 The decision must be strict JSON. Under the run lease, the first answer is journaled before
 continuation. An identical repeat is idempotent. A different later answer is ignored and reported
 against the durable first answer. Cold reconstruction replays the decision forever.
+
+Checkpoint input fingerprints use format 2 and bind explicit-decision semantics plus `timeoutMs`.
+Prompt, kind, and choices remain the checkpoint identity. Current journal results, result call
+records, and injected checkpoint decisions carry `checkpointDecision:"explicit-v1"`. Historical
+automatic or ambiguous answers fail with `checkpoint-provenance-incompatible` and require a fresh
+run; read-only inspection remains available. Non-journaled validation simulations never authorize
+live execution.
 
 ### Failure and restart
 
 A paused or failed run with valid admission metadata can continue. A completed or aborted run is
 terminal. A pre-contract record without the required canonical admission may remain observable but
 must be replaced with a fresh `{ action:"run", ... }`; no migration or inferred mapping exists.
+
+If a Run/Resume acknowledgement is lost, retry the same `requestId` and exact arguments. A durable
+receipt returns the same accepted run/continuation, even after restart; conflicting reuse fails.
+Use a fresh request ID for a new continuation. Replaying an earlier request cannot advance a later
+checkpoint. Client disconnection leaves execution active; execution-owner loss recovers from
+durable state, and explicit Stop remains authoritative through cold recovery.
 
 Give repeated calls stable labels and narrate decisions with `log()`. Retain the original run ID:
 the same ID addresses its script, event stream, cumulative usage, status, and result.

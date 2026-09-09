@@ -47,7 +47,7 @@ describe("checkpointReplies with journal replay and live calls", () => {
     const script = workflow(`
 const first = await agent("prefix-one", { label: "prefix-one" })
 const second = await agent("prefix-two", { label: "prefix-two" })
-const approval = await checkpoint("approve static release", { headless: "pause", default: false })
+const approval = await checkpoint("approve static release", {})
 const after = await agent("after-checkpoint", { label: "after-checkpoint" })
 return { first, second, approval, after }`, "ordinary-checkpoint-reply");
     try {
@@ -99,9 +99,9 @@ return { first, second, approval, after }`, "ordinary-checkpoint-reply");
     const script = workflow(`
 const route = await agent("choose-route", { label: "choose-route" })
 if (route === "source-route") {
-  return await checkpoint("approve same text", { headless: "pause", default: false })
+  return await checkpoint("approve same text", {})
 }
-return await checkpoint("approve same text", { headless: "pause", default: false })`, "checkpoint-site-divergence");
+return await checkpoint("approve same text", {})`, "checkpoint-site-divergence");
     const changedScript = script.replace('agent("choose-route"', 'agent("choose-route-changed"');
     try {
       const paused = await manager.runSync(script);
@@ -133,7 +133,7 @@ return await checkpoint("approve same text", { headless: "pause", default: false
     });
     const script = workflow(`
 const artifact = await agent("produce-artifact", { label: "produce-artifact" })
-return await checkpoint(\`approve artifact: \${artifact}\`, { headless: "pause", default: false })`, "checkpoint-input-divergence");
+return await checkpoint(\`approve artifact: \${artifact}\`, {})`, "checkpoint-input-divergence");
     const changedScript = script.replace('agent("produce-artifact"', 'agent("produce-artifact-changed"');
     try {
       const paused = await manager.runSync(script);
@@ -165,7 +165,7 @@ return await checkpoint(\`approve artifact: \${artifact}\`, { headless: "pause",
     });
     const script = workflow(`
 const artifact = await agent("produce-default", { label: "produce-default" })
-return await checkpoint("approve artifact", { headless: "pause", default: artifact })`, "checkpoint-fingerprint-divergence");
+return await checkpoint("approve artifact", { timeoutMs: artifact.length })`, "checkpoint-fingerprint-divergence");
     const changedScript = script.replace('agent("produce-default"', 'agent("produce-default-changed"');
     try {
       const paused = await manager.runSync(script);
@@ -196,7 +196,7 @@ return await checkpoint("approve artifact", { headless: "pause", default: artifa
     });
     const script = workflow(`
 const current = await agent("inspect-current-state", { label: "inspect-current-state" })
-const approved = await checkpoint("approve current state", { headless: "pause", default: false })
+const approved = await checkpoint("approve current state", {})
 return { current, approved }`, "checkpoint-exact-after-live");
     const changedScript = script.replace(
       'agent("inspect-current-state"',

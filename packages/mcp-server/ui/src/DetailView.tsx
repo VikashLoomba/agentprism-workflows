@@ -59,6 +59,10 @@ function LogRow({
     <>
       <div
         className={`log-row kind-${row.kind}${row.isError === true ? " row-error" : ""}${expandable ? " expandable" : ""}`}
+        role={expandable ? "button" : undefined}
+        tabIndex={expandable ? 0 : undefined}
+        aria-expanded={expandable ? expanded : undefined}
+        onKeyDown={(event) => { if (expandable && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onToggle?.(); } }}
         onClick={onToggle}
       >
         <span className="row-ts">{row.ts !== undefined ? fmtClock(row.ts) : ""}</span>
@@ -155,7 +159,7 @@ export function DetailView({
 
   if (target.kind === "agent") {
     if (!node) {
-      return <div className="log-empty">Agent call {target.callIndex} is no longer known.</div>;
+      return <div className="log-empty">Agent call {target.callIndex} is no longer known. <button onClick={onBack}>Back to graph</button></div>;
     }
     // Mockup format: "Phase 2: Setup - opus[1m]".
     const heading = phaseHeading(model, node.phase);
@@ -188,7 +192,7 @@ export function DetailView({
   return (
     <div className="detail">
       <div className="detail-header">
-        <button className="back-btn" onClick={onBack} title="Back to graph">
+        <button className="back-btn" onClick={onBack} title="Back to graph" aria-label="Back to graph">
           ‹
         </button>
         <span className="detail-title">{title}</span>

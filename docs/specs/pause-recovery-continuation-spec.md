@@ -1110,7 +1110,7 @@ no fresh session, records no notice, §2.6). Consolidated:
 - **Killed-process recovery.** A crash/SIGKILL mid-turn never runs the pause-class release path
   (§2.4), so no `keepOpen: true` release fires and what the agent's persisted session contains at the
   kill point is backend-dependent. v1 scopes to graceful `usage_limit`/`auth_required` pauses only.
-- **Durable-checkpoint pauses.** A `headless: "pause"` checkpoint pause (`CHECKPOINT_REQUIRED`,
+- **Durable-checkpoint pauses.** An unanswered checkpoint pause (`CHECKPOINT_REQUIRED`,
   `errors.ts:27` / pause reason `checkpoint_required`, `workflow-manager.ts:330`) happens *between*
   turns at a checkpoint — there is no interrupted agent turn to continue, and `runReason` does not
   classify it as `usage_limit`/`auth_required`, so §2.7.1 produces no candidate for it.

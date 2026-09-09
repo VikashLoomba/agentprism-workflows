@@ -57,7 +57,7 @@ Validates an AgentPrism workflow script without spending tokens:
      expressions
   2. dry run — the script executes against a mock agent backend that fabricates
      schema-conforming results; no tokens are spent, and a mock live confirm
-     resolves checkpoints to their declared defaults
+     simulates checkpoint answers only for validation
   3. config probe — each routed ACP harness opens once with no prompt; advertised
      options are reported and authored configOptions are checked. Probe failures warn
      and skip that harness's checks without making validation fail

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { waitForRun, runAndObserve } from "./_harness.js";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -7,7 +9,7 @@ import type { ElicitRequest, ElicitResult, McpServer } from "@modelcontextprotoc
 import { Client } from "@modelcontextprotocol/client";
 import type { AgentUsage, RunOptions } from "@automatalabs/shared-types";
 import { WorkflowError, WorkflowErrorCode, WorkflowManager } from "@automatalabs/workflows";
-import { createWorkflowServer, MAX_BACKGROUND_RUNS } from "../src/index.js";
+import { createWorkflowServer, MAX_ACTIVE_RUNS } from "../src/index.js";
 import {
   connect,
   makeRunner,
@@ -59,7 +61,7 @@ function runIdOf(result: ToolCallResult): string {
   return runId;
 }
 
-const TWO_AGENT_BACKGROUND = [
+const TWO_AGENT_ASYNC = [
   'export const meta = { name: "detached-review", description: "detached", phases: [{ title: "Explore" }, { title: "Review" }] };',
   'phase("Explore");',
   'log("exploration started");',
@@ -76,7 +78,7 @@ const EXPECTED_LIMITS = {
   agentRetries: 1,
 } as const;
 
-test("background acceptance is immediate and status is an immediate cumulative snapshot", async () => {
+test("durable acceptance is immediate and status is an immediate cumulative snapshot", async () => {
   const controlled = new ControlledRunner();
   const { client, dispose } = await connect(controlled.runner, { listTools: true });
   try {
@@ -85,9 +87,8 @@ test("background acceptance is immediate and status is an immediate cumulative s
       {
         name: "workflow",
         arguments: {
-          action: "run",
-          script: TWO_AGENT_BACKGROUND,
-          background: true,
+          action: "run", requestId: randomUUID(),
+          script: TWO_AGENT_ASYNC,
           concurrency: 3,
           agentRetries: 1,
         },
@@ -95,24 +96,17 @@ test("background acceptance is immediate and status is an immediate cumulative s
       { signal: initiating.signal },
     );
     const acceptedRunId = runIdOf(accepted);
-    assert.deepEqual(structured(accepted), {
-      runId: acceptedRunId,
-      status: "running",
-      scriptSource: "inline",
-      scriptUri: `workflow://runs/${acceptedRunId}/script`,
-      eventsUri: `workflow://runs/${acceptedRunId}/events`,
-      limits: EXPECTED_LIMITS,
-      pendingPermissions: [],
-      interaction: {
-        permissionRequests: "may-block",
-        collectWith: ["run", "resume"],
-        respondWith: "permissions-response",
-        elicitation: "unavailable",
-      },
-    });
-    assert.match(textOf(accepted), new RegExp(`^Workflow "detached-review" started in the background\\.\\nrunId: ${acceptedRunId}\\n`));
-    assert.match(textOf(accepted), /action="status" and this runId for an immediate snapshot/);
-    assert.equal(controlled.calls.length, 1);
+    const ack = structured(accepted)!;
+    assert.equal(ack.action, "run");
+    assert.equal(ack.accepted, true);
+    assert.equal(ack.status, "pending");
+    assert.equal(ack.result, undefined);
+    assert.equal(ack.scriptSource, "inline");
+    assert.equal(ack.scriptUri, `workflow://runs/${acceptedRunId}/script`);
+    assert.equal(ack.eventsUri, `workflow://runs/${acceptedRunId}/events`);
+    assert.deepEqual(ack.limits, EXPECTED_LIMITS);
+    assert.equal(controlled.calls.length, 0, "preparation starts after durable acceptance");
+    await waitUntil(() => controlled.calls.length === 1, "first agent starts asynchronously");
     initiating.abort();
     assert.equal(controlled.calls[0].options.signal?.aborted, false, "initiating-call cancellation is detached");
 
@@ -193,86 +187,36 @@ test("background acceptance is immediate and status is an immediate cumulative s
   }
 });
 
-test("the four-run registry rejects a fifth, releases failures and settlements, and ignores foreground/read calls", async () => {
-  assert.equal(MAX_BACKGROUND_RUNS, 4);
+test("the four-run registry includes preparation, admits retries at capacity, and releases settled runs", async () => {
+  assert.equal(MAX_ACTIVE_RUNS, 4);
   const controlled = new ControlledRunner();
   const { client, dispose } = await connect(controlled.runner, { listTools: true });
   const acceptedIds: string[] = [];
   try {
-    const malformed = await client.callTool({
-      name: "workflow",
-      arguments: { action: "run", script: 'await agent("missing meta")', background: true },
-    });
-    assert.equal(malformed.isError, true, "a failed start releases its reservation");
-    const denied = await client.callTool({
-      name: "workflow",
-      arguments: {
-        action: "run",
-        script:
-          'export const meta = { name: "denied", description: "denied", backends: { custom: { command: "agent" } } }; return 1;',
-        background: true,
-      },
-    });
-    assert.equal(denied.isError, true, "a failed backend approval releases its reservation");
-
-    for (let index = 0; index < MAX_BACKGROUND_RUNS; index++) {
-      const accepted = await client.callTool({
-        name: "workflow",
-        arguments: {
-          action: "run",
-          script: `export const meta = { name: "blocked-${index}", description: "blocked" }; return await agent("${index}");`,
-          background: true,
-        },
-      });
+    const malformed = await runAndObserve(client, { script: 'export const meta = { name: "invalid", description: "invalid call" }; return agent("work", { unknownOption: true });' });
+    assert.equal(structured(malformed)?.status, "failed", "failed preparation releases capacity");
+    const inputs = Array.from({ length: MAX_ACTIVE_RUNS }, (_, index) => ({ action: "run", requestId: randomUUID(),
+      script: `export const meta = { name: "blocked-${index}", description: "blocked" }; return await agent("${index}");` }));
+    for (const input of inputs) {
+      const accepted = await client.callTool({ name: "workflow", arguments: input });
       acceptedIds.push(runIdOf(accepted));
     }
-    assert.equal(controlled.calls.length, 4);
-    const fifth = await client.callTool({
-      name: "workflow",
-      arguments: {
-        action: "run",
-        script: 'export const meta = { name: "fifth", description: "fifth" }; return await agent("fifth");',
-        background: true,
-      },
-    });
+    const duplicate = await client.callTool({ name: "workflow", arguments: inputs[0] });
+    assert.equal(structured(duplicate)?.runId, acceptedIds[0]);
+    assert.equal(structured(duplicate)?.duplicate, true, "retry consumes no extra capacity");
+    const fifth = await client.callTool({ name: "workflow", arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT } });
     assert.equal(fifth.isError, true);
-    assert.equal(fifth.structuredContent, undefined);
-    assert.equal(
-      textOf(fifth),
-      "Background workflow limit reached (4 active or starting runs). Check an existing run with status and retry.",
-    );
-    assert.equal(controlled.calls.length, 4, "the rejected run never invokes the runner");
-
-    const foreground = await client.callTool({ name: "workflow", arguments: { action: "run", script: NO_AGENT_SCRIPT } });
-    assert.equal(structured(foreground)?.status, "completed");
-    const inspected = await client.callTool({
-      name: "workflow",
-      arguments: { action: "status", runId: acceptedIds[0] },
-    });
-    assert.equal(inspected.isError, false);
-    const nonblocking = await client.callTool({
-      name: "workflow",
-      arguments: { action: "status", runId: acceptedIds[0] },
-    });
-    assert.equal(structured(nonblocking)?.runId, acceptedIds[0]);
-
-    controlled.resolve(0, "released");
-    await client.callTool({
-      name: "workflow",
-      arguments: { action: "status", runId: acceptedIds[0] },
-    });
-    const replacement = await client.callTool({
-      name: "workflow",
-      arguments: {
-        action: "run",
-        script: 'export const meta = { name: "replacement", description: "replacement" }; return await agent("replacement");',
-        background: true,
-      },
-    });
-    assert.equal(structured(replacement)?.status, "running");
-    assert.equal(controlled.calls.length, 5);
+    assert.match(textOf(fifth), /Workflow limit reached/);
+    await waitUntil(() => controlled.calls.length === 4, "all admitted agents should start");
+    const observed = await client.callTool({ name: "workflow", arguments: { action: "status", runId: acceptedIds[0] } });
+    assert.equal(observed.isError, false, "read calls do not reserve capacity");
+    controlled.resolve(0, "settled");
+    await waitForRun(client, acceptedIds[0]);
+    const after = await runAndObserve(client, { script: NO_AGENT_SCRIPT });
+    assert.equal(structured(after)?.status, "completed");
   } finally {
-    for (const call of controlled.calls) call.resolve("cleanup");
+    controlled.calls.forEach((call) => call.resolve("cleanup"));
+    for (const runId of acceptedIds) await waitForRun(client, runId);
     await dispose();
   }
 });
@@ -290,13 +234,10 @@ test("terminal outcomes survive repeated status and server restart, then missing
   }), { listTools: true });
   const accepted = await first.client.callTool({
     name: "workflow",
-    arguments: { action: "run", script, background: true },
+    arguments: { action: "run", requestId: randomUUID(), script },
   });
   const runId = runIdOf(accepted);
-  const terminal = await first.client.callTool({
-    name: "workflow",
-    arguments: { action: "status", runId },
-  });
+  const terminal = await waitForRun(first.client, runId);
   const expectedOutcome = field(structured(terminal)?.outcome, "result");
   const expectedUsage = field(structured(terminal)?.outcome, "tokenUsage");
   const expectedLogs = field(structured(terminal)?.outcome, "logs");
@@ -329,13 +270,10 @@ test("terminal outcomes survive repeated status and server restart, then missing
   const corruptSource = await connect(makeRunner(() => "corrupt-me"));
   const corruptAccepted = await corruptSource.client.callTool({
     name: "workflow",
-    arguments: { action: "run", script, background: true },
+    arguments: { action: "run", requestId: randomUUID(), script },
   });
   const corruptId = runIdOf(corruptAccepted);
-  await corruptSource.client.callTool({
-    name: "workflow",
-    arguments: { action: "status", runId: corruptId },
-  });
+  await waitForRun(corruptSource.client, corruptId);
   await corruptSource.dispose();
   const corruptFile = persistedRunFile(corruptId);
   assert.ok(corruptFile);
@@ -382,45 +320,15 @@ async function connectEliciting(runner: ReturnType<typeof makeRunner>): Promise<
   };
 }
 
-test("background checkpoints stay headless despite elicitation capability and auth pauses remain non-secret", async () => {
+test("checkpoints pause independently of elicitation capability and auth pauses remain non-secret", async () => {
   const eliciting = await connectEliciting(makeRunner(() => "unused"));
   try {
-    for (const fixture of [
-      { headless: "default", expected: "completed", code: undefined },
-      { headless: "abort", expected: "failed", code: WorkflowErrorCode.WORKFLOW_ABORTED },
-      { headless: "pause", expected: "paused", code: WorkflowErrorCode.CHECKPOINT_REQUIRED },
-    ] as const) {
-      const script = [
-        `export const meta = { name: "checkpoint-${fixture.headless}", description: "checkpoint" };`,
-        `return await checkpoint("ship?", { headless: "${fixture.headless}", kind: "confirm", default: "fallback" });`,
-      ].join("\n");
-      const accepted = await eliciting.client.callTool({
-        name: "workflow",
-        arguments: { action: "run", script, background: true },
-      });
-      const fixtureRunId = runIdOf(accepted);
-      await waitUntil(async () => structured(await eliciting.client.callTool({
-        name: "workflow",
-        arguments: { action: "status", runId: fixtureRunId },
-      }))?.status === fixture.expected, `checkpoint ${fixture.headless} should settle`);
-      const awaited = await eliciting.client.callTool({
-        name: "workflow",
-        arguments: { action: "status", runId: fixtureRunId },
-      });
-      assert.equal(awaited.isError, false, "status is a successful read for every terminal lifecycle state");
-      assert.equal(structured(awaited)?.status, fixture.expected);
-      assert.equal(structured(awaited)?.errorCode, fixture.code);
-      assert.ok(structured(awaited)?.outcome);
-      if (fixture.headless === "default") assert.equal(field(structured(awaited)?.outcome, "result"), "fallback");
-      if (fixture.headless === "pause") {
-        assert.equal(structured(awaited)?.reason, "checkpoint_required");
-        assert.equal(field(field(structured(awaited)?.outcome, "checkpointContext"), "prompt"), "ship?");
-      }
-    }
-    assert.equal(eliciting.requests.length, 0, "no checkpoint elicitation is retained after background acceptance");
-  } finally {
-    await eliciting.dispose();
-  }
+    const paused = await runAndObserve(eliciting.client, { script: 'export const meta = { name: "checkpoint", description: "checkpoint" }; return await checkpoint("ship?");' });
+    assert.equal(structured(paused)?.status, "paused");
+    assert.equal(structured(paused)?.reason, "checkpoint_required");
+    assert.equal(field(field(structured(paused)?.outcome, "checkpointContext"), "prompt"), "ship?");
+    assert.equal(eliciting.requests.length, 0, "checkpoint is durable state, not a held MCP form");
+  } finally { await eliciting.dispose(); }
 
   const authContext = {
     backendId: "codex",
@@ -439,15 +347,11 @@ test("background checkpoints stay headless despite elicitation capability and au
     const accepted = await auth.client.callTool({
       name: "workflow",
       arguments: {
-        action: "run",
+        action: "run", requestId: randomUUID(),
         script: 'export const meta = { name: "auth", description: "auth" }; return await agent("auth");',
-        background: true,
       },
     });
-    const awaited = await auth.client.callTool({
-      name: "workflow",
-      arguments: { action: "status", runId: runIdOf(accepted) },
-    });
+    const awaited = await waitForRun(auth.client, runIdOf(accepted));
     assert.equal(awaited.isError, false);
     assert.equal(structured(awaited)?.status, "paused");
     assert.equal(structured(awaited)?.reason, "auth_required");
@@ -469,7 +373,7 @@ test("a long-lived server lazily reconciles crash residue for status and resume"
     return "cached";
   }));
   const script = 'export const meta = { name: "stale", description: "stale" }; return await agent("cached");';
-  const source = await first.client.callTool({ name: "workflow", arguments: { action: "run", script } });
+  const source = await runAndObserve(first.client, { script });
   const sourceId = runIdOf(source);
   await first.dispose();
   assert.equal(sourceCalls, 1);
@@ -504,7 +408,7 @@ test("a long-lived server lazily reconciles crash residue for status and resume"
     assert.equal(structured(inspected)?.reason, structured(recovered)?.reason);
     const resumed = await cold.client.callTool({
       name: "workflow",
-      arguments: { action: "resume", runId: staleId, background: true },
+      arguments: { action: "resume", requestId: randomUUID(), runId: staleId },
     });
     assert.equal(runIdOf(resumed), staleId);
     await waitUntil(async () => structured(await cold.client.callTool({
@@ -533,7 +437,7 @@ test("status preserves byte caps while returning a large authored outcome exactl
     ].join("\n");
     const accepted = await client.callTool({
       name: "workflow",
-      arguments: { action: "run", script, background: true },
+      arguments: { action: "run", requestId: randomUUID(), script },
     });
     await waitUntil(async () => structured(await client.callTool({
       name: "workflow",

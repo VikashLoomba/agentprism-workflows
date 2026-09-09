@@ -17,40 +17,11 @@ const MAX_STRUCTURED_BYTES = 24_576;
 const MAX_HARNESSES = 32;
 const MAX_OPTIONS_PER_HARNESS = 48;
 const MAX_MODEL_MATCHES = 100;
-const MAX_AGENT_CALLS = 64;
-const MAX_CHECKPOINTS = 32;
-const MAX_WARNINGS = 32;
 const MAX_TEXT_BYTES = 8_192;
 const MAX_STRING_BYTES = 512;
 const MAX_VALUE_DEPTH = 6;
 const MAX_VALUE_KEYS = 48;
 const MAX_VALUE_ITEMS = 48;
-
-export interface WorkflowValidationSummary {
-  ok: false;
-  exitCode: 1 | 2;
-  parse: {
-    ok: boolean;
-    error?: string;
-    meta?: { name: string; description: string; phases: string[] };
-  };
-  dryRun?: {
-    ok: boolean;
-    status: string;
-    reason?: string;
-    timedOut: boolean;
-    durationMs: number;
-    agentCalls: Array<Record<string, unknown>>;
-    omittedAgentCalls: number;
-    checkpoints: Array<Record<string, unknown>>;
-    omittedCheckpoints: number;
-    phasesVisited: string[];
-    harnessOptions: Array<Record<string, unknown>>;
-    omittedHarnesses: number;
-  };
-  warnings: string[];
-  omittedWarnings: number;
-}
 
 export interface WorkflowConfigSummary {
   [key: string]: unknown;
@@ -100,91 +71,9 @@ export function workflowProbeRunner(runner: AgentRunner): ValidateProbeRunner {
   };
 }
 
-export function validationSummary(report: ValidateWorkflowReport): WorkflowValidationSummary {
-  if (report.ok) throw new TypeError("validationSummary requires an invalid report");
-  const warnings = report.warnings.slice(0, MAX_WARNINGS).map(boundText);
-  const dry = report.dryRun;
-  const summary: WorkflowValidationSummary = {
-    ok: false,
-    exitCode: report.exitCode as 1 | 2,
-    parse: {
-      ok: report.parse.ok,
-      ...(report.parse.error === undefined ? {} : { error: boundText(report.parse.error) }),
-      ...(report.parse.meta === undefined
-        ? {}
-        : {
-            meta: {
-              name: boundText(report.parse.meta.name),
-              description: boundText(report.parse.meta.description),
-              phases: (report.parse.meta.phases ?? []).slice(0, 32).map((phase) => boundText(phase.title)),
-            },
-          }),
-    },
-    ...(dry === undefined
-      ? {}
-      : {
-          dryRun: {
-            ok: dry.ok,
-            status: boundText(dry.status),
-            ...(dry.reason === undefined ? {} : { reason: boundText(dry.reason) }),
-            timedOut: dry.timedOut,
-            durationMs: Math.max(0, dry.durationMs),
-            agentCalls: dry.agentCalls.slice(0, MAX_AGENT_CALLS).map((call) =>
-              boundValue({
-                label: call.label,
-                phase: call.phase,
-                model: call.model,
-                tier: call.tier,
-                mode: call.mode,
-                configOptions: call.configOptions,
-                backend: call.backend,
-                schema: call.schema,
-              }) as Record<string, unknown>,
-            ),
-            omittedAgentCalls: Math.max(0, dry.agentCalls.length - MAX_AGENT_CALLS),
-            checkpoints: dry.checkpoints.slice(0, MAX_CHECKPOINTS).map((checkpoint) =>
-              boundValue({ prompt: checkpoint.prompt, kind: checkpoint.kind }) as Record<string, unknown>,
-            ),
-            omittedCheckpoints: Math.max(0, dry.checkpoints.length - MAX_CHECKPOINTS),
-            phasesVisited: dry.phasesVisited.slice(0, 32).map(boundText),
-            ...projectHarnessOptions(dry.harnessOptions ?? []),
-          },
-        }),
-    warnings,
-    omittedWarnings: Math.max(0, report.warnings.length - MAX_WARNINGS),
-  };
-  while (jsonBytes(summary) > MAX_STRUCTURED_BYTES) {
-    if (summary.dryRun && summary.dryRun.agentCalls.length > 0) {
-      summary.dryRun.agentCalls.pop();
-      summary.dryRun.omittedAgentCalls++;
-      continue;
-    }
-    if (summary.dryRun && summary.dryRun.checkpoints.length > 0) {
-      summary.dryRun.checkpoints.pop();
-      summary.dryRun.omittedCheckpoints++;
-      continue;
-    }
-    const harness = summary.dryRun?.harnessOptions.find((entry) =>
-      Array.isArray(entry.options) && entry.options.length > 0
-    );
-    if (harness && Array.isArray(harness.options)) {
-      harness.options.pop();
-      harness.omittedOptions = Number(harness.omittedOptions ?? 0) + 1;
-      continue;
-    }
-    if (summary.warnings.length > 0) {
-      summary.warnings.pop();
-      summary.omittedWarnings++;
-      continue;
-    }
-    break;
-  }
-  return summary;
-}
-
 export function validationText(report: ValidateWorkflowReport): string {
   return truncateUtf8(
-    `Workflow validation failed before admission. No run was created.\n\n${formatValidateReport(report)}`,
+    `Workflow preparation validation failed. The accepted run remains available for inspection.\n\n${formatValidateReport(report)}`,
     MAX_TEXT_BYTES,
     "…[validation diagnostics truncated]",
   );

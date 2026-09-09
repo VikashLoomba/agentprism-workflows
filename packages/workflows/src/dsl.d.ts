@@ -121,8 +121,8 @@ declare function gate<
 }>;
 
 /**
- * Deterministic, journaled, replayable human checkpoint. Spends no tokens. Headless
- * runs default immediately unless `options.headless` opts into "abort" or "pause".
+ * Deterministic, journaled human checkpoint. Spends no tokens. Requires an explicit
+ * answer through the SDK confirm callback or a durable checkpointReplies continuation.
  */
 declare function checkpoint(
   promptText: string,

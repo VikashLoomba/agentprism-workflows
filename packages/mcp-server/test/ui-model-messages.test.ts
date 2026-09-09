@@ -1,274 +1,73 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import type { App } from "@modelcontextprotocol/ext-apps";
-import type { PersistedRunEvent, RunEventLogRecord } from "@automatalabs/shared-types";
+import test from "node:test";
+import type { RunEventLogRecord } from "@automatalabs/shared-types";
+import { CONTEXT_MAX_CHARS, createModelMessageState, discussionMessage, modelMessageText, selectionContext, sendAutomaticMessage, sendModelMessagesForFold, sendRequiredInputMessages } from "../ui/src/model-messages.js";
+import { createRunModel } from "../ui/src/state.js";
+import { MockHost, MockRunStore } from "../ui/src/mock-host.js";
 
-import {
-  createModelMessageState,
-  sendModelMessagesForFold,
-} from "../ui/src/model-messages.js";
-
-type SentMessage = Parameters<App["sendMessage"]>[0];
-
-function record(
-  seq: number,
-  event: Record<string, unknown>,
-  streamId = "a".repeat(32),
-): RunEventLogRecord {
-  return {
-    version: 1,
-    streamId,
-    runId: "run-msg",
-    seq,
-    timestamp: new Date(seq * 1000).toISOString(),
-    event: event as unknown as PersistedRunEvent,
-    projection: { redacted: false, truncated: false },
-  };
+const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+function host() { const store = new MockRunStore(); store.create("run-a"); return new MockHost(store); }
+function record(seq: number, type: "complete" | "phase" | "log" = "complete"): RunEventLogRecord {
+  return { version: 1, streamId: "stream-a", runId: "run-a", seq, timestamp: "2026-09-08T00:00:00Z", event: { runId: "run-a", scope: "run-a", type, title: "Research", message: "Routine update", summary: {} } } as RunEventLogRecord;
 }
 
-function messageApp(
-  sent: SentMessage[],
-  result: () => Promise<{ isError?: boolean }> = async () => ({}),
-): Pick<App, "sendMessage"> {
-  return {
-    sendMessage: async (message) => {
-      sent.push(message);
-      return result();
-    },
-  } as Pick<App, "sendMessage">;
-}
-
-test("ui/message selects only phase, every paused reason, and complete in exact order", () => {
-  const sent: SentMessage[] = [];
-  const app = messageApp(sent);
-  const state = createModelMessageState();
-
-  // The first cursor-zero fold is bootstrap, so even selected historical events stay silent.
-  sendModelMessagesForFold(
-    app,
-    "run-msg",
-    0,
-    [
-      record(1, { type: "phase", title: "Historical", runId: "run-msg", scope: "run-msg" }),
-      record(2, {
-        type: "complete",
-        runId: "run-msg",
-        scope: "run-msg",
-        summary: { workflowName: "old", agentCount: 0 },
-      }),
-    ],
-    state,
-  );
-  assert.deepEqual(sent, []);
-
-  sendModelMessagesForFold(
-    app,
-    "run-msg",
-    2,
-    [
-      record(3, { type: "phase", title: "Scan", runId: "run-msg", scope: "run-msg" }),
-      record(4, {
-        type: "agentStart",
-        runId: "run-msg",
-        scope: "run-msg",
-        label: "finder",
-        prompt: "find",
-        callIndex: 0,
-      }),
-      record(5, {
-        type: "agentProgress",
-        runId: "run-msg",
-        scope: "run-msg",
-        label: "finder",
-        callIndex: 0,
-        executionStartSeq: 4,
-        turnCount: 1,
-        observedEvents: 1,
-        coalescedEvents: 0,
-        cause: "activity",
-        latestText: "working",
-      }),
-      record(6, {
-        type: "agentEnd",
-        runId: "run-msg",
-        scope: "run-msg",
-        label: "finder",
-        callIndex: 0,
-        result: { preview: "done", redacted: false, truncated: false },
-      }),
-      record(7, { type: "log", runId: "run-msg", scope: "run-msg", message: "detail" }),
-      record(8, {
-        type: "tokenUsage",
-        runId: "run-msg",
-        scope: "run-msg",
-        usage: { total: 10, cost: 0.01 },
-      }),
-      record(9, { type: "paused", runId: "run-msg", scope: "run-msg" }),
-      record(10, { type: "resumed", runId: "run-msg", scope: "run-msg" }),
-      record(11, {
-        type: "paused",
-        runId: "run-msg",
-        scope: "run-msg",
-        reason: "usage_limit",
-        resetHint: "resets at 5pm",
-        errorRecord: {},
-      }),
-      record(12, {
-        type: "paused",
-        runId: "run-msg",
-        scope: "run-msg",
-        reason: "auth_required",
-        authContext: { backendId: "claude", methods: [] },
-        errorRecord: {},
-      }),
-      record(13, {
-        type: "paused",
-        runId: "run-msg",
-        scope: "run-msg",
-        reason: "checkpoint_required",
-        checkpointContext: { callIndex: 2, kind: "confirm", prompt: "Ship it?" },
-        errorRecord: {},
-      }),
-      record(14, {
-        type: "complete",
-        runId: "run-msg",
-        scope: "run-msg",
-        summary: { workflowName: "flow", agentCount: 1 },
-      }),
-    ],
-    state,
-  );
-
-  assert.deepEqual(sent, [
-    { role: "user", content: [{ type: "text", text: '[workflow run run-msg] Phase started: "Scan".' }] },
-    { role: "user", content: [{ type: "text", text: "[workflow run run-msg] Paused." }] },
-    {
-      role: "user",
-      content: [{ type: "text", text: "[workflow run run-msg] Paused: usage limit reached — resets at 5pm." }],
-    },
-    {
-      role: "user",
-      content: [
-        {
-          type: "text",
-          text: '[workflow run run-msg] Paused: authentication required for backend "claude". Log in on this machine, then resume.',
-        },
-      ],
-    },
-    {
-      role: "user",
-      content: [
-        {
-          type: "text",
-          text: "[workflow run run-msg] Paused: awaiting a confirm decision — Ship it?.",
-        },
-      ],
-    },
-    { role: "user", content: [{ type: "text", text: "[workflow run run-msg] Run completed." }] },
-  ]);
+test("multi-page historical bootstrap never replays terminal messages; future terminal events notify", async () => {
+  const app = host(), state = createModelMessageState();
+  sendModelMessagesForFold(app, "run-a", 0, [record(1, "phase")], state, 3);
+  sendModelMessagesForFold(app, "run-a", 1, [record(2), record(3, "log")], state, 3);
+  await settle(); assert.equal(app.messages.length, 0);
+  sendModelMessagesForFold(app, "run-a", 3, [record(4, "phase"), record(5, "log"), record(6)], state, 6);
+  await settle(); assert.equal(app.messages.length, 1);
+  assert.match(JSON.stringify(app.messages), /Run completed/);
+  sendModelMessagesForFold(app, "run-a", 0, [record(6)], state, 6);
+  await settle(); assert.equal(app.messages.length, 1);
 });
 
-test("terminal error and stopped messages use exact errorRecord text", () => {
-  const sent: SentMessage[] = [];
-  const app = messageApp(sent);
-  const state = createModelMessageState();
-  sendModelMessagesForFold(app, "run-msg", 0, [], state);
-  sendModelMessagesForFold(
-    app,
-    "run-msg",
-    0,
-    [
-      record(1, {
-        type: "error",
-        runId: "run-msg",
-        scope: "run-msg",
-        errorRecord: { message: "backend exploded" },
-      }),
-      record(2, { type: "stopped", runId: "run-msg", scope: "run-msg" }),
-    ],
-    state,
-  );
-  assert.deepEqual(sent, [
-    {
-      role: "user",
-      content: [{ type: "text", text: "[workflow run run-msg] Run failed: backend exploded." }],
-    },
-    { role: "user", content: [{ type: "text", text: "[workflow run run-msg] Run stopped." }] },
-  ]);
+test("independent and reopened panels coordinate automatic delivery through server claims", async () => {
+  const first = host(), second = new MockHost(first.store);
+  await Promise.all([sendAutomaticMessage(first, "run-a", "terminal:stream-a:10", "Completed", createModelMessageState()), sendAutomaticMessage(second, "run-a", "terminal:stream-a:10", "Completed", createModelMessageState())]);
+  assert.equal(first.messages.length + second.messages.length, 1);
+  await sendAutomaticMessage(new MockHost(first.store), "run-a", "terminal:stream-a:10", "Completed", createModelMessageState());
+  assert.equal(first.store.notifications.size, 1);
+  assert.equal([...first.store.notifications.values()][0]?.sent, true);
 });
 
-test("sequence high-water dedupes across stream rebuilds for the panel lifetime", () => {
-  const sent: SentMessage[] = [];
-  const app = messageApp(sent);
-  const state = createModelMessageState();
-  sendModelMessagesForFold(
-    app,
-    "run-msg",
-    0,
-    [record(5, { type: "log", runId: "run-msg", scope: "run-msg", message: "bootstrap" })],
-    state,
-  );
-  sendModelMessagesForFold(
-    app,
-    "run-msg",
-    5,
-    [record(6, { type: "phase", title: "Verify", runId: "run-msg", scope: "run-msg" })],
-    state,
-  );
-
-  const rebuiltStream = "b".repeat(32);
-  sendModelMessagesForFold(
-    app,
-    "run-msg",
-    0,
-    [
-      record(5, { type: "phase", title: "Old", runId: "run-msg", scope: "run-msg" }, rebuiltStream),
-      record(6, { type: "phase", title: "Verify", runId: "run-msg", scope: "run-msg" }, rebuiltStream),
-      record(7, { type: "phase", title: "Report", runId: "run-msg", scope: "run-msg" }, rebuiltStream),
-    ],
-    state,
-  );
-  assert.deepEqual(sent, [
-    { role: "user", content: [{ type: "text", text: '[workflow run run-msg] Phase started: "Verify".' }] },
-    { role: "user", content: [{ type: "text", text: '[workflow run run-msg] Phase started: "Report".' }] },
-  ]);
-});
-
-test("sendMessage isError is logged once, never retried, and does not stop later folds", async () => {
-  const sent: SentMessage[] = [];
-  let attempts = 0;
-  const app = messageApp(sent, async () => {
-    attempts += 1;
-    return attempts === 1 ? { isError: true } : {};
-  });
-  const errors: unknown[][] = [];
-  const originalError = console.error;
-  console.error = (...args: unknown[]) => {
-    errors.push(args);
-  };
-  try {
-    const state = createModelMessageState();
-    sendModelMessagesForFold(app, "run-msg", 0, [], state);
-    sendModelMessagesForFold(
-      app,
-      "run-msg",
-      0,
-      [record(1, { type: "phase", title: "Scan", runId: "run-msg", scope: "run-msg" })],
-      state,
-    );
-    sendModelMessagesForFold(
-      app,
-      "run-msg",
-      1,
-      [record(2, { type: "complete", runId: "run-msg", scope: "run-msg", summary: {} })],
-      state,
-    );
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  } finally {
-    console.error = originalError;
+test("required setup, permissions, checkpoints notify even on opening, without raw request content", async () => {
+  for (const scenario of ["setup", "permission", "checkpoint"] as const) {
+    const app = host(), state = createModelMessageState(); app.store.scenario("run-a", scenario);
+    const snapshot = app.store.runs.get("run-a")!.snapshot;
+    sendRequiredInputMessages(app, snapshot, state); sendRequiredInputMessages(app, snapshot, state);
+    await settle(); assert.equal(app.messages.length, 1, scenario);
+    assert.match(JSON.stringify(app.messages), /run-a/);
+    assert.doesNotMatch(JSON.stringify(app.messages), /Publish findings|Read the transport specification/);
   }
+});
 
-  assert.equal(attempts, 2, "each selected event gets one attempt and no retry");
-  assert.equal(sent.length, 2, "the rejected phase message does not break the next fold");
-  assert.equal(errors.length, 1);
+test("routine activity and phases are quiet; context is bounded, run-scoped and does not copy transcripts", () => {
+  assert.equal(modelMessageText("run-a", record(1, "phase").event), undefined);
+  const model = createRunModel("run-a"); model.name = "Flow"; model.phases = ["Research"];
+  model.nodes.set(0, { callIndex: 0, label: "Research transport", status: "error", startSeq: 1, errorText: "token=secret-value " + "failure ".repeat(1000), transcript: new Map([["entry", { revision: 1, row: { order: 1, kind: "text", text: "PRIVATE TRANSCRIPT" } }]]), progress: [] });
+  const selection = { kind: "agent", callIndex: 0 } as const;
+  const context = selectionContext(model, selection);
+  assert.ok(context.length <= CONTEXT_MAX_CHARS); assert.match(context, /"runId":"run-a"/); assert.match(context, /"callIndex":0/);
+  assert.match(context, /\[redacted\]/); assert.doesNotMatch(context, /secret-value|PRIVATE TRANSCRIPT/);
+  assert.match(discussionMessage(model, selection), /Please discuss/);
+});
+
+test("unavailable/rejected messages never disable browsing or repeatedly emit for a pending request", async () => {
+  const app = host(); app.capabilities = { serverTools: {} };
+  await sendAutomaticMessage(app, "run-a", "permission:one", "Needs input", createModelMessageState());
+  assert.equal(app.calls.length, 0); assert.equal(app.messages.length, 0);
+  app.capabilities.message = { text: {} }; app.rejectMessage = true;
+  const state = createModelMessageState();
+  await sendAutomaticMessage(app, "run-a", "permission:one", "Needs input", state);
+  await sendAutomaticMessage(app, "run-a", "permission:one", "Needs input", state);
+  assert.equal(app.messages.length, 1); assert.equal(app.store.notifications.size, 0, "failed host delivery releases the shared lease");
+  assert.equal((await app.callServerTool({ name: "workflow", arguments: { action: "status", runId: "run-a" } })).isError, undefined);
+});
+
+test("teardown between claim and delivery releases the lease without messaging", async () => {
+  const app = host(), state = createModelMessageState();
+  const pending = sendAutomaticMessage(app, "run-a", "permission:one", "Needs input", state); state.active = false;
+  await pending; assert.equal(app.messages.length, 0); assert.equal(app.store.notifications.size, 0);
 });

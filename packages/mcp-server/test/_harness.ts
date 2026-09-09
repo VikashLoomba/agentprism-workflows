@@ -14,6 +14,8 @@ import { Client } from "@modelcontextprotocol/client";
 //     ~/.agentprism/workflows/projects/<key>/runs, see workflow-paths.ts) writes into
 //     a throwaway temp dir instead of the developer's real home.
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXTENSION_ID, RESOURCE_MIME_TYPE } from "../src/mcp-apps.js";
@@ -139,7 +141,7 @@ export async function connect(
   const server = createWorkflowServer(runner, { permissionBroker: opts.permissionBroker });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const capabilities = {
-    ...uiClientCapabilities(opts.uiCapability ?? "matching"),
+    ...uiClientCapabilities(opts.uiCapability ?? "absent"),
     ...(opts.elicitation ? { elicitation: { form: {} } } : {}),
   };
   const client = new Client({ name: "mcp-server-test", version: "0.0.0" }, { capabilities });
@@ -172,6 +174,32 @@ export function textOf(res: ToolCallResult): string {
   const blocks = (res.content as TextBlock[] | undefined) ?? [];
   const block = blocks.find((c) => c.type === "text");
   return typeof block?.text === "string" ? block.text : "";
+}
+
+/** Observe the real asynchronous contract explicitly; this helper never starts or resumes work. */
+export async function waitForRun(
+  client: Pick<Client, "callTool">,
+  runId: string,
+  predicate: (status: Record<string, unknown>) => boolean = (status) =>
+    ["completed", "paused", "failed", "aborted"].includes(String(status.status)),
+): Promise<ToolCallResult> {
+  const deadline = Date.now() + 10_000;
+  let last: ToolCallResult | undefined;
+  do {
+    last = await client.callTool({ name: "workflow", arguments: { action: "status", runId } });
+    assert.equal(last.isError, false, textOf(last));
+    if (predicate(structured(last) ?? {})) return last;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  } while (Date.now() < deadline);
+  assert.fail(`Workflow ${runId} did not reach expected state: ${JSON.stringify(structured(last))}`);
+}
+
+/** Test convenience for assertions about an eventual outcome, returning an actual status response. */
+export async function runAndObserve(client: Pick<Client, "callTool">, input: Record<string, unknown>): Promise<ToolCallResult> {
+  const accepted = await client.callTool({ name: "workflow", arguments: { action: "run", requestId: randomUUID(), ...input } });
+  assert.equal(accepted.isError, false, textOf(accepted));
+  assert.equal(structured(accepted)?.accepted, true, "run must acknowledge asynchronous acceptance");
+  return await waitForRun(client, String(structured(accepted)?.runId));
 }
 
 /** Locate one isolated persisted run fixture without exposing a production persistence path. */

@@ -82,7 +82,7 @@ return { alpha, beta, marker: args.marker };`;
     assert.equal(continuationEvents.events[0]?.event.type, "resumed");
 
     const persisted = testRun.manager.getPersistence().load(first.runId);
-    assert.equal(persisted?.admission?.format, 1);
+    assert.equal(persisted?.admission?.format, 2);
     assert.equal(persisted?.admission?.agentConfigurations[0]?.model, "claude/opus");
     assert.equal(persisted?.admission?.agentConfigurations[1]?.model, "codex/gpt");
     assert.deepEqual(persisted?.args, { marker: "original" });
@@ -130,7 +130,7 @@ test("the first leased checkpoint answer wins; repeats are idempotent and confli
   const testRun = fixture({ async run() { return "unused"; } });
   try {
     const script = `export const meta = { name: "checkpoint-race", description: "checkpoint race" };
-return await checkpoint("ship?", { kind: "select", choices: ["ship", "hold"], headless: "pause" });`;
+return await checkpoint("ship?", { kind: "select", choices: ["ship", "hold"], });`;
     const paused = await testRun.manager.runSync(script, undefined, {
       runId: "checkpoint-race",
       agentConfigurations: {},
@@ -176,7 +176,7 @@ test("a mismatched checkpoint batch never reports or persists a provisional answ
   const testRun = fixture({ async run() { return "unused"; } });
   try {
     const script = `export const meta = { name: "checkpoint-batch", description: "checkpoint batch" };
-return await checkpoint("ship?", { headless: "pause" });`;
+return await checkpoint("ship?", { });`;
     const paused = await testRun.manager.runSync(script, undefined, {
       runId: "checkpoint-batch",
       agentConfigurations: {},
@@ -210,21 +210,19 @@ test("a repeated earlier answer never moves the run past a later pending checkpo
   const testRun = fixture({ async run() { return "unused"; } });
   try {
     const script = `export const meta = { name: "two-gates", description: "two gates" };
-const first = await checkpoint("first?", { kind: "confirm", default: true });
-const second = await checkpoint("second?", { kind: "confirm", default: true });
+const first = await checkpoint("first?", { kind: "confirm" });
+const second = await checkpoint("second?", { kind: "confirm" });
 return { first, second };`;
     const paused = await testRun.manager.runSync(script, undefined, {
       runId: "two-gates",
       agentConfigurations: {},
       requireAgentConfiguration: true,
-      pauseOnCheckpoint: true,
     });
     assert.equal(paused.status, "paused");
     assert.equal(paused.checkpointContext?.callIndex, 0);
 
     const answered = await testRun.manager.continueRun("two-gates", {
       checkpointReplies: { 0: false },
-      pauseOnCheckpoint: true,
     });
     assert.equal(answered.accepted, true);
     if (!answered.accepted) assert.fail(answered.reason);
@@ -331,7 +329,7 @@ return { alpha, beta };`;
       runId: "cold-dispatch",
       agentConfigurations: selection,
       requireAgentConfiguration: true,
-      agentConfigurationSource: "mcp-elicitation",
+      agentConfigurationSource: "mcp-setup",
     });
     assert.equal(first.status, "failed");
     assert.deepEqual(dispatched.map((call) => call.model), ["claude/opus", "codex/gpt"]);

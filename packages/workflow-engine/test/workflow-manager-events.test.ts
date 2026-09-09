@@ -247,7 +247,7 @@ test("automatic error persists without a listener and checkpoint gates republish
       agent: { async run() { return "unused"; } },
     });
     const checkpoint = await checkpointManager.runSync(
-      script(`await checkpoint('approve', { headless: 'pause', kind: 'confirm' })`, "checkpoint-events"),
+      script(`await checkpoint('approve', { kind: 'confirm' })`, "checkpoint-events"),
     );
     const before = checkpointManager.getPersistence().load(checkpoint.runId);
     assert.equal(checkpoint.status, "paused");
@@ -290,7 +290,7 @@ test("resume replay republishes execution observations without cached journal ev
     };
     const source = script(
       `const value = await agent('cached', { label: 'cached' })
-const decision = await checkpoint('continue', { headless: 'pause' })
+const decision = await checkpoint('continue', { })
 return { value, decision }`,
       "replay-events",
     );

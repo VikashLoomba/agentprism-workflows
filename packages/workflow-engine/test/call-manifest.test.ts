@@ -37,13 +37,14 @@ describe("engine call manifest", () => {
         });
       },
     };
-    const result = await runWorkflow(
+    const calls: WorkflowCallRecord[] = [];
+    await assert.rejects(runWorkflow(
       meta(
         "terminal-exits",
         `const success = await agent('success', { label: 'success', schema: { type: 'object' } })
 const exhausted = await agent('empty', { label: 'empty', retries: 1 })
 try { await agent('hard', { label: 'hard' }) } catch {}
-const confirmed = await checkpoint('confirm?', { default: { accepted: true } })
+const confirmed = await checkpoint('confirm?')
 try { await checkpoint('bad?', { kind: 'input' }) } catch {}
 return { success, exhausted, confirmed }`,
       ),
@@ -51,14 +52,15 @@ return { success, exhausted, confirmed }`,
         runId: "manifest-run",
         agent: runner,
         persistLogs: false,
-        confirm: async (prompt) => (prompt === "bad?" ? undefined : true),
+        confirm: async (prompt) => (prompt === "bad?" ? new Map() : true),
+        onCallRecord: (record) => { calls.push(record); },
       },
-    );
+    ), (error: unknown) => error instanceof WorkflowError && error.code === WorkflowErrorCode.CHECKPOINT_REQUIRED);
 
-    assert.equal(result.callsAllocated, 5);
-    assert.deepEqual(result.calls?.map((row) => row.index), [0, 1, 2, 3, 4]);
-    assert.deepEqual(result.calls?.map((row) => row.settlementOrdinal), [1, 2, 3, 4, 5]);
-    const [success, exhausted, hard, confirmed, bad] = result.calls ?? [];
+    assert.equal(calls.length, 5);
+    assert.deepEqual(calls.map((row) => row.index), [0, 1, 2, 3, 4]);
+    assert.deepEqual(calls.map((row) => row.settlementOrdinal), [1, 2, 3, 4, 5]);
+    const [success, exhausted, hard, confirmed, bad] = calls;
     assert.deepEqual(
       {
         outcome: success.outcome,
@@ -89,7 +91,7 @@ return { success, exhausted, confirmed }`,
     assert.equal(confirmed.outcome, "result");
     assert.equal(bad.origin, "confirm");
     assert.equal(bad.outcome, "error");
-    assert.equal(bad.error?.code, WorkflowErrorCode.AGENT_EXECUTION_ERROR);
+    assert.equal(bad.error?.code, WorkflowErrorCode.CHECKPOINT_REQUIRED);
     assert.equal(Object.isFrozen(success), true);
   });
 
@@ -98,7 +100,7 @@ return { success, exhausted, confirmed }`,
     const script = meta(
       "replay-rows",
       `const a = await agent('a', { label: 'a' })
-const c = await checkpoint('c?', { default: 'yes' })
+const c = await checkpoint('c?')
 return { a, c }`,
     );
     const first = await runWorkflow(script, {
@@ -110,6 +112,7 @@ return { a, c }`,
         },
       },
       persistLogs: false,
+      confirm: async () => "yes",
       onAgentJournal: (entry) => journal.push(entry),
     });
     assert.equal(first.calls?.length, 2);

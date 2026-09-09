@@ -189,7 +189,7 @@ test("replay contributes no usage and background journal seeding survives a mult
     'phase("Work");',
     'const values = [];',
     'for (let i = 0; i < args.count; i++) values.push(await agent(`call-${i}`, { label: `call-${i}` }));',
-    'if (args.pause) values.push(await checkpoint("ship?", { headless: "pause", kind: "confirm" }));',
+    'if (args.pause) values.push(await checkpoint("ship?", { kind: "confirm" }));',
     "return values;",
   ].join("\n");
   const source = await sourceManager.runSync(script, { count: 10, pause: false });
@@ -231,6 +231,7 @@ test("replay contributes no usage and background journal seeding survives a mult
   const checkpoint = childPersisted?.checkpointContext;
   assert.ok(checkpoint);
   const synthetic: JournalEntry = {
+    checkpointDecision: "explicit-v1",
     index: checkpoint.callIndex,
     hash: checkpoint.hash,
     result: true,

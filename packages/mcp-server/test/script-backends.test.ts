@@ -1,218 +1,112 @@
-// The MCP shell's TRUST GATE for script-declared meta.backends:
-//   - client WITHOUT the elicitation capability -> informative tool error naming the
-import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
-
-//     AGENTPRISM_ALLOW_SCRIPT_BACKENDS env opt-in (never a silent drop, never a hang);
-//   - env opt-in set -> approved headlessly, registry threaded to the runner;
-//   - eliciting client: accept -> that run proceeds; a separate admission asks again, while
-//     same-ID continuation inherits the admitted backend snapshot; decline -> a clear error;
-//   - scripts without meta.backends are untouched by the gate.
+// Script-declared ACP commands require explicit, durable approval before any backend is opened.
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
-import type { AgentRunner, RunOptions } from "@automatalabs/shared-types";
-
-import { createWorkflowServer } from "../src/index.js";
-import { makeRunner, textOf, type ToolCallResult } from "./_harness.js";
+import { randomUUID } from "node:crypto";
+import type { RunOptions } from "@automatalabs/shared-types";
+import { connect, makeRunner, runAndObserve, structured, textOf, waitForRun } from "./_harness.js";
 
 const SCRIPT_WITH_BACKENDS = [
   'export const meta = { name: "sb", description: "d", backends: { browser: { command: "browser-acp", env: { HEADLESS: "1" } } } };',
   'return await agent("p", { model: "browser" });',
 ].join("\n");
+const PLAIN_SCRIPT = 'export const meta = { name: "plain", description: "d" }; return await agent("p", { model: "claude" });';
 
-const PLAIN_SCRIPT = 'export const meta = { name: "plain", description: "d" };\nreturn await agent("p", { model: "claude" });';
-
-function capturingRunner(): { runner: AgentRunner; backends: () => unknown } {
-  let captured: unknown;
-  const runner = makeRunner((_prompt, options: RunOptions) => {
-    captured = options.backends;
-    return "ok";
-  });
-  return { runner, backends: () => captured };
+function capturingRunner() {
+  const seen: RunOptions[] = [];
+  return { runner: makeRunner((_prompt, options) => { seen.push(options); return "ok"; }), seen };
 }
 
-interface ElicitingConnection {
-  client: Client;
-  callWorkflow: (script: string) => Promise<ToolCallResult>;
-  prompts: () => string[];
-  dispose: () => Promise<void>;
+afterEach(() => { delete process.env.AGENTPRISM_ALLOW_SCRIPT_BACKENDS; });
+
+async function pendingSetup(client: Parameters<typeof waitForRun>[0], script = SCRIPT_WITH_BACKENDS) {
+  const accepted = await client.callTool({ name: "workflow", arguments: { action: "run", requestId: randomUUID(), script } });
+  assert.equal(accepted.isError, false, textOf(accepted));
+  const runId = String(structured(accepted)?.runId);
+  const waiting = await waitForRun(client, runId, (status) => (status.setup as { state?: string })?.state === "input-required");
+  const request = (structured(waiting)?.setup as { request: { id: string; kind: string; message: string } }).request;
+  assert.equal(request.kind, "backend-approval");
+  return { runId, request };
 }
 
-/** Wire an in-memory client that DOES advertise elicitation, answering every request via
- *  `respond`. Mirrors _harness.connect() otherwise. */
-async function connectEliciting(
-  runner: AgentRunner,
-  respond: (message: string) => { action: "accept" | "decline" | "cancel"; approve?: boolean },
-): Promise<ElicitingConnection> {
-  const server = createWorkflowServer(runner);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "mcp-server-test", version: "0.0.0" }, { capabilities: { elicitation: {} } });
-  const prompts: string[] = [];
-  client.setRequestHandler('elicitation/create', async (request) => {
-    const schema = request.params.requestedSchema;
-    const required = schema.required ?? [];
-    if (required.some((field) => field.startsWith("agent_") && field.endsWith("_model"))) {
-      const content: Record<string, string> = {};
-      for (const field of required) {
-        const property = schema.properties[field] as { oneOf?: Array<{ const: string }> } | undefined;
-        const choices = property?.oneOf ?? [];
-        const preferred = choices.find((choice) => choice.const === "browser") ?? choices[0];
-        if (preferred) content[field] = preferred.const;
-      }
-      return { action: "accept" as const, content };
-    }
-    prompts.push(request.params.message);
-    const { action, approve } = respond(request.params.message);
-    return action === "accept" ? { action, content: { approve: approve ?? true } } : { action };
-  });
-  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-  return {
-    client,
-    prompts: () => prompts,
-    callWorkflow: (script: string) => client.callTool({ name: "workflow", arguments: { action: "run", script } }),
-    async dispose() {
-      await client.close();
-      await server.close();
-    },
-  };
-}
-
-/** Non-eliciting client (capabilities: {}), same in-memory wiring. */
-async function connectPlain(runner: AgentRunner) {
-  const server = createWorkflowServer(runner);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "mcp-server-test", version: "0.0.0" }, { capabilities: {} });
-  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-  return {
-    callWorkflow: (script: string) => client.callTool({ name: "workflow", arguments: { action: "run", script } }),
-    async dispose() {
-      await client.close();
-      await server.close();
-    },
-  };
-}
-
-afterEach(() => {
-  delete process.env.AGENTPRISM_ALLOW_SCRIPT_BACKENDS;
-});
-
-test("non-eliciting client + meta.backends -> informative tool error naming the env opt-in", async () => {
-  const { runner, backends } = capturingRunner();
-  const conn = await connectPlain(runner);
+test("a non-App client can inspect and answer backend approval without a held elicitation", async () => {
+  const { runner, seen } = capturingRunner();
+  const conn = await connect(runner, { listTools: true });
   try {
-    const res = await conn.callWorkflow(SCRIPT_WITH_BACKENDS);
-    assert.equal(res.isError, true);
-    assert.match(textOf(res), /does not support elicitation/);
-    assert.match(textOf(res), /AGENTPRISM_ALLOW_SCRIPT_BACKENDS=1/);
-    assert.match(textOf(res), /browser/);
-    assert.equal(backends(), undefined, "no run happened");
-  } finally {
-    await conn.dispose();
-  }
+    const { runId, request } = await pendingSetup(conn.client);
+    assert.match(request.message, /browser-acp/);
+    assert.match(request.message, /HEADLESS.*1/);
+    assert.equal(seen.length, 0);
+    const response = await conn.client.callTool({ name: "workflow", arguments: {
+      action: "setup-response", runId, setupId: request.id, response: { action: "accept", content: { approve: true } },
+    } });
+    assert.equal(response.isError, false, textOf(response));
+    const completed = await waitForRun(conn.client, runId);
+    assert.equal(structured(completed)?.status, "completed", textOf(completed));
+    assert.deepEqual(seen[0]?.backends, { browser: { command: "browser-acp", env: { HEADLESS: "1" } } });
+  } finally { await conn.dispose(); }
 });
 
-test("env opt-in approves headlessly; the registry reaches the runner", async () => {
+test("the explicit operator opt-in approves script backends and preserves their exact registry", async () => {
   process.env.AGENTPRISM_ALLOW_SCRIPT_BACKENDS = "1";
-  const { runner, backends } = capturingRunner();
-  const conn = await connectPlain(runner);
+  const { runner, seen } = capturingRunner();
+  const conn = await connect(runner);
   try {
-    const res = await conn.callWorkflow(SCRIPT_WITH_BACKENDS);
-    assert.equal(res.isError, false);
-    assert.deepEqual(backends(), { browser: { command: "browser-acp", env: { HEADLESS: "1" } } });
-  } finally {
-    await conn.dispose();
-  }
+    const completed = await runAndObserve(conn.client, { script: SCRIPT_WITH_BACKENDS });
+    assert.equal(structured(completed)?.status, "completed", textOf(completed));
+    assert.deepEqual(seen[0]?.backends, { browser: { command: "browser-acp", env: { HEADLESS: "1" } } });
+  } finally { await conn.dispose(); }
 });
 
-test("eliciting client: each new run admission explicitly approves the spawn config", async () => {
-  const { runner, backends } = capturingRunner();
-  const conn = await connectEliciting(runner, () => ({ action: "accept", approve: true }));
+test("each new run obtains its own approval; changed configuration cannot reuse a setup response", async () => {
+  const { runner, seen } = capturingRunner();
+  const conn = await connect(runner);
   try {
-    const first = await conn.callWorkflow(SCRIPT_WITH_BACKENDS);
-    assert.equal(first.isError, false);
-    assert.deepEqual(backends(), { browser: { command: "browser-acp", env: { HEADLESS: "1" } } });
-    assert.equal(conn.prompts().length, 1, "one elicitation for one backend");
-    assert.match(conn.prompts()[0], /browser-acp/);
-    assert.match(conn.prompts()[0], /HEADLESS=1/, "env is shown — it is part of the attack surface");
-
-    const second = await conn.callWorkflow(SCRIPT_WITH_BACKENDS);
-    assert.equal(second.isError, false);
-    assert.equal(conn.prompts().length, 2, "a distinct run admission obtains its own approval");
-  } finally {
-    await conn.dispose();
-  }
+    const first = await pendingSetup(conn.client);
+    const second = await pendingSetup(conn.client, SCRIPT_WITH_BACKENDS.replace("browser-acp", "different-acp"));
+    assert.notEqual(first.runId, second.runId);
+    assert.notEqual(first.request.id, second.request.id);
+    const stale = await conn.client.callTool({ name: "workflow", arguments: { action: "setup-response", runId: second.runId,
+      setupId: first.request.id, response: { action: "accept", content: { approve: true } } } });
+    assert.equal(stale.isError, true);
+    assert.equal(seen.length, 0);
+    for (const pending of [first, second]) await conn.client.callTool({ name: "workflow", arguments: { action: "stop", runId: pending.runId } });
+  } finally { await conn.dispose(); }
 });
 
-test("eliciting client: decline -> tool error naming the backend; the run never starts", async () => {
-  const { runner, backends } = capturingRunner();
-  const conn = await connectEliciting(runner, () => ({ action: "decline" }));
-  try {
-    const res = await conn.callWorkflow(SCRIPT_WITH_BACKENDS);
-    assert.equal(res.isError, true);
-    assert.match(textOf(res), /declined/);
-    assert.match(textOf(res), /"browser"/);
-    assert.equal(backends(), undefined);
-  } finally {
-    await conn.dispose();
-  }
-});
-
-test("eliciting client: accept-with-approve:false is a DENY (explicit false beats accept)", async () => {
-  const { runner } = capturingRunner();
-  const conn = await connectEliciting(runner, () => ({ action: "accept", approve: false }));
-  try {
-    const res = await conn.callWorkflow(SCRIPT_WITH_BACKENDS);
-    assert.equal(res.isError, true);
-    assert.match(textOf(res), /declined/);
-  } finally {
-    await conn.dispose();
-  }
-});
-
-test("scripts WITHOUT meta.backends never hit the backend-approval gate", async () => {
-  const { runner, backends } = capturingRunner();
-  const conn = await connectEliciting(runner, () => ({ action: "decline" }));
-  try {
-    const res = await conn.callWorkflow(PLAIN_SCRIPT);
-    assert.equal(res.isError, false);
-    assert.equal(conn.prompts().length, 0);
-    assert.equal(backends(), undefined);
-  } finally {
-    await conn.dispose();
-  }
-});
-
-test("same-ID continuation inherits the admitted backend snapshot without a second approval", async () => {
-  let failFirst = true;
-  const seenBackends: unknown[] = [];
-  const runner = makeRunner((_prompt, options: RunOptions) => {
-    seenBackends.push(options.backends);
-    if (failFirst) {
-      failFirst = false;
-      throw new Error("first attempt failed");
-    }
-    return "ok";
+for (const response of [{ action: "decline" }, { action: "cancel" }, { action: "accept", content: { approve: false } }] as const) {
+  test(`setup ${JSON.stringify(response)} records a cancelled run and never dispatches`, async () => {
+    const { runner, seen } = capturingRunner();
+    const conn = await connect(runner);
+    try {
+      const { runId, request } = await pendingSetup(conn.client);
+      const acknowledged = await conn.client.callTool({ name: "workflow", arguments: { action: "setup-response", runId, setupId: request.id, response } });
+      assert.equal(acknowledged.isError, false, textOf(acknowledged));
+      assert.equal(structured(acknowledged)?.status, "aborted");
+      assert.equal(structured(await waitForRun(conn.client, runId))?.status, "aborted");
+      assert.equal(seen.length, 0);
+    } finally { await conn.dispose(); }
   });
-  const conn = await connectEliciting(runner, () => ({ action: "accept", approve: true }));
-  try {
-    const script = [
-      'export const meta = { name: "sb-continue", description: "d", backends: { browser: { command: "browser-acp", env: { HEADLESS: "1" } } } };',
-      'const reply = await agent("p", { model: "browser" });',
-      'if (reply === null) throw new Error("retry me");',
-      "return reply;",
-    ].join("\n");
-    const failed = await conn.callWorkflow(script);
-    assert.equal((failed.structuredContent as { status?: string } | undefined)?.status, "failed");
-    assert.equal(conn.prompts().length, 1);
-    const runId = String((failed.structuredContent as { runId?: string }).runId);
+}
 
-    const continued = await conn.client.callTool({ name: "workflow", arguments: { action: "resume", runId } });
+test("scripts without custom backends need no approval and same-ID continuation inherits admitted backends", async () => {
+  const { runner, seen } = capturingRunner();
+  const conn = await connect(runner);
+  try {
+    const plain = await runAndObserve(conn.client, { script: PLAIN_SCRIPT });
+    assert.equal(structured(plain)?.status, "completed");
+    assert.equal(seen[0]?.backends, undefined);
+    const { runId, request } = await pendingSetup(conn.client, SCRIPT_WITH_BACKENDS.replace('return await agent("p", { model: "browser" });',
+      'await agent("p", { model: "browser" }); await checkpoint("continue?"); return await agent("q", { model: "browser" });'));
+    await conn.client.callTool({ name: "workflow", arguments: { action: "setup-response", runId, setupId: request.id, response: { action: "accept", content: { approve: true } } } });
+    const paused = await waitForRun(conn.client, runId);
+    const checkpoint = (structured(paused)?.outcome as { checkpointContext: { callIndex: number } }).checkpointContext;
+    const continued = await conn.client.callTool({ name: "workflow", arguments: { action: "resume", requestId: randomUUID(), runId,
+      checkpointReplies: { [checkpoint.callIndex]: true } } });
     assert.equal(continued.isError, false, textOf(continued));
-    assert.equal((continued.structuredContent as { status?: string }).status, "completed");
-    assert.equal(conn.prompts().length, 1, "the admitted backend approval is inherited, never re-asked");
-    assert.equal(seenBackends.length, 2);
-    assert.deepEqual(seenBackends[1], seenBackends[0]);
-    assert.ok((seenBackends[1] as Record<string, unknown>)?.browser);
-  } finally {
-    await conn.dispose();
-  }
+    const completed = await waitForRun(conn.client, runId);
+    assert.equal(structured(completed)?.status, "completed", textOf(completed));
+    assert.equal(structured(completed)?.setup, undefined);
+    assert.deepEqual(seen[2]?.backends, seen[1]?.backends);
+    assert.ok(seen[2]?.backends?.browser);
+  } finally { await conn.dispose(); }
 });

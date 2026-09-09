@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 // End-to-end over the BUILT dist: real MCP clients spawn the real shim (dist/entry.js),
 // which spawns the real daemon, all inside an isolated $HOME. Proves the migration's
 // user-visible contract: stdio clients keep working unchanged, exactly one daemon serves
@@ -120,11 +121,28 @@ async function connectShim(opts: { elicit?: () => ElicitResult; protocolMode?: "
 
 async function callWorkflow(client: Client): Promise<Record<string, unknown> | undefined> {
   const result = await client.callTool(
-    { name: "workflow", arguments: { action: "run", script: NO_AGENT_SCRIPT, projectDir: e2eHome } },
+    { name: "workflow", arguments: { action: "run", requestId: randomUUID(), script: NO_AGENT_SCRIPT, projectDir: e2eHome } },
     { timeout: 60_000 },
   );
   assert.equal(result.isError ?? false, false, JSON.stringify(result.content));
-  return result.structuredContent as Record<string, unknown> | undefined;
+  return await observeRun(client, String((result.structuredContent as { runId: string }).runId), "completed");
+}
+
+async function observeRun(
+  client: Client,
+  runId: string,
+  expected: string | ((snapshot: Record<string, unknown>) => boolean),
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 15_000;
+  let snapshot: Record<string, unknown> = {};
+  while (Date.now() < deadline) {
+    const result = await client.callTool({ name: "workflow", arguments: { action: "status", runId } });
+    assert.equal(result.isError ?? false, false, JSON.stringify(result.content));
+    snapshot = result.structuredContent as Record<string, unknown>;
+    if (typeof expected === "string" ? snapshot.status === expected : expected(snapshot)) return snapshot;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.fail(`Run ${runId} did not reach the expected state: ${JSON.stringify(snapshot)}`);
 }
 
 async function waitFor(predicate: () => boolean, what: string, timeoutMs = 15_000): Promise<void> {
@@ -191,6 +209,44 @@ test("a modern stdio client negotiates through the shim and survives daemon repl
   }
 });
 
+test("unanswered setup survives daemon death and the same client answers the stored request", async () => {
+  const session = await connectShim();
+  try {
+    const script = `export const meta = { name: "durable-setup", description: "setup survives daemon death", backends: { approvalOnly: { command: "never-invoked-acp-fixture" } } }; return 42;`;
+    const input = { action: "run", requestId: randomUUID(), script, projectDir: e2eHome };
+    const accepted = await session.client.callTool({ name: "workflow", arguments: input });
+    assert.equal(accepted.isError ?? false, false, JSON.stringify(accepted.content));
+    const runId = String((accepted.structuredContent as { runId: string }).runId);
+    const waiting = await observeRun(session.client, runId, (snapshot) =>
+      (snapshot.setup as { state?: string })?.state === "input-required");
+    const setup = waiting.setup as { request: { id: string; kind: string } };
+    assert.equal(setup.request.kind, "backend-approval");
+    const before = readInfo();
+    assert.ok(before);
+    process.kill(before.pid, "SIGKILL");
+    await waitFor(() => !pidAlive(before.pid), "setup owner to die");
+
+    const recovered = await observeRun(session.client, runId, (snapshot) =>
+      (snapshot.setup as { state?: string })?.state === "input-required");
+    assert.deepEqual(recovered.setup, waiting.setup, "recovery preserves the exact unanswered request");
+    const retry = await session.client.callTool({ name: "workflow", arguments: input });
+    assert.equal((retry.structuredContent as { runId: string }).runId, runId);
+    assert.equal((retry.structuredContent as { duplicate: boolean }).duplicate, true);
+    const response = { action: "setup-response", runId, setupId: setup.request.id,
+      response: { action: "accept", content: { approve: true } } };
+    const answered = await session.client.callTool({ name: "workflow", arguments: response });
+    assert.equal(answered.isError ?? false, false, JSON.stringify(answered.content));
+    await observeRun(session.client, runId, "completed");
+    const repeated = await session.client.callTool({ name: "workflow", arguments: response });
+    assert.equal(repeated.isError ?? false, false, JSON.stringify(repeated.content));
+    const exact = await session.client.callTool({ name: "workflow", arguments: { action: "result", runId } });
+    assert.equal((exact.structuredContent as { chunk: string }).chunk, "42");
+    assert.notEqual(readInfo()?.pid, before.pid);
+  } finally {
+    await session.close();
+  }
+});
+
 test("a connected shim transparently recovers when the daemon is killed mid-session", async () => {
   const session = await connectShim();
   assert.equal((await callWorkflow(session.client))?.status, "completed");
@@ -208,7 +264,7 @@ test("a connected shim transparently recovers when the daemon is killed mid-sess
   await session.close();
 });
 
-test("the full MCP feature surface works through the shim: prompts, resources, elicitation, subscriptions", async () => {
+test("the full MCP feature surface works through the shim: prompts, resources, durable checkpoints, subscriptions", async () => {
   const session = await connectShim({ elicit: () => ({ action: "accept", content: { choice: "alpha" } }) });
   try {
   // Prompts.
@@ -231,24 +287,27 @@ test("the full MCP feature surface works through the shim: prompts, resources, e
   assert.ok("text" in directSkill.contents[0]!);
   assert.match(String(directSkill.contents[0]!.text), /Workflow scripts: quickstart/);
 
-  // Elicitation: a foreground checkpoint answered by THIS client through the pump.
+  // A checkpoint remains unanswered until this client submits an explicit resume.
   const checkpointScript = [
     'export const meta = { name: "gate", description: "checkpoint gate" };',
-    'return await checkpoint("Pick one", { kind: "select", choices: ["alpha", "beta"], default: "beta" });',
+    'return await checkpoint("Pick one", { kind: "select", choices: ["alpha", "beta"] });',
   ].join("\n");
   const answered = await session.client.callTool(
-    { name: "workflow", arguments: { action: "run", script: checkpointScript, projectDir: e2eHome } },
+    { name: "workflow", arguments: { action: "run", requestId: randomUUID(), script: checkpointScript, projectDir: e2eHome } },
     { timeout: 60_000 },
   );
   assert.equal(answered.isError ?? false, false, JSON.stringify(answered.content));
-  assert.equal(
-    (answered.structuredContent as { result?: unknown }).result,
-    "alpha",
-    "the elicited choice should round-trip through the shim",
-  );
+  const runId = (answered.structuredContent as { runId: string }).runId;
+  await observeRun(session.client, runId, "paused");
+  const resumed = await session.client.callTool({ name: "workflow", arguments: {
+    action: "resume", requestId: randomUUID(), runId, checkpointReplies: { 0: "alpha" },
+  } });
+  assert.equal(resumed.isError ?? false, false, JSON.stringify(resumed.content));
+  await observeRun(session.client, runId, "completed");
+  const exact = await session.client.callTool({ name: "workflow", arguments: { action: "result", runId } });
+  assert.equal((exact.structuredContent as { chunk: string }).chunk, '"alpha"');
 
   // Resources: the admitted script is listed and readable verbatim.
-  const runId = (answered.structuredContent as { runId: string }).runId;
   const scriptUri = `workflow://runs/${runId}/script`;
   const listed = await session.client.listResources();
   assert.ok(listed.resources.some((resource) => resource.uri === scriptUri));
@@ -259,14 +318,15 @@ test("the full MCP feature surface works through the shim: prompts, resources, e
   // stop appends events — the updated notification must arrive on the shim's GET stream.
   const pausingScript = [
     'export const meta = { name: "pause-gate", description: "durable checkpoint pause" };',
-    'return await checkpoint("gate", { headless: "pause" });',
+    'return await checkpoint("gate");',
   ].join("\n");
   const startedBg = await session.client.callTool(
-    { name: "workflow", arguments: { action: "run", script: pausingScript, background: true, projectDir: e2eHome } },
+    { name: "workflow", arguments: { action: "run", requestId: randomUUID(), script: pausingScript, projectDir: e2eHome } },
     { timeout: 60_000 },
   );
   assert.equal(startedBg.isError ?? false, false, JSON.stringify(startedBg.content));
   const bgRunId = (startedBg.structuredContent as { runId: string }).runId;
+  await observeRun(session.client, bgRunId, "paused");
   const eventsUri = `workflow://runs/${bgRunId}/events`;
   await session.client.subscribeResource({ uri: eventsUri });
   await session.client.callTool(
@@ -285,13 +345,14 @@ test("subscriptions survive daemon death: the shim re-subscribes on session reco
     // A paused background run gives a durable, subscribable events resource.
     const pausingScript = [
       'export const meta = { name: "pause-gate-2", description: "durable checkpoint pause" };',
-      'return await checkpoint("gate", { headless: "pause" });',
+      'return await checkpoint("gate");',
     ].join("\n");
     const started = await session.client.callTool(
-      { name: "workflow", arguments: { action: "run", script: pausingScript, background: true, projectDir: e2eHome } },
+      { name: "workflow", arguments: { action: "run", requestId: randomUUID(), script: pausingScript, projectDir: e2eHome } },
       { timeout: 60_000 },
     );
     const runId = (started.structuredContent as { runId: string }).runId;
+    await observeRun(session.client, runId, "paused");
     const eventsUri = `workflow://runs/${runId}/events`;
     await session.client.subscribeResource({ uri: eventsUri });
 
@@ -318,13 +379,14 @@ test("subscriptions survive daemon death: the shim re-subscribes on session reco
     // recovered session's GET stream.
     const secondScript = [
       'export const meta = { name: "pause-gate-3", description: "durable checkpoint pause" };',
-      'return await checkpoint("gate", { headless: "pause" });',
+      'return await checkpoint("gate");',
     ].join("\n");
     const second = await session.client.callTool(
-      { name: "workflow", arguments: { action: "run", script: secondScript, background: true, projectDir: e2eHome } },
+      { name: "workflow", arguments: { action: "run", requestId: randomUUID(), script: secondScript, projectDir: e2eHome } },
       { timeout: 60_000 },
     );
     const secondRunId = (second.structuredContent as { runId: string }).runId;
+    await observeRun(session.client, secondRunId, "paused");
     const secondEventsUri = `workflow://runs/${secondRunId}/events`;
     await session.client.subscribeResource({ uri: secondEventsUri });
     await session.client.callTool(

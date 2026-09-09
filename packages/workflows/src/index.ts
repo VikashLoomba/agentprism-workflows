@@ -141,6 +141,9 @@ export type {
   WorkflowAgentCallCancellation,
   WorkflowContinuationRefusalReason,
   WorkflowContinuationStart,
+  WorkflowOperationIdentity,
+  WorkflowPreparation,
+  PersistedWorkflowContinuationOperation,
   PersistedRunStopResult,
   AgentOptions,
   ExecOptions,
@@ -544,6 +547,21 @@ export class WorkflowManager extends EngineWorkflowManager {
     const releaseBridge = this.acquireAcpRunnerBridge(exec.agent);
     try {
       const started = super.startInBackground(script, args, exec);
+      void started.promise.then(releaseBridge, releaseBridge);
+      return started;
+    } catch (error) {
+      releaseBridge();
+      throw error;
+    }
+  }
+
+  override admitPreparedRun(
+    runId: string,
+    exec: ExecOptions,
+  ): { runId: string; promise: Promise<WorkflowRunResult> } {
+    const releaseBridge = this.acquireAcpRunnerBridge(exec.agent);
+    try {
+      const started = super.admitPreparedRun(runId, exec);
       void started.promise.then(releaseBridge, releaseBridge);
       return started;
     } catch (error) {

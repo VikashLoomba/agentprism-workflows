@@ -7,6 +7,7 @@ import test from "node:test";
 import type { CheckpointContext } from "@automatalabs/shared-types";
 import { WorkflowError, WorkflowErrorCode } from "../src/errors.js";
 import type { PersistedRunState, RunPersistence } from "../src/run-persistence.js";
+import { projectRunEventForPersistence } from "../src/run-observability.js";
 import { WorkflowManager } from "../src/workflow-manager.js";
 import type { JournalEntry } from "../src/workflow.js";
 import { runWorkflow } from "../src/workflow.js";
@@ -22,10 +23,8 @@ const DURABLE_CHOICES = ["ship", "hold"];
 const DURABLE_SCRIPT = `export const meta = { name: 'durable-checkpoint', description: 'durable checkpoint' }
 const prefix = await agent('before', { label: 'before' })
 const decision = await checkpoint('${DURABLE_PROMPT}', {
-  headless: 'pause',
   kind: 'select',
   choices: ['ship', 'hold'],
-  default: 'hold'
 })
 const after = await agent('after:' + decision, { label: 'after' })
 return { prefix, decision, after }`;
@@ -104,84 +103,121 @@ function field(value: unknown, key: string): unknown {
   return value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined;
 }
 
-test("checkpoint(): headless takes the declared default and journals it", async () => {
-  const journal: JournalEntry[] = [];
-  const script = `export const meta = { name: 'c', description: 'checkpoint' }
-const ok = await checkpoint('Approve plan?', { default: true })
-const name = await checkpoint('Pick a name', { default: 'fallback' })
-return { ok, name }`;
-  const res = await runWorkflow<{ ok: boolean; name: string }>(script, {
-    agent: noopAgent,
-    persistLogs: false,
-    onAgentJournal: (e) => journal.push(e),
+for (const retired of [{ headless: "default" }, { headless: "abort" }, { headless: "pause" }, { default: true }, { default: false }]) {
+  test(`checkpoint(): rejects retired options ${JSON.stringify(retired)} before asking`, async () => {
+    let asks = 0;
+    await assert.rejects(runWorkflow(`export const meta = { name: 'c', description: 'checkpoint' }
+return await checkpoint('Approve?', ${JSON.stringify(retired)})`, {
+      agent: noopAgent, persistLogs: false, confirm: async () => { asks++; return true; },
+    }), (error: unknown) => error instanceof WorkflowError && error.code === WorkflowErrorCode.SCRIPT_VALIDATION_ERROR);
+    assert.equal(asks, 0);
   });
-  assert.equal(res.result.ok, true);
-  assert.equal(res.result.name, "fallback");
-  assert.equal(journal.length, 2, "both checkpoints journaled");
-  assert.deepEqual(res.checkpointsTaken, [
-    { callIndex: 0, kind: "confirm", decision: true, source: "headless-default" },
-    { callIndex: 1, kind: "confirm", decision: "fallback", source: "headless-default" },
-  ]);
-});
+}
 
-test("checkpoint(): headless 'abort' throws when no UI is threaded in", async () => {
-  const script = `export const meta = { name: 'c', description: 'checkpoint' }
-await checkpoint('Approve?', { headless: 'abort' })
-return 1`;
-  await assert.rejects(() => runWorkflow(script, { agent: noopAgent, persistLogs: false }), /human input|headless/i);
-});
-
-test("checkpoint(): uses the threaded confirm when present", async () => {
-  let asked = "";
-  const script = `export const meta = { name: 'c', description: 'checkpoint' }
-return await checkpoint('Proceed?', { kind: 'confirm' })`;
-  const res = await runWorkflow<string>(script, {
-    agent: noopAgent,
-    persistLogs: false,
-    confirm: async (p) => {
-      asked = p;
-      return "yes";
-    },
+for (const answer of [false, null, "", 0, { approved: true }]) {
+  test(`checkpoint(): preserves the explicit answer ${JSON.stringify(answer)}`, async () => {
+    const journal: JournalEntry[] = [];
+    const result = await runWorkflow(`export const meta = { name: 'c', description: 'checkpoint' }
+return await checkpoint('Proceed?')`, {
+      agent: noopAgent, persistLogs: false, confirm: async () => answer,
+      onAgentJournal: entry => journal.push(entry),
+    });
+    assert.deepEqual(result.result, answer);
+    assert.equal(journal[0].checkpointDecision, "explicit-v1");
+    assert.equal(result.calls?.[0].checkpointDecision, "explicit-v1");
+    assert.equal(result.checkpointsTaken?.[0].source, "live");
   });
-  assert.equal(res.result, "yes");
-  assert.equal(asked, "Proceed?");
-  assert.deepEqual(res.checkpointsTaken, [
-    { callIndex: 0, kind: "confirm", decision: "yes", source: "live" },
-  ]);
-});
+}
 
-test("checkpoint(): headless 'pause' still uses a live confirm when one is threaded", async () => {
-  let calls = 0;
-  const script = `export const meta = { name: 'c', description: 'checkpoint' }
-return await checkpoint('Proceed?', { headless: 'pause', default: false })`;
-  const result = await runWorkflow<string>(script, {
-    agent: noopAgent,
-    persistLogs: false,
-    confirm: async () => {
-      calls++;
-      return "live-approved";
-    },
-  });
-
-  assert.equal(result.result, "live-approved");
-  assert.equal(calls, 1, "the live channel wins over headless:'pause'");
-});
-
-test("checkpoint(): pauseOnCheckpoint overrides a headless default for protocol multi-round-trip serving", async () => {
-  const script = `export const meta = { name: 'c', description: 'checkpoint' }
-return await checkpoint('Proceed?', { kind: 'confirm', default: false, timeoutMs: 250 })`;
-  await assert.rejects(
-    () => runWorkflow(script, { agent: noopAgent, persistLogs: false, pauseOnCheckpoint: true }),
-    (error: unknown) => {
+for (const channel of ["absent", "undefined", "rejected", "timeout"] as const) {
+  test(`checkpoint(): ${channel} answer channel pauses even when the script catches`, async () => {
+    let dispatched = 0;
+    const journal: JournalEntry[] = [];
+    const confirm = channel === "absent" ? undefined : channel === "undefined" ? async () => undefined
+      : channel === "rejected" ? async () => { throw new Error("panel dismissed"); }
+      : () => new Promise<unknown>(() => {});
+    await assert.rejects(runWorkflow(`export const meta = { name: 'c', description: 'checkpoint' }
+try { await checkpoint('Proceed?', { timeoutMs: 10 }) } catch {}
+try { await agent('must not run') } catch {}
+return 'must not complete'`, {
+      agent: { async run() { dispatched++; return "unsafe"; } }, persistLogs: false, confirm,
+      onAgentJournal: entry => journal.push(entry),
+    }), (error: unknown) => {
       assert.ok(error instanceof WorkflowError);
       assert.equal(error.code, WorkflowErrorCode.CHECKPOINT_REQUIRED);
       assert.equal(error.checkpointContext?.prompt, "Proceed?");
-      assert.equal(error.checkpointContext?.default, false);
-      assert.equal(error.checkpointContext?.timeoutMs, 250);
+      assert.equal(error.checkpointContext?.timeoutMs, 10);
+      assert.equal(Object.hasOwn(error.checkpointContext!, "default"), false);
       return true;
-    },
-  );
+    });
+    assert.equal(dispatched, 0);
+    assert.deepEqual(journal, []);
+  });
+}
+
+test("checkpoint-only completion reports zero agents while retaining its separate call count", async () => {
+  const result = await runWorkflow(`export const meta = { name: "checkpoint-count", description: "no agent work" };
+return await checkpoint("Continue?");`, { agent: noopAgent, persistLogs: false, confirm: async () => true });
+  assert.equal(result.agentCount, 0);
+  assert.equal(result.calls?.length, 1);
+  const persisted = projectRunEventForPersistence({
+    type: "complete", runId: result.runId, scope: result.runId, result: { ...result, status: "completed" },
+  });
+  assert.equal(persisted.event.type, "complete");
+  if (persisted.event.type !== "complete") assert.fail("expected completion summary");
+  assert.equal(persisted.event.summary.agentCount, 0);
+  assert.equal(persisted.event.summary.callCount, 1);
 });
+
+test("checkpoint(): explicit cancellation interrupts an unanswered SDK callback", async () => {
+  const controller = new AbortController();
+  let opened!: () => void;
+  const ready = new Promise<void>(resolve => { opened = resolve; });
+  const running = runWorkflow(`export const meta = { name: 'c', description: 'checkpoint' }
+return await checkpoint('Proceed?')`, {
+    agent: noopAgent, persistLogs: false, signal: controller.signal,
+    confirm: () => { opened(); return new Promise(() => {}); },
+  });
+  await ready;
+  controller.abort();
+  await assert.rejects(running, (error: unknown) => error instanceof WorkflowError && error.code === WorkflowErrorCode.WORKFLOW_ABORTED);
+});
+
+for (const [label, invalidReply] of [
+  ["function", () => () => true],
+  ["non-finite number", () => Number.NaN],
+  ["undefined property", () => ({ approved: undefined })],
+  ["cyclic object", () => { const value: { self?: unknown } = {}; value.self = value; return value; }],
+] as const) {
+  test(`checkpoint(): invalid ${label} reply cannot be caught to bypass and can resume cold`, withTempPersistenceDirs(async (persistenceRoot, cwd) => {
+    let dispatched = 0;
+    const runner = { async run() { dispatched++; return "done"; } };
+    const script = `export const meta = { name: "invalid-checkpoint-answer", description: "must wait for valid JSON" };
+let answer;
+try { answer = await checkpoint("Approve?"); } catch {}
+try { await agent("after explicit answer"); } catch {}
+return answer;`;
+    const first = new WorkflowManager({ cwd, persistenceRoot, agent: runner });
+    const paused = await first.runSync(script, undefined, { confirm: async () => invalidReply() });
+    assert.equal(paused.status, "paused");
+    assert.equal(paused.reason, "checkpoint_required");
+    assert.equal(paused.checkpointContext?.callIndex, 0);
+    assert.equal(dispatched, 0, "invalid confirmation cannot authorize later live work");
+    const persisted = first.getPersistence().load(paused.runId)!;
+    assert.deepEqual(persisted.journal, []);
+    assert.equal(persisted.calls?.[0].checkpointDecision, undefined);
+
+    const cold = new WorkflowManager({ cwd, persistenceRoot, agent: runner });
+    const resumed = await cold.resumeInBackground(paused.runId, { checkpointReplies: { "0": false } });
+    assert.equal(resumed.accepted, true);
+    if (!resumed.accepted) assert.fail("a later explicit valid reply should continue");
+    const completed = await resumed.promise;
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.result, false);
+    assert.equal(dispatched, 1);
+    assert.equal(cold.getPersistence().load(paused.runId)?.journal?.[0].checkpointDecision, "explicit-v1");
+  }));
+}
 
 test("checkpoint(): replays the journaled reply on resume (no re-prompt)", async () => {
   const script = `export const meta = { name: 'c', description: 'checkpoint' }
@@ -213,13 +249,37 @@ return { r }`;
   ]);
 });
 
+test("checkpoints do not shift strict host configuration ordinals across cold continuation", withTempPersistenceDirs(async (persistenceRoot, cwd) => {
+  const models: Array<string | undefined> = [];
+  const runner = { async run(_prompt: string, options?: { model?: string }) { models.push(options?.model); return "done"; } };
+  const script = `export const meta = { name: "checkpoint-routing", description: "host selections after a gate" }
+await agent("before")
+await checkpoint("Continue?")
+return await agent("after")`;
+  const first = new WorkflowManager({ cwd, persistenceRoot, agent: runner });
+  const paused = await first.runSync(script, undefined, {
+    requireAgentConfiguration: true,
+    agentConfigurations: { 0: { model: "claude/first" }, 1: { model: "codex/second" } },
+  });
+  assert.equal(paused.status, "paused");
+  assert.deepEqual(models, ["claude/first"]);
+  const cold = new WorkflowManager({ cwd, persistenceRoot, agent: runner });
+  const resumed = await cold.resumeInBackground(paused.runId, { checkpointReplies: { "1": true } });
+  assert.equal(resumed.accepted, true);
+  if (!resumed.accepted) assert.fail("explicit answer should continue");
+  const completed = await resumed.promise;
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.agentCount, 2);
+  assert.deepEqual(models, ["claude/first", "codex/second"]);
+}));
+
 test("checkpoint(): counts against maxAgents (no tokens, but bounded)", async () => {
   const script = `export const meta = { name: 'c', description: 'checkpoint' }
-await checkpoint('a', { default: 1 })
-await checkpoint('b', { default: 1 })
-await checkpoint('c', { default: 1 })
+await checkpoint('a')
+await checkpoint('b')
+await checkpoint('c')
 return 1`;
-  await assert.rejects(() => runWorkflow(script, { agent: noopAgent, persistLogs: false, maxAgents: 2 }), /limit/i);
+  await assert.rejects(() => runWorkflow(script, { agent: noopAgent, persistLogs: false, maxAgents: 2, confirm: async () => 1 }), /limit/i);
 });
 
 test(
@@ -253,7 +313,7 @@ test(
     assert.equal(context.prompt, DURABLE_PROMPT);
     assert.equal(context.kind, "select");
     assert.deepEqual(Array.from(context.choices ?? []), DURABLE_CHOICES);
-    assert.equal(context.default, "hold");
+    assert.equal(Object.hasOwn(context, "default"), false);
     assert.equal(paused.authContext, undefined);
     assert.equal(paused.resetHint, undefined);
     assert.equal(paused.checkpointsTaken, undefined, "a checkpoint that pauses has not resolved");
