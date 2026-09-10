@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RunEventLogRecord } from "@automatalabs/shared-types";
-import { CONTEXT_MAX_CHARS, createModelMessageState, discussionMessage, modelMessageText, selectionContext, sendAutomaticMessage, sendModelMessagesForFold, sendRequiredInputMessages } from "../ui/src/model-messages.js";
+import { createModelMessageState, discussionMessage, modelMessageText, selectionContext, sendAutomaticMessage, sendModelMessagesForFold, sendRequiredInputMessages } from "../ui/src/model-messages.js";
 import { createRunModel } from "../ui/src/state.js";
 import { MockHost, MockRunStore } from "../ui/src/mock-host.js";
 
@@ -43,14 +43,14 @@ test("required setup, permissions, checkpoints notify even on opening, without r
   }
 });
 
-test("routine activity and phases are quiet; context is bounded, run-scoped and does not copy transcripts", () => {
+test("routine activity and phases are quiet; context is run-scoped, carries the agent's error as reported, and does not copy transcripts", () => {
   assert.equal(modelMessageText("run-a", record(1, "phase").event), undefined);
   const model = createRunModel("run-a"); model.name = "Flow"; model.phases = ["Research"];
   model.nodes.set(0, { callIndex: 0, label: "Research transport", status: "error", startSeq: 1, errorText: "token=secret-value " + "failure ".repeat(1000), transcript: new Map([["entry", { revision: 1, row: { order: 1, kind: "text", text: "PRIVATE TRANSCRIPT" } }]]), progress: [] });
   const selection = { kind: "agent", callIndex: 0 } as const;
   const context = selectionContext(model, selection);
-  assert.ok(context.length <= CONTEXT_MAX_CHARS); assert.match(context, /"runId":"run-a"/); assert.match(context, /"callIndex":0/);
-  assert.match(context, /\[redacted\]/); assert.doesNotMatch(context, /secret-value|PRIVATE TRANSCRIPT/);
+  assert.match(context, /"runId":"run-a"/); assert.match(context, /"callIndex":0/);
+  assert.match(context, /token=secret-value failure failure/); assert.doesNotMatch(context, /PRIVATE TRANSCRIPT/);
   assert.match(discussionMessage(model, selection), /Please discuss/);
 });
 

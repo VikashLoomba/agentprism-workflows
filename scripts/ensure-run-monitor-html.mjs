@@ -40,7 +40,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Bump when the embedding/header format changes so every checkout regenerates on next build.
-const FORMAT_VERSION = "2";
+const FORMAT_VERSION = "3";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const mcpServerDir = join(repoRoot, "packages", "mcp-server");
@@ -102,6 +102,9 @@ function toolchainVersions() {
   return out;
 }
 
+// ---- server modules the UI bundle imports (outside ui/, so the walk above cannot see them) -------
+const sharedInputs = [join(mcpServerDir, "src", "run-notices.ts")];
+
 // ---- compute the expected source hash ------------------------------------------------------------
 function computeSourceHash() {
   const inputs = collectInputs(uiDir);
@@ -111,8 +114,8 @@ function computeSourceHash() {
   const manifest = createHash("sha256");
   manifest.update(`format:${FORMAT_VERSION}\n`);
   manifest.update(`toolchain:${JSON.stringify(toolchainVersions())}\n`);
-  for (const file of inputs) {
-    const rel = relative(uiDir, file).split(sep).join("/");
+  for (const file of [...inputs, ...sharedInputs]) {
+    const rel = relative(mcpServerDir, file).split(sep).join("/");
     const bytes = readFileSync(file);
     manifest.update(`${rel}:${createHash("sha256").update(bytes).digest("hex")}\n`);
   }

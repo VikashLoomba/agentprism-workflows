@@ -39,6 +39,7 @@ import type {
 } from "@automatalabs/workflows";
 import type { AgentRunner, TokenUsage } from "@automatalabs/shared-types";
 import { boundWorkflowRequest, workflowLifecycle, workflowOperation, workflowSetup } from "./workflow-lifecycle.js";
+import { CLAUDE_CHANNEL_CAPABILITY, ClaudeChannelNotifier } from "./channel-notifier.js";
 import {
   createEvalBreakChannel,
   loadShippedWasm,
@@ -143,6 +144,13 @@ export const SERVER_INSTRUCTIONS = [
     "on inspecting intermediate results.",
   "Rule of thumb: use workflow when you can script the whole plan ahead of time; use repl when you " +
     "want a live session that evolves call by call.",
+  "Claude Code channels: when this server is loaded as a channel, the updates the run monitor would " +
+    "show arrive as <channel source=\"<this server's configured name>\" run_id=\"…\" " +
+    "kind=\"terminal|paused|checkpoint|permission|setup\" status=\"…\"> events for every workflow run " +
+    "this session started, resumed, or inspected with action:\"status\". They are informational and " +
+    "need no reply through the channel: act on them with the workflow tool — status to read the exact " +
+    "pending setup, permission, or checkpoint, then setup-response, permissions-response, or resume, " +
+    "and result after completion.",
 ].join("\n\n");
 
 export { ActiveRunRegistry, MAX_ACTIVE_RUNS } from "./project-registry.js";
@@ -884,6 +892,8 @@ export function createWorkflowServer(
       [EXTENSION_ID]: {},
       [SKILLS_EXTENSION_ID]: { directoryRead: true },
     },
+    // Claude Code registers a channel listener on this key; every other host ignores it.
+    experimental: { [CLAUDE_CHANNEL_CAPABILITY]: {} },
   });
 
   // Composition root: the ACP-backed AgentRunner is injected into the engine here. Each
@@ -896,6 +906,10 @@ export function createWorkflowServer(
     ? undefined
     : projects.adopt(options.manager ?? new WorkflowManager({ agent: runner }), options.activeRuns);
   const scriptResources = new WorkflowScriptResources(mcp, { router: projects }, options.modernNotifier);
+  // Channel delivery is the run monitor's automatic messages sent by this session's server. Claude
+  // Code only registers a channel over the legacy handshake, and modern per-request instances have
+  // no push stream for it, so only legacy-era instances watch runs.
+  const channel = options.protocolEra === "modern" ? undefined : new ClaudeChannelNotifier(mcp, projects, permissionBroker);
   registerAuthoringSkills(mcp, {
     registerResourceReader: (uri, read) => scriptResources.registerExternalResourceReader(uri, read),
   });
@@ -1437,6 +1451,9 @@ export function createWorkflowServer(
             isError: true,
           };
         }
+        // Inspecting a run attaches this session to its later updates; the response below carries
+        // everything that already happened, so nothing is replayed.
+        channel?.watch(parsedInput.runId);
 
         // Observation never owns an input wait or execution lifetime.
         const tokenUsage = currentTokenUsage(manager, parsedInput.runId);
@@ -1529,6 +1546,7 @@ export function createWorkflowServer(
             context.activeRuns.track(input.runId, started.promise);
             reserved = false;
           }
+          channel?.watch(input.runId);
           const state = manager.getPersistence().load(input.runId)!;
           return { structuredContent: { action: "resume", accepted: true, runId: input.runId, requestId: input.requestId,
               duplicate: started.duplicate === true, continuation: started.continuation,
@@ -1541,6 +1559,7 @@ export function createWorkflowServer(
       const accepted = lifecycle.accept(parsedInput);
       const state = manager.getPersistence().load(accepted.runId)!;
       scriptResources.notifyRunAdmitted(accepted.runId);
+      channel?.watch(accepted.runId);
       return {
         structuredContent: { action: "run", accepted: true, runId: accepted.runId, requestId: parsedInput.requestId,
           duplicate: accepted.duplicate, status: state.status, scriptSource: parsedInput.script === undefined ? "path" : "inline",
@@ -1629,6 +1648,17 @@ export function createWorkflowServer(
           replPresence.disconnect(clientId);
           replPresence.forget(clientId);
         }
+      }
+    };
+  }
+
+  if (channel) {
+    const previousOnClose = mcp.server.onclose;
+    mcp.server.onclose = () => {
+      try {
+        previousOnClose?.();
+      } finally {
+        channel.close();
       }
     };
   }

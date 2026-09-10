@@ -77,6 +77,49 @@ basic-host setup. `AGENTPRISM_DEV_CWD=<project dir>` serves an existing run stor
 
 ---
 
+## Claude Code channels
+
+Claude Code cannot render the run monitor, so the server delivers the monitor's automatic messages
+to it another way: as [Claude Code channel](https://code.claude.com/docs/en/channels-reference)
+notifications. The server declares `capabilities.experimental["claude/channel"]` and emits
+`notifications/claude/channel` for exactly what the panel would have injected, with the same wording
+and ids:
+
+| Update | When | `kind` |
+| :-- | :-- | :-- |
+| Run completed, failed, or stopped | the terminal run event | `terminal` |
+| Checkpoint waiting for an answer | the run pauses on `checkpoint()` | `checkpoint` |
+| Auth, usage-limit, or manual pause | the run pauses for another reason | `paused` |
+| Permission request parked | a subagent asks for permission | `permission` |
+| Setup request waiting | preparation needs a backend approval | `setup` |
+
+Each notification carries the message as `content` and `meta: { run_id, kind, status, event_id }`;
+Claude sees it as `<channel source="<server name>" run_id="…" kind="…" status="…">…</channel>`.
+Phase starts, progress, and usage churn stay quiet, as in the panel.
+
+**Which session receives a run's updates.** Every MCP client has its own server instance, so a
+session receives updates only for the runs its own `run`, `resume`, or `status` calls named. Other
+clients of the shared daemon, including other Claude Code sessions, never see them. A restarted or
+resumed Claude Code session re-attaches the moment it inspects the run with `status`; nothing is
+replayed, because that status response already carries what happened while it was away.
+
+**Enabling it.** Channels are a Claude Code research preview and are opt-in per session. A server
+from `.mcp.json` is not on the preview allowlist, so launch Claude Code with the development flag,
+naming the key you registered the server under:
+
+```bash
+claude --dangerously-load-development-channels server:agentprism-workflows
+```
+
+Neither that flag nor `--channels` appears in `claude --help` during the preview; both work. Team,
+Enterprise, and managed Console organizations must enable `channelsEnabled` first, and channels are
+unavailable on Amazon Bedrock, Google Cloud's Agent Platform, and Microsoft Foundry. Hosts that
+never registered the channel drop the notification silently, so declaring it costs nothing
+elsewhere. Claude Code registers a channel only over the 2025 handshake: do not set
+`MCP_PROTOCOL_NEGOTIATION=auto` for this server if you want channel delivery.
+
+---
+
 ## Install
 
 ```bash

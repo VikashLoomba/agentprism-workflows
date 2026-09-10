@@ -30,6 +30,25 @@ export interface WorkflowSetupRequest {
 
 export type WorkflowSetup = { state: "preparing" } | { state: "input-required"; request: WorkflowSetupRequest };
 
+export interface WorkflowSetupRequiredEvent {
+  runId: string;
+  request: WorkflowSetupRequest;
+}
+
+const setupRequiredListeners = new Set<(event: WorkflowSetupRequiredEvent) => void>();
+
+/**
+ * Fired once per setup request, after the run's preparation is durably `input-required`. Process
+ * scope, like the permission broker: preparation is owned by the process executing the run, and
+ * each server instance filters for the runs its own session named. Returns detach.
+ */
+export function onSetupRequired(listener: (event: WorkflowSetupRequiredEvent) => void): () => void {
+  setupRequiredListeners.add(listener);
+  return () => {
+    setupRequiredListeners.delete(listener);
+  };
+}
+
 interface PreparationData extends Record<string, unknown> {
   approvedKeys: string[];
   setup?: WorkflowSetupRequest;
@@ -275,7 +294,9 @@ export class WorkflowLifecycle {
           message: `Workflow wants to spawn custom ACP backend "${name}":\n${redactText(`${config.command} ${(config.args ?? []).join(" ")}`).value}\nEnvironment: ${redactText(JSON.stringify(config.env ?? {})).value}. Approve this command?`,
           requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve" } }, required: ["approve"], additionalProperties: false },
         };
-        if (!expired) this.save(runId, data, revision);
+        if (expired) return;
+        this.save(runId, data, revision);
+        for (const listener of setupRequiredListeners) listener({ runId, request: structuredClone(data.setup) });
         return;
       }
       const preflight = await validateWorkflowScript(script, {
