@@ -305,6 +305,15 @@ export class WorkflowPermissionBroker {
     this.detachEvents = source.on("permission_request", (event) => this.observeFinalOutcome(event));
   }
 
+  /** Fired once per parked request with its public projection; returns detach. */
+  onPending(listener: (permission: WorkflowPendingPermission) => void): () => void {
+    const handler = (permission: WorkflowPendingPermission) => listener(structuredClone(permission));
+    this.changed.on("pending", handler);
+    return () => {
+      this.changed.off("pending", handler);
+    };
+  }
+
   dispose(): void {
     this.detachEvents?.();
     this.detachEvents = undefined;
@@ -408,6 +417,7 @@ export class WorkflowPermissionBroker {
       this.idsByRun.set(context.runId, runIds);
       this.changed.emit(`run:${context.runId}`);
       this.changed.emit(`pending:${context.runId}`);
+      this.changed.emit("pending", entry.public);
     });
   }
 

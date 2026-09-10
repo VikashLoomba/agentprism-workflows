@@ -1,31 +1,27 @@
 // Quiet selection context and explicit/required notifications are distinct host operations.
 // Automatic delivery is arbitrated by the server across independent/reopened app instances.
+// The wording and ids live in src/run-notices.ts, shared with the server's Claude Code channel
+// delivery so both paths say exactly the same thing about a run.
 import type { App } from "@modelcontextprotocol/ext-apps";
 import type {
   PersistedRunEvent,
   RunEventLogRecord,
 } from "@automatalabs/shared-types";
+import {
+  pausedNotice,
+  permissionNotice,
+  setupNotice,
+  terminalNoticeText,
+  type RunNotice,
+} from "../../src/run-notices.js";
 import type { NodeSelection } from "./GraphView.js";
 import type { RunModel } from "./state.js";
 import type { RunStatusSnapshot } from "./run-status.js";
 
-export const CONTEXT_MAX_CHARS = 1600;
 export type MessageApp = Pick<
   App,
   "sendMessage" | "callServerTool" | "getHostCapabilities"
 >;
-
-/** No transcript, prompt, source, or exact result is copied into automatic model context. */
-function bounded(value: string, length: number): string {
-  return value
-    .replace(/\b(?:sk-[A-Za-z0-9_-]+|Bearer\s+\S+)/gi, "[redacted]")
-    .replace(
-      /\b(api[_-]?key|token|password|secret)\s*[:=]\s*\S+/gi,
-      "$1=[redacted]",
-    )
-    .replace(/[\u0000-\u001f]/g, " ")
-    .slice(0, length);
-}
 
 export function selectionContext(
   model: RunModel,
@@ -42,22 +38,22 @@ export function selectionContext(
       : node?.phase ?? model.phases.at(-1);
   const context = {
     runId: model.runId,
-    workflow: bounded(model.name ?? "workflow", 160),
+    workflow: model.name ?? "workflow",
     status: status?.status ?? model.status,
     selection:
       selected?.kind === "agent"
         ? {
             kind: "agent",
             callIndex: selected.callIndex,
-            label: bounded(node?.label ?? "unknown", 160),
+            label: node?.label ?? "unknown",
             status: node?.status,
             scope: node?.scope,
-            error: node?.errorText ? bounded(node.errorText, 320) : undefined,
+            error: node?.errorText ? node.errorText : undefined,
           }
         : selected?.kind === "phase"
         ? { kind: "phase", phaseIndex: selected.phaseIndex }
         : { kind: "run" },
-    phase: phase ? bounded(phase, 160) : undefined,
+    phase,
     requiredInput: status?.setup?.request
       ? "setup"
       : status?.pendingPermissions?.length
@@ -69,10 +65,7 @@ export function selectionContext(
       (candidate) => candidate.status === "running",
     ).length,
   };
-  return `[workflow monitor context] ${JSON.stringify(context)}`.slice(
-    0,
-    CONTEXT_MAX_CHARS,
-  );
+  return `[workflow monitor context] ${JSON.stringify(context)}`;
 }
 
 export function discussionMessage(
@@ -141,20 +134,7 @@ export function modelMessageText(
   runId: string,
   event: PersistedRunEvent,
 ): string | undefined {
-  switch (event.type) {
-    case "complete":
-      return `[workflow run ${runId}] Run completed. Its exact result is available.`;
-    case "error":
-      return `[workflow run ${runId}] Run failed${
-        event.errorRecord.message
-          ? `: ${bounded(event.errorRecord.message, 320)}`
-          : ""
-      }.`;
-    case "stopped":
-      return `[workflow run ${runId}] Run stopped.`;
-    default:
-      return undefined;
-  }
+  return terminalNoticeText(runId, event);
 }
 
 /** At-most-one active sender per event. A delivery/ack crash is inherently ambiguous to ui/message. */
@@ -200,7 +180,7 @@ export async function sendAutomaticMessage(
     if (!state.active || state.isCurrent?.() === false) return;
     const response = await app.sendMessage({
       role: "user",
-      content: [{ type: "text", text: text.slice(0, CONTEXT_MAX_CHARS) }],
+      content: [{ type: "text", text }],
     });
     if (response.isError) return;
     delivered = true;
@@ -257,43 +237,24 @@ export function sendRequiredInputMessages(
   status: RunStatusSnapshot,
   state: ModelMessageState,
 ): void {
-  if (status.setup?.request) {
-    void sendAutomaticMessage(
-      app,
-      status.runId,
-      `setup:${status.setup.request.id}`,
-      `[workflow run ${status.runId}] Setup needs ${status.setup.request.kind}. Inspect and answer the exact pending setup request.`,
-      state,
-    );
-  }
-  for (const request of status.pendingPermissions ?? []) {
-    void sendAutomaticMessage(
-      app,
-      status.runId,
-      `permission:${request.permissionId}`,
-      `[workflow run ${status.runId}] Permission is required for agent call ${request.callIndex}. Inspect the pending request and choose one of its exact options.`,
-      state,
-    );
-  }
+  const notices: RunNotice[] = [];
+  if (status.setup?.request)
+    notices.push(setupNotice(status.runId, status.setup.request));
+  for (const request of status.pendingPermissions ?? [])
+    notices.push(permissionNotice(status.runId, request));
   const checkpoint = status.checkpointContext;
   if (status.status === "paused" && checkpoint) {
-    void sendAutomaticMessage(
-      app,
-      status.runId,
-      `checkpoint:${checkpoint.callIndex}:${checkpoint.hash}`,
-      `[workflow run ${status.runId}] Checkpoint ${checkpoint.callIndex} needs an explicit ${checkpoint.kind} answer. The run is paused until it is answered.`,
-      state,
+    notices.push(
+      pausedNotice(status.runId, { reason: "checkpoint_required", checkpoint }),
     );
   } else if (status.status === "paused" && status.pauseReason) {
-    void sendAutomaticMessage(
-      app,
-      status.runId,
-      `paused:${status.pauseReason}:${status.authContext?.backendId ?? ""}`,
-      `[workflow run ${status.runId}] The run needs attention (${bounded(
-        status.pauseReason,
-        100,
-      )}). Read its current status before continuing.`,
-      state,
+    notices.push(
+      pausedNotice(status.runId, {
+        reason: status.pauseReason,
+        backendId: status.authContext?.backendId,
+      }),
     );
   }
+  for (const notice of notices)
+    void sendAutomaticMessage(app, status.runId, notice.id, notice.text, state);
 }

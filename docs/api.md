@@ -1731,6 +1731,19 @@ To try the shipped App in the official reference host, run
 `node packages/mcp-server/scripts/dev-app-host.mjs` from the repository root; its header describes
 basic-host setup. `AGENTPRISM_DEV_CWD=<project dir>` serves an existing run store.
 
+### Claude Code channels
+
+For hosts that cannot render the App, the server delivers the same automatic messages as
+[Claude Code channel](https://code.claude.com/docs/en/channels-reference) notifications. It declares
+`capabilities.experimental["claude/channel"]` on the legacy initialize result and emits
+`notifications/claude/channel` with `{ content, meta: { run_id, kind, status, event_id } }` for
+terminal outcomes, checkpoint and other pauses, parked permission requests, and pending setup
+requests, using the wording and ids in `src/run-notices.ts` that the App also uses. A session
+receives notifications only for runs its own `run`, `resume`, or `status` calls named; a session
+that inspects a run attaches to its later updates and nothing earlier is replayed. Hosts without a
+channel handler drop the notification. See the
+[package README](../packages/mcp-server/README.md#claude-code-channels) for enablement.
+
 ### The `repl` tool
 
 The server also registers the interactive model-facing tool **`repl`** — a persistent QuickJS-in-WASM JavaScript REPL, **one VM per `projectDir`**, for live, stateful subagent orchestration (the interactive complement to `workflow`'s deterministic scripts). Workspace state — bindings, pending subagent calls, raised checkpoints, logged values — persists in the VM across tool calls, MCP-session churn, and daemon restarts. Its full contract, with worked examples per action, is in the [package README](../packages/mcp-server/README.md#the-repl-tool); the surface in brief:
